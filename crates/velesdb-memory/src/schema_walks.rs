@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use std::borrow::Cow;
 
 /// Rewrites the rustdoc code links in every `description` of a published
-/// schema into the code span rustdoc shows for each (#2261).
+/// schema into their code spans (#2261).
 ///
 /// schemars copies doc comments verbatim, so an intra-doc link reached the
 /// wire as Markdown no client can resolve: ``[`X`](crate::path)`` renders as a
@@ -82,17 +82,17 @@ const DISAMBIGUATORS: [&str; 20] = [
     "primitive",
 ];
 
-/// `text` with each rustdoc code link replaced by the code span rustdoc shows
-/// for it, or `None` when it holds none: ``[`X`](path)`` and ``[`X`]`` become
-/// `` `X` ``, and ``[`fn@f`]`` becomes `` `f` ``, without its disambiguator. A
-/// link whose text is not one code span stays as written, prose and bare path
-/// alike (`[Name](path)`, `[a::B]`, `[f()]`): its neighbours could read
-/// differently once its brackets go ([`rustdoc_link`]). A bare `[name]` stays
-/// whether or not rustdoc resolves it (`map[key]`, `[sic]`), and so do
-/// `[0, 1]`, a shortcut code link whose code is not one word or does not read
-/// as a path (``[`a.b`]``) or is not singly spaced ([`code_link`]), and a web
-/// link. Whether a name resolves, a schema cannot check: rustdoc warns on one
-/// that does not, and CI builds each crate's docs with `-D warnings`.
+/// `text` with each rustdoc code link replaced by its code span, or `None` when
+/// it holds none: ``[`X`](path)`` and ``[`X`]`` become `` `X` ``, and
+/// ``[`fn@f`]`` becomes `` `f` ``, without its disambiguator. A link whose text
+/// is not one code span stays as written, prose and bare path alike
+/// (`[Name](path)`, `[a::B]`, `[f()]`): its neighbours could read differently
+/// once its brackets go ([`rustdoc_link`]). A bare `[name]` stays whether or
+/// not rustdoc resolves it (`map[key]`, `[sic]`), and so do `[0, 1]`, a
+/// shortcut code link whose code is not one word or does not read as a path
+/// (``[`a.b`]``) or is not singly spaced ([`code_link`]), and a web link.
+/// Whether a name resolves, a schema cannot check: rustdoc warns on one that
+/// does not, and CI builds each crate's docs with `-D warnings`.
 ///
 /// It also leaves as written every link in a text it cannot read exactly
 /// ([`scan_is_exact`]), such as one holding a reference-style link
@@ -110,8 +110,12 @@ const DISAMBIGUATORS: [&str; 20] = [
 /// only inside the links it rewrites, so a second pass leaves what the first
 /// left.
 ///
-/// What the rewrite keeps is the text rustdoc shows. A heading's anchor id is
-/// the renderer's own: rustdoc derives it from the source, a disambiguator
+/// What the rewrite keeps is the code as written, less a shortcut code link's
+/// disambiguator. That is the text rustdoc shows, with one exception the
+/// rewrite does not reproduce: rustdoc 1.90 can show a code link with the text
+/// of another link to the same page, so that on `el`'s page
+/// ``[Self] and [`el`]`` shows `Self` twice. A heading's anchor id is the
+/// renderer's own too: rustdoc derives it from the source, a disambiguator
 /// included, and a client derives its own from the text published here.
 pub(super) fn unlink_rustdoc(text: &str) -> Option<String> {
     if !scan_is_exact(text) {
@@ -227,8 +231,8 @@ fn unlink_once(text: &str) -> Option<String> {
     changed.then_some(out)
 }
 
-/// What rustdoc shows for the link the `[` between `before` and `after` opens,
-/// and the text after it, when the rewrite reads one there. It leaves a link a
+/// What the rewrite shows for the link the `[` between `before` and `after`
+/// opens, and the text after it, when it reads one there. It leaves a link a
 /// backtick touches, before or after it: the code span it shows would merge
 /// with that backtick's run (`a``b` reads as one span), and a space between
 /// them would show what rustdoc does not. It leaves a link a `'` follows:
@@ -328,7 +332,7 @@ fn label_end(after: &str) -> Option<usize> {
 }
 
 /// When `after` (the text following a `[`) starts a rustdoc link whose text is
-/// one code span, what rustdoc shows for it and the text after the link. A
+/// one code span, what the rewrite shows for it and the text after the link. A
 /// reference-style link (`[text][label]`) never gets here: the scan leaves any
 /// text holding one ([`scan_is_exact`]).
 ///

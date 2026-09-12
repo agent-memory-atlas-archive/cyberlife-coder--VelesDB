@@ -795,6 +795,17 @@ mod unlink {
         }
     }
 
+    /// A code link shows its own code even after another link to the same
+    /// page: rustdoc 1.90 shows ``[Self] and [`el`]`` on `el`'s page as `Self`
+    /// twice, a quirk the rewrite does not reproduce.
+    #[test]
+    fn a_code_link_shows_its_own_code_after_a_link_to_its_page() {
+        assert_eq!(
+            unlink_rustdoc("see [Self] and [`el`]").as_deref(),
+            Some("see [Self] and `el`")
+        );
+    }
+
     /// A shortcut code link whose code holds whitespace but single spaces
     /// between words stays as written: rustdoc 1.90 keeps the disambiguator
     /// after a form feed or a vertical tab, and the rewrite leaves any other

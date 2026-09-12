@@ -36,22 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the lock released, and the index is read again once the lock is retaken,
   so a concurrent repair wins over the walk (#2246, P5).
 
-- **Tool schemas published rustdoc link syntax as text.** schemars copies
-  each field's doc comment into its JSON Schema `description`, so the schemas
-  every MCP client reads carried intra-doc links only rustdoc resolves —
+- **Tool schemas published rustdoc link syntax as text.** schemars copies each
+  field's doc comment into its JSON Schema `description`, so the schemas every
+  MCP client reads carried intra-doc links only rustdoc resolves —
   ``[`Name`]``, ``[`Name`](crate::path)`` — 137 of them across 102
   descriptions of `docs/reference/mcp-tools.json`. The input and output
-  schemas now show each code link as the code span rustdoc shows for it:
-  ``[`Name`]`` becomes `` `Name` ``, and a shortcut code link drops its
-  disambiguator, so ``[`fn@f`]`` becomes `` `f` ``. Only a link whose text
-  is one code span is rewritten: its backticks leave the Markdown around it
-  reading the same, where prose or a bare path (`[text](crate::path)`,
-  `[a::B]`) could turn a neighbour bold or into a list item once its
-  brackets go, so such a link stays as written. Code spans are copied
-  verbatim. A bare `[name]` stays whether or not rustdoc resolves it
-  (`map[key]`, `[sic]`), as do `[0, 1]` and a web link. Only `description`
-  strings are rewritten, never instance data such as a `default`, so nothing
-  else in a schema changes.
+  schemas now show each code link as its code span: ``[`Name`]`` becomes
+  `` `Name` ``, and a shortcut code link drops its disambiguator, so
+  ``[`fn@f`]`` becomes `` `f` ``. Only a link whose text is one code span is
+  rewritten: its backticks leave the Markdown around it reading the same,
+  where prose or a bare path (`[text](crate::path)`, `[a::B]`) could turn a
+  neighbour bold or into a list item once its brackets go, so such a link
+  stays as written. Code spans are copied verbatim. A bare `[name]` stays
+  whether or not rustdoc resolves it (`map[key]`, `[sic]`), as do `[0, 1]` and
+  a web link. Only `description` strings are rewritten, never instance data
+  such as a `default`, so nothing else in a schema changes.
   The rewrite leaves every link in a description it cannot read exactly: one
   holding a backslash, a tab or four spaces, a code fence, a `<` or an image
   outside code, a table, a reference-style link or a reference or footnote
