@@ -111,12 +111,13 @@ const DISAMBIGUATORS: [&str; 20] = [
 /// left.
 ///
 /// What the rewrite keeps is the code as written, less a shortcut code link's
-/// disambiguator. That is the text rustdoc shows, with one exception the
-/// rewrite does not reproduce: rustdoc 1.90 can show a code link with the text
-/// of another link to the same page, so that on `el`'s page
-/// ``[Self] and [`el`]`` shows `Self` twice. A heading's anchor id is the
-/// renderer's own too: rustdoc derives it from the source, a disambiguator
-/// included, and a client derives its own from the text published here.
+/// disambiguator and any space after it. That is the text rustdoc shows, with
+/// one exception the rewrite does not reproduce: rustdoc 1.90 can show a code
+/// link with the path another link to the same page is written with, so that on
+/// `el`'s page ``[`x`](Self) and [`el`]`` shows `x` and `Self`. A heading's
+/// anchor id is the renderer's own too: rustdoc derives it from the source, a
+/// disambiguator included, and a client derives its own from the text published
+/// here.
 pub(super) fn unlink_rustdoc(text: &str) -> Option<String> {
     if !scan_is_exact(text) {
         return None;

@@ -796,13 +796,18 @@ mod unlink {
     }
 
     /// A code link shows its own code even after another link to the same
-    /// page: rustdoc 1.90 shows ``[Self] and [`el`]`` on `el`'s page as `Self`
-    /// twice, a quirk the rewrite does not reproduce.
+    /// page. On `el`'s page rustdoc 1.90 shows ``[Self] and [`el`]`` as `Self`
+    /// twice, and ``[`x`](Self) and [`el`]`` as `x` and `Self`, the path the
+    /// first link is written with: a quirk the rewrite does not reproduce.
     #[test]
     fn a_code_link_shows_its_own_code_after_a_link_to_its_page() {
         assert_eq!(
             unlink_rustdoc("see [Self] and [`el`]").as_deref(),
             Some("see [Self] and `el`")
+        );
+        assert_eq!(
+            unlink_rustdoc("see [`x`](Self) and [`el`]").as_deref(),
+            Some("see `x` and `el`")
         );
     }
 
