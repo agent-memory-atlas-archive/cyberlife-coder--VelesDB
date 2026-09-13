@@ -201,7 +201,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # nightly: installed here, so rustup never installs it mid-step.
+      # nightly: cargo fuzz needs it; installed here, so rustup never installs it mid-step.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly
         with:
           toolchain: nightly
@@ -267,7 +267,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # nightly: installed here, so rustup never installs it mid-step.
+      # nightly: cargo careful needs it; installed here, so rustup never installs it mid-step.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly
         with:
           toolchain: nightly

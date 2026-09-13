@@ -1,6 +1,9 @@
 # VelesDB Benchmark Dockerfile
-# Once built on nightly for the anndists dependency; the workspace no longer
-# depends on it, so this image builds with rust-toolchain.toml's toolchain.
+# The name is historical: this image once built on nightly for the anndists
+# dependency, which the workspace no longer has. It now builds with the
+# toolchain rust-toolchain.toml pins; scripts/bump_version.py,
+# scripts/bump-version.ps1 and scripts/check-version-sync.py still refer to it
+# by this name.
 
 FROM rust:slim-bookworm AS builder
 

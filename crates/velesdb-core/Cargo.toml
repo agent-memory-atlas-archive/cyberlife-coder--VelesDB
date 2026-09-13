@@ -109,7 +109,7 @@ version = "2.7"
 ## - `update-check`: Enables HTTP client for automatic version checking.
 ## - `openapi`: Enables utoipa::ToSchema derives on api_types DTOs.
 ## - `loom`: Enables loom-based concurrency testing (built with `--cfg loom`).
-##   Run with: `RUSTFLAGS="--cfg loom" cargo test --features loom,persistence --test loom_tests`
+##   Run with: `LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS="--cfg loom" cargo test -p velesdb-core --features loom,persistence --test loom_tests -- --test-threads=1`
 ## - `bytemuck`: Compatibility only — see the note on its line below.
 default = ["persistence"]
 gpu = ["wgpu", "pollster", "bytemuck"]

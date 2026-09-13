@@ -1,5 +1,6 @@
-# Build stage
-FROM rust:1.98-bookworm AS builder
+# Build stage. Unversioned on purpose: this image only carries rustup; the
+# toolchain is the one rust-toolchain.toml pins, installed below.
+FROM rust:bookworm AS builder
 
 LABEL maintainer="VelesDB Team <contact@wiscale.fr>"
 LABEL version="6.0.0"
