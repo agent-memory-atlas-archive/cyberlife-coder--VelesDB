@@ -165,10 +165,19 @@ impl WithClause {
     }
 
     /// The raw value `WITH (ef_search = ...)` gives, or `None` when the
-    /// option is absent. See [`Self::ef_search`] for the validated reading.
+    /// option is absent; a repeated key's first entry applies. See
+    /// [`Self::ef_search`] for the validated reading.
     #[must_use]
     pub fn ef_search_value(&self) -> Option<&WithValue> {
-        self.get("ef_search")
+        self.ef_search_values().next()
+    }
+
+    /// Every value the clause gives `ef_search`, in order.
+    fn ef_search_values(&self) -> impl Iterator<Item = &WithValue> {
+        self.options
+            .iter()
+            .filter(|opt| opt.key.eq_ignore_ascii_case("ef_search"))
+            .map(|opt| &opt.value)
     }
 
     /// The `ef_search` `WITH (ef_search = ...)` asks for, checked against the
@@ -176,16 +185,24 @@ impl WithClause {
     /// is absent. Unlike [`Self::get_ef_search`], a value that is not an
     /// integer, or one outside `[16, 4096]` — `-1`, say, which
     /// [`Self::get_ef_search`] would cast to near `usize::MAX` — is an error
-    /// here, never a silent fall-back to no override (#2274).
+    /// here, never a silent fall-back to no override (#2274). Every value a
+    /// repeated key gives is checked, even one the first shadows; the first
+    /// applies, as [`Self::ef_search_value`] reads it.
     ///
     /// # Errors
     ///
-    /// Returns a message naming the accepted type or range for a value that
-    /// is not an integer, or an integer outside the documented range.
+    /// Returns a message naming the accepted type or range for the first value
+    /// that is not an integer, or an integer outside the documented range.
     pub fn ef_search(&self) -> Result<Option<usize>, String> {
-        let Some(value) = self.ef_search_value() else {
-            return Ok(None);
-        };
+        let values = self
+            .ef_search_values()
+            .map(Self::parse_ef_search_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(values.first().copied())
+    }
+
+    /// Reads one value given for `ef_search` against the documented range.
+    fn parse_ef_search_value(value: &WithValue) -> Result<usize, String> {
         let Some(raw) = value.as_integer() else {
             return Err(format!(
                 "ef_search must be an integer between {} and {}",
@@ -193,7 +210,7 @@ impl WithClause {
                 crate::api_types::MAX_EF_SEARCH
             ));
         };
-        crate::api_types::parse_with_ef_search(raw).map(Some)
+        crate::api_types::parse_with_ef_search(raw)
     }
 
     /// Gets timeout in milliseconds if specified.

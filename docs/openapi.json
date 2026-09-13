@@ -5586,7 +5586,7 @@
               "integer",
               "null"
             ],
-            "description": "HNSW `ef_search` parameter, in `[16, 4096]`. Any other value is\nrefused with a `400` naming the range (#2274). A batch entry's is\nchecked but not applied, like `mode`.",
+            "description": "HNSW `ef_search` parameter, in `[16, 4096]`: an integer outside the\nrange is refused with a `400` naming it (#2274), and a value that is\nnot a non-negative integer fails the body's JSON parsing with a `422`,\nas any mistyped field does. It wins over `mode` for a dense search with\nno `filter`; a filtered search applies neither, and a batch entry's is\nchecked but not applied.",
             "example": 128,
             "minimum": 0
           },

@@ -194,6 +194,34 @@ fn test_session_mode_is_not_injected_over_an_inline_quality() {
     }
 }
 
+/// An inline `ef_search` the validator refuses is an override too: the
+/// session value must not be injected next to it, so the query still fails
+/// with `V014` (#2274).
+#[test]
+fn test_session_ef_search_is_not_injected_over_an_inline_bad_value() {
+    let mut session = SessionSettings::new();
+    session.set("ef_search", "512").expect("set ef_search");
+    for query in [
+        "SELECT * FROM docs WHERE vector NEAR [1.0, 2.0] WITH (ef_search = 'high')",
+        "SELECT * FROM docs WHERE vector NEAR [1.0, 2.0] WITH (ef_search = true)",
+    ] {
+        let mut parsed = velesdb_core::velesql::Parser::parse(query).expect("parse");
+        crate::repl_execute::apply_session_settings(&mut parsed, &session);
+        let with = parsed
+            .select
+            .with_clause
+            .as_ref()
+            .expect("the WITH clause stays");
+        let given = with
+            .options
+            .iter()
+            .filter(|opt| opt.key.eq_ignore_ascii_case("ef_search"))
+            .count();
+        assert_eq!(given, 1, "no session ef_search next to {query}");
+        assert!(with.ef_search().is_err(), "{query} must still fail");
+    }
+}
+
 /// Regression (parity backlog #19): an inline `WITH(ef_search=N)` must win over
 /// the session value (the session injects only when no inline override exists).
 #[test]

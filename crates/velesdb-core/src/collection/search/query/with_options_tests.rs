@@ -572,6 +572,76 @@ fn test_ef_search_non_integer_is_rejected() {
     assert!(err.to_string().contains("V014"), "{err}");
 }
 
+/// `from_with_clause` refuses a bad `ef_search` itself, for a direct caller
+/// the query validator never saw (#2274).
+#[test]
+fn test_query_search_options_from_with_clause_bad_ef_search_is_rejected() {
+    for value in [
+        crate::velesql::WithValue::Integer(-1),
+        crate::velesql::WithValue::Integer(4097),
+        crate::velesql::WithValue::String("high".to_string()),
+    ] {
+        let with = crate::velesql::WithClause::new().with_option("ef_search", value);
+        let err = QuerySearchOptions::from_with_clause(Some(&with))
+            .expect_err("a bad ef_search should be rejected");
+        assert!(err.to_string().contains("ef_search"), "{err}");
+    }
+}
+
+/// A bad `ef_search` a repeated key shadows fails the query too, while two
+/// valid values run with the first (#2274).
+#[test]
+fn test_ef_search_shadowed_by_a_repeated_key_is_rejected() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    for with in [
+        "(ef_search = 64, ef_search = -1)",
+        "(ef_search = 'high', ef_search = 64)",
+    ] {
+        let query = format!("SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH {with}");
+        let err = col.execute_query_str(&query, &params).expect_err(&query);
+        assert!(err.to_string().contains("V014"), "{query}: {err}");
+    }
+    col.execute_query_str(
+        "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 64, ef_search = 128)",
+        &params,
+    )
+    .expect("two valid values run");
+}
+
+/// `WithClause::ef_search` checks every value a repeated key gives, applies
+/// the first, and accepts both ends of `[16, 4096]` (#2274).
+#[test]
+fn test_with_clause_ef_search_reads_every_value() {
+    use crate::velesql::{WithClause, WithValue};
+    let clause = |values: Vec<WithValue>| {
+        values.into_iter().fold(WithClause::new(), |with, value| {
+            with.with_option("ef_search", value)
+        })
+    };
+    assert_eq!(WithClause::new().ef_search(), Ok(None));
+    for (values, ef) in [
+        (vec![WithValue::Integer(64), WithValue::Integer(128)], 64),
+        (vec![WithValue::Integer(16)], 16),
+        (vec![WithValue::Integer(4096)], 4096),
+    ] {
+        assert_eq!(clause(values).ef_search(), Ok(Some(ef)));
+    }
+    for values in [
+        vec![WithValue::Integer(64), WithValue::Integer(-1)],
+        vec![
+            WithValue::Integer(64),
+            WithValue::String("high".to_string()),
+        ],
+        vec![WithValue::Integer(15)],
+        vec![WithValue::Integer(4097)],
+    ] {
+        let with = clause(values);
+        assert!(with.ef_search().is_err(), "{with:?}");
+    }
+}
+
 // --- timeout_ms edge cases ---
 
 #[test]

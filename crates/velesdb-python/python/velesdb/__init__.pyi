@@ -530,7 +530,9 @@ class Collection:
         """Search with custom HNSW ef_search parameter.
 
         Raises:
-            ValueError: if ef_search is outside [16, 4096].
+            ValueError: if ef_search is outside [16, 4096], a negative value
+                included.
+            TypeError: if ef_search is not an int.
         """
         ...
 

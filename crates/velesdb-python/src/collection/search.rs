@@ -153,7 +153,8 @@ impl Collection {
     /// Search for similar vectors with custom HNSW ef_search parameter.
     ///
     /// `ef_search` must be in `[16, 4096]` (`docs/VELESQL_SPEC.md`); an
-    /// out-of-range value raises `ValueError` rather than running an
+    /// out-of-range value, a negative one included, raises `ValueError` rather
+    /// than running an
     /// uncapped graph traversal (#2274).
     #[pyo3(signature = (vector, top_k = 10, ef_search = 128, *, principal = None, tenant = None))]
     fn search_with_ef(
@@ -161,12 +162,13 @@ impl Collection {
         py: Python<'_>,
         vector: Py<PyAny>,
         top_k: usize,
-        ef_search: usize,
+        ef_search: i64,
         principal: Option<String>,
         tenant: Option<String>,
     ) -> PyResult<Vec<Py<PyAny>>> {
         self.ensure_vector()?;
-        velesdb_core::api_types::validate_ef_search(ef_search).map_err(PyValueError::new_err)?;
+        let ef_search = velesdb_core::api_types::parse_with_ef_search(ef_search)
+            .map_err(PyValueError::new_err)?;
         let query_vector = extract_vector(py, &vector)?;
 
         // Routed through the read gate as a dense read carrying the ef override.

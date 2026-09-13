@@ -351,9 +351,12 @@ pub struct SearchRequest {
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(example = "balanced"))]
     pub mode: Option<String>,
-    /// HNSW `ef_search` parameter, in `[16, 4096]`. Any other value is
-    /// refused with a `400` naming the range (#2274). A batch entry's is
-    /// checked but not applied, like `mode`.
+    /// HNSW `ef_search` parameter, in `[16, 4096]`: an integer outside the
+    /// range is refused with a `400` naming it (#2274), and a value that is
+    /// not a non-negative integer fails the body's JSON parsing with a `422`,
+    /// as any mistyped field does. It wins over `mode` for a dense search with
+    /// no `filter`; a filtered search applies neither, and a batch entry's is
+    /// checked but not applied.
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(example = 128))]
     pub ef_search: Option<usize>,

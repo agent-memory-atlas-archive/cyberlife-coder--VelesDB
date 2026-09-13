@@ -3146,6 +3146,133 @@ async fn test_search_out_of_range_ef_search_returns_400() {
     }
 }
 
+/// A valid `ef_search` reaches the search: over REST it wins over `mode` for
+/// a dense search, so with `limits.max_perfect_mode_vectors` at 1, `perfect`
+/// alone is refused over two points while `perfect` with `ef_search = 64`
+/// runs, on `/search` and `/search/ids` (#2274).
+#[tokio::test]
+async fn test_a_valid_ef_search_reaches_the_search() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = TempDir::new().expect("Failed to create config dir");
+    let config_path = config_dir.path().join("velesdb.toml");
+    std::fs::write(&config_path, "[limits]\nmax_perfect_mode_vectors = 1\n")
+        .expect("Failed to write config");
+    let app = create_test_app_with_core_config(&temp_dir, &config_path);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "ef_applied", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [
+        {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]},
+        {"id": 2, "vector": [0.0, 1.0, 0.0, 0.0]},
+    ]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/ef_applied/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    for uri in [
+        "/collections/ef_applied/search",
+        "/collections/ef_applied/search/ids",
+    ] {
+        let perfect = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "perfect"});
+        let response = app
+            .clone()
+            .oneshot(post(uri, &perfect))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let with_ef = json!({
+            "vector": [1.0, 0.0, 0.0, 0.0],
+            "top_k": 1,
+            "mode": "perfect",
+            "ef_search": 64
+        });
+        let response = app
+            .clone()
+            .oneshot(post(uri, &with_ef))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+/// A refused `ef_search` counts one request error, as a refused `mode` does:
+/// `query_errors` rises by one for each out-of-range request on `/search` and
+/// `/search/ids`, and a request at either end of the range adds none (#2274).
+#[tokio::test]
+async fn test_bad_ef_search_counts_one_request_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let (app, state) = create_test_app_with_state(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "ef_errors", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/ef_errors/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let errors = || {
+        state
+            .operational_metrics
+            .query_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let before = errors();
+    let mut refused = 0_u64;
+    for uri in [
+        "/collections/ef_errors/search",
+        "/collections/ef_errors/search/ids",
+    ] {
+        for ef in [15, 4097] {
+            let bad = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": ef});
+            let response = app
+                .clone()
+                .oneshot(post(uri, &bad))
+                .await
+                .expect("Request failed");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri} {ef}");
+            refused += 1;
+        }
+        for ef in [16, 4096] {
+            let good = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": ef});
+            let response = app
+                .clone()
+                .oneshot(post(uri, &good))
+                .await
+                .expect("Request failed");
+            assert_eq!(response.status(), StatusCode::OK, "{uri} {ef}");
+        }
+    }
+    assert_eq!(errors() - before, refused);
+}
+
 /// A bad `ef_search` is the client's error, not the collection's: refusing it
 /// records no circuit-breaker failure, exactly like a bad `mode` (#2267), and
 /// a `/search/batch` entry is checked too, naming its index, though the batch
