@@ -225,7 +225,7 @@ the platforms and toolchains the project builds and tests on.
 | Windows `x86_64` (MSVC) | Supported | CI: `--all-features` check on `windows-latest` |
 | macOS aarch64 / `x86_64` | Supported | Release pipeline builds both Darwin targets |
 | `wasm32-unknown-unknown` | Supported, restricted | CI checks `--no-default-features` only; no filesystem persistence |
-| Rust nightly | Scheduled deep-quality jobs only | Miri, fuzzing, ThreadSanitizer and cargo-careful; every other build uses `rust-toolchain.toml` |
+| Rust nightly | Scheduled deep-quality jobs only | Miri, fuzzing, `ThreadSanitizer` and cargo-careful; every other build uses `rust-toolchain.toml` |
 
 ## Troubleshooting
 
