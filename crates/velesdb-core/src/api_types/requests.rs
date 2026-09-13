@@ -358,7 +358,13 @@ pub struct SearchRequest {
     /// no `filter`; a filtered search applies neither, and a batch entry's is
     /// checked but not applied.
     #[serde(default)]
-    #[cfg_attr(feature = "openapi", schema(example = 128))]
+    // utoipa's `minimum` and `maximum` take only a literal: velesdb-server's
+    // `test_openapi_ef_search_bounds_are_the_validators` pins these to
+    // `MIN_EF_SEARCH` and `MAX_EF_SEARCH`.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = 128, minimum = 16, maximum = 4096)
+    )]
     pub ef_search: Option<usize>,
     /// Query timeout in milliseconds.
     #[serde(default)]

@@ -34,7 +34,13 @@ use crate::handlers::helpers::{
     responses(
         (status = 200, description = "Batch search results", body = BatchSearchResponse),
         (status = 404, description = "Collection not found", body = ErrorResponse),
-        (status = 400, description = "Invalid request", body = ErrorResponse)
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (
+            status = 422,
+            description = "A field of the wrong type in an entry, such as a negative ef_search",
+            body = String,
+            content_type = "text/plain"
+        )
     )
 )]
 pub async fn batch_search(

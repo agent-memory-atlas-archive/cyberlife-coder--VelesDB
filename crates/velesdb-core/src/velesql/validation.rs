@@ -75,14 +75,20 @@ impl QueryValidator {
         Self::validate_vector_group_by(stmt)?;
         super::validation_fusion::validate_fusion(stmt)?;
         #[cfg(feature = "persistence")]
-        Self::validate_search_mode(stmt)?;
-        #[cfg(feature = "persistence")]
-        Self::validate_ef_search(stmt)?;
+        Self::validate_with_options(stmt)?;
         stmt.where_clause.as_ref().map_or(Ok(()), |condition| {
             // V011 anchor rule (explicit and implicit binding, guards
             // G1/G2/G3) lives in `validation_anchor.rs`.
             super::validation_anchor::walk_graph_match_anchors(condition, &stmt.from_alias)
         })
+    }
+
+    /// Validates the search options `WITH (...)` gives, before any dispatch:
+    /// the mode (`V013`), then `ef_search` (`V014`).
+    #[cfg(feature = "persistence")]
+    fn validate_with_options(stmt: &super::ast::SelectStatement) -> Result<(), ValidationError> {
+        Self::validate_search_mode(stmt)?;
+        Self::validate_ef_search(stmt)
     }
 
     /// Validates the search mode `WITH (mode = ...)` asks for, before any

@@ -96,7 +96,13 @@ fn execute_with_cb(
     responses(
         (status = 200, description = "Search results", body = SearchResponse),
         (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
-        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse)
+        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse),
+        (
+            status = 422,
+            description = "A field of the wrong type, such as a negative or non-integer ef_search",
+            body = String,
+            content_type = "text/plain"
+        )
     )
 )]
 #[allow(clippy::result_large_err)]
@@ -382,7 +388,13 @@ pub async fn hybrid_search(
     responses(
         (status = 200, description = "IDs-only search results", body = SearchIdsResponse),
         (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
-        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse)
+        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse),
+        (
+            status = 422,
+            description = "A field of the wrong type, such as a negative or non-integer ef_search",
+            body = String,
+            content_type = "text/plain"
+        )
     )
 )]
 #[allow(clippy::result_large_err)]

@@ -110,6 +110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load call alone reports the cost as gone when it has only moved.
 
 ### Fixed
+- **VelesQL's `ef_search` overrides `mode`, as documented (#2274).** A query
+  that set both ran at the `mode` and ignored the `ef_search`, though
+  `docs/VELESQL_SPEC.md` said `ef_search` overrides `mode` and REST resolves
+  the pair that way; and the CLI's REPL injected its session `mode` into
+  every query naming none, so neither `\set ef_search` nor an inline
+  `WITH (ef_search = N)` ever reached its search. An explicit `ef_search` now
+  wins over `mode`, or its alias `quality`, on the plain and the filtered
+  vector path, through one resolution. The REPL adds its session setting
+  only to a query that names neither, and then the one it holds (its
+  `ef_search` when set, else its `mode`), so an inline `mode` also beats a
+  session `ef_search`.
+
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
   served at `GET /api-docs/openapi.json` by a server built with
@@ -504,27 +516,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `usize::MAX` and ran an uncapped graph traversal, neither exhaustive nor
   covered by `limits.max_perfect_mode_vectors`; a non-integer value (a typo,
   `ef_search = 'high'`) was silently ignored. `api_types::validate_ef_search`
-  (already non-negative input — REST, the CLI, the config file, bindings) and
-  `api_types::parse_with_ef_search` (VelesQL's signed grammar) now reject such
-  a value, and every entry point checks it:
+  (input already known to be non-negative: REST, the CLI, the config file)
+  and `api_types::parse_with_ef_search` (VelesQL's signed grammar, and the
+  Python binding's `int`) now reject such a value, and every entry point
+  checks it:
   - VelesQL checks `ef_search` in the query validator, before any dispatch:
     every query shape fails with `V014`, mirroring `V013` for `mode` (#2267),
     and so does a bad value a repeated `ef_search` key shadows.
     `WithClause::ef_search` is the one validated reading; `get_ef_search`
-    keeps its old silent-drop behavior for callers already past validation,
-    and `ef_search_value` reads whether an inline value was given at all,
+    keeps its silent-drop behavior for callers already past validation, and
+    now drops a negative value, as its documentation says, instead of casting
+    it to `usize::MAX`; `ef_search_value` reads whether an inline value was
+    given at all,
     like `mode_value` does for `mode`;
   - REST answers `400` on `/search` and `/search/ids`, before the collection's
     circuit breaker counts the request, and on `/search/batch`, naming the
     entry (a batch checks each entry's `ef_search` but still applies none); a
     value that is not a non-negative integer fails the body's JSON parsing
-    with a `422`, as any mistyped field does;
+    with a `422`, as any mistyped field does. The OpenAPI document publishes
+    the range as the field's `minimum` and `maximum`, and that `422` on each
+    of the three paths;
   - the CLI's `\set ef_search` and the config file's `[search].ef_search`
     already enforced this same range independently; they now call the one
     definition instead of a copy of the bound;
-  - `velesdb-python`'s `search_with_ef` raises `ValueError` for an
-    out-of-range value, a negative one included, instead of passing it
-    straight to the HNSW traversal.
+  - `velesdb-python`'s `search_with_ef` raises `ValueError` for any `int`
+    outside the range, a negative one or one no `i64` holds included,
+    instead of passing it straight to the HNSW traversal or raising
+    `OverflowError`.
 
   This holds in every build with `persistence`. The WASM executor reads no
   `WITH` option, so it neither applies nor checks `ef_search`, matching `mode`.

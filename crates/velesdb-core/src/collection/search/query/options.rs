@@ -94,6 +94,18 @@ impl QuerySearchOptions {
     pub(crate) fn has_quality_overrides(&self) -> bool {
         self.quality.is_some() || self.ef_search.is_some() || self.force_rerank.is_some()
     }
+
+    /// The quality a search with these options runs at: an explicit
+    /// `ef_search`, which wins over `mode` as `docs/VELESQL_SPEC.md` documents
+    /// and REST resolves (#2274), else `mode`, else `Balanced`. The one
+    /// resolution the plain and the filtered vector path share.
+    #[must_use]
+    pub(crate) fn resolved_quality(&self) -> crate::SearchQuality {
+        self.ef_search
+            .map(crate::collection::search::vector_filter::ef_to_quality)
+            .or(self.quality)
+            .unwrap_or(crate::SearchQuality::Balanced)
+    }
 }
 
 /// Extracted query components from the WHERE clause.

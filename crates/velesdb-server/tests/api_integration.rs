@@ -3354,6 +3354,58 @@ async fn test_bad_ef_search_does_not_open_the_circuit_breaker_and_is_checked_in_
     assert!(error.contains("index 1"), "{error}");
 }
 
+/// An `ef_search` that is not a non-negative integer fails the body's JSON
+/// parsing: axum answers a plain-text `422` on every path whose body carries
+/// one, and the OpenAPI document declares that answer, in that content type,
+/// on each (#2274).
+#[tokio::test]
+async fn test_a_mistyped_ef_search_gets_the_documented_422() {
+    let spec = serde_json::to_value(velesdb_server::ApiDoc::openapi()).expect("the spec is JSON");
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app = create_test_app(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    for ef in [json!(-1), json!("high"), json!(1.5)] {
+        let search = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": ef});
+        for (path, body) in [
+            ("/collections/{name}/search", search.clone()),
+            ("/collections/{name}/search/ids", search.clone()),
+            (
+                "/collections/{name}/search/batch",
+                json!({"searches": [search.clone()]}),
+            ),
+        ] {
+            let uri = path.replace("{name}", "ef_typed");
+            let response = app
+                .clone()
+                .oneshot(post(&uri, &body))
+                .await
+                .expect("Request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{uri} {body}"
+            );
+            let content_type = &response.headers()[axum::http::header::CONTENT_TYPE];
+            assert!(
+                content_type.as_bytes().starts_with(b"text/plain"),
+                "{uri}: {content_type:?}"
+            );
+            let declared = &spec["paths"][path]["post"]["responses"]["422"]["content"];
+            assert!(
+                declared.get("text/plain").is_some(),
+                "{path} declares no plain-text 422: {declared}"
+            );
+        }
+    }
+}
+
 /// A valid `mode` reaches the search: with `limits.max_perfect_mode_vectors`
 /// at 1, the engine refuses `perfect` over two points on `/search` and
 /// `/search/ids`, where the same request with `fast` runs (#2267).

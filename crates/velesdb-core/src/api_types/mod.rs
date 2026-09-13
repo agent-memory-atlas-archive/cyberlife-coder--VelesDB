@@ -186,18 +186,23 @@ pub const MIN_EF_SEARCH: usize = 16;
 pub const MAX_EF_SEARCH: usize = 4096;
 
 /// The message every `ef_search` rejection reports, `shown` being the value
-/// as the caller gave it (a `usize` for [`validate_ef_search`], the original
+/// as the caller gave it: a `usize` for [`validate_ef_search`], the original
 /// `i64` for [`parse_with_ef_search`] so a negative value prints as itself
-/// rather than the `usize` it failed to become).
-fn ef_search_out_of_range(shown: impl std::fmt::Display) -> String {
+/// rather than the `usize` it failed to become, a `VelesQL` value that is not
+/// an integer as the query wrote it, and the Python `int` itself for one no
+/// `i64` holds, which the Python binding refuses before
+/// [`parse_with_ef_search`] can read it. Public so that each surface
+/// reporting a bad `ef_search` builds this one message instead of a copy.
+#[must_use]
+pub fn ef_search_out_of_range(shown: impl std::fmt::Display) -> String {
     format!("ef_search must be an integer between {MIN_EF_SEARCH} and {MAX_EF_SEARCH}, got {shown}")
 }
 
 /// Validates an `ef_search` value already known to be non-negative (REST, the
-/// CLI, the config file, bindings) against the documented range. `VelesQL`'s
+/// CLI, the config file) against the documented range. `VelesQL`'s
 /// `WITH (ef_search = ...)`, whose grammar accepts a leading `-` that a plain
-/// cast would wrap to a huge `usize`, goes through [`parse_with_ef_search`]
-/// instead (#2274).
+/// cast would wrap to a huge `usize`, and the Python binding, whose `int` can
+/// be negative too, go through [`parse_with_ef_search`] instead (#2274).
 ///
 /// # Errors
 ///
@@ -210,7 +215,8 @@ pub fn validate_ef_search(ef: usize) -> Result<(), String> {
     }
 }
 
-/// Parses a `WITH (ef_search = ...)` integer into a validated `usize`.
+/// Parses a signed `ef_search` into a validated `usize`: `VelesQL`'s
+/// `WITH (ef_search = ...)`, and the Python binding's `search_with_ef`.
 ///
 /// The `VelesQL` grammar accepts a leading `-` on any integer literal
 /// (`grammar.pest`'s `integer` rule), and casting a negative value straight

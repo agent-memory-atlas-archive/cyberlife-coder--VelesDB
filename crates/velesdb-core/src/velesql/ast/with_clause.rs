@@ -157,11 +157,10 @@ impl WithClause {
     /// it) uses [`Self::ef_search_value`], which sees a value this method
     /// cannot read (#2274).
     #[must_use]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get_ef_search(&self) -> Option<usize> {
         self.get("ef_search")
             .and_then(WithValue::as_integer)
-            .map(|v| v as usize)
+            .and_then(|v| usize::try_from(v).ok())
     }
 
     /// The raw value `WITH (ef_search = ...)` gives, or `None` when the
@@ -184,7 +183,7 @@ impl WithClause {
     /// documented range (`docs/VELESQL_SPEC.md`), or `None` when the option
     /// is absent. Unlike [`Self::get_ef_search`], a value that is not an
     /// integer, or one outside `[16, 4096]` — `-1`, say, which
-    /// [`Self::get_ef_search`] would cast to near `usize::MAX` — is an error
+    /// [`Self::get_ef_search`] drops as though none were given — is an error
     /// here, never a silent fall-back to no override (#2274). Every value a
     /// repeated key gives is checked, even one the first shadows; the first
     /// applies, as [`Self::ef_search_value`] reads it.
@@ -201,14 +200,12 @@ impl WithClause {
         Ok(values.first().copied())
     }
 
-    /// Reads one value given for `ef_search` against the documented range.
+    /// Reads one value given for `ef_search` against the documented range. A
+    /// value that is not an integer gets the message an integer outside the
+    /// range gets, naming the value as the query wrote it.
     fn parse_ef_search_value(value: &WithValue) -> Result<usize, String> {
         let Some(raw) = value.as_integer() else {
-            return Err(format!(
-                "ef_search must be an integer between {} and {}",
-                crate::api_types::MIN_EF_SEARCH,
-                crate::api_types::MAX_EF_SEARCH
-            ));
+            return Err(crate::api_types::ef_search_out_of_range(value));
         };
         crate::api_types::parse_with_ef_search(raw)
     }
@@ -273,6 +270,21 @@ pub enum WithValue {
     Boolean(bool),
     /// Identifier (unquoted string).
     Identifier(String),
+}
+
+/// Renders the value as a `VelesQL` `WITH` clause writes it: a string in
+/// single quotes, each quote inside doubled as the grammar reads it back; an
+/// identifier bare; a float with its fractional part.
+impl std::fmt::Display for WithValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String(s) => write!(f, "'{}'", s.replace('\'', "''")),
+            Self::Integer(v) => write!(f, "{v}"),
+            Self::Float(v) => write!(f, "{v:?}"),
+            Self::Boolean(v) => write!(f, "{v}"),
+            Self::Identifier(s) => f.write_str(s),
+        }
+    }
 }
 
 impl WithValue {

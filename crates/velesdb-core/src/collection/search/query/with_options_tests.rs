@@ -113,8 +113,9 @@ fn test_query_search_options_from_with_clause_invalid_mode_is_rejected() {
 }
 
 #[test]
-fn test_query_search_options_mode_overrides_ef_search() {
-    // When both mode and ef_search are set, mode takes precedence
+fn test_query_search_options_ef_search_overrides_mode() {
+    // When both mode and ef_search are set, both are captured and the
+    // explicit ef_search is the quality the search runs at (#2274).
     let with = crate::velesql::WithClause::new()
         .with_option(
             "mode",
@@ -123,8 +124,11 @@ fn test_query_search_options_mode_overrides_ef_search() {
         .with_option("ef_search", crate::velesql::WithValue::Integer(64));
     let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Accurate)));
-    // ef_search still captured for backward compat
     assert_eq!(opts.ef_search, Some(64));
+    assert!(matches!(
+        opts.resolved_quality(),
+        crate::SearchQuality::Custom(64)
+    ));
 }
 
 // ============================================================================
@@ -642,6 +646,103 @@ fn test_with_clause_ef_search_reads_every_value() {
     }
 }
 
+/// `get_ef_search` drops a negative literal, as its rustdoc says, instead of
+/// casting `-1` to `usize::MAX` (#2274).
+#[test]
+fn test_get_ef_search_drops_a_negative_value() {
+    let with = crate::velesql::WithClause::new()
+        .with_option("ef_search", crate::velesql::WithValue::Integer(-1));
+    assert_eq!(with.get_ef_search(), None);
+}
+
+/// A value that is not an integer gets the one message every out-of-range
+/// `ef_search` gets, naming the value as the query wrote it, rather than a
+/// second message built apart (#2274).
+#[test]
+fn test_a_non_integer_ef_search_gets_the_one_range_message() {
+    use crate::velesql::{WithClause, WithValue};
+    let refusal = |value| {
+        WithClause::new()
+            .with_option("ef_search", value)
+            .ef_search()
+            .expect_err("refused")
+    };
+    let above = refusal(WithValue::Integer(4097));
+    for (value, shown) in [
+        (WithValue::String("high".to_string()), "'high'"),
+        (WithValue::String("it's".to_string()), "'it''s'"),
+        (WithValue::Identifier("high".to_string()), "high"),
+        (WithValue::Float(1.5), "1.5"),
+        (WithValue::Boolean(true), "true"),
+    ] {
+        assert_eq!(refusal(value), above.replace("4097", shown));
+    }
+    let query = "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 'it''s')";
+    let with = crate::velesql::Parser::parse(query)
+        .expect("parse")
+        .select
+        .with_clause
+        .expect("the WITH clause");
+    assert_eq!(with.ef_search(), Err(above.replace("4097", "'it''s'")));
+}
+
+/// The collection of [`setup_with_options_collection`], capped so that it
+/// refuses `perfect`: which quality a search runs at becomes observable.
+fn setup_perfect_refusing_collection() -> (TempDir, Collection) {
+    let (dir, col) = setup_with_options_collection();
+    col.set_runtime_limits(crate::collection::RuntimeLimits {
+        max_perfect_mode_vectors: 1,
+        ..crate::collection::RuntimeLimits::default()
+    });
+    (dir, col)
+}
+
+/// An explicit `ef_search` wins over `mode`, or its alias `quality`, when
+/// both are set, as `docs/VELESQL_SPEC.md` documents and REST resolves: over
+/// a collection that refuses `perfect`, `mode = 'perfect'` alone fails while
+/// adding `ef_search = 64` runs (#2274). The plain vector path runs the query
+/// end to end; the filtered one is driven directly, with the options the same
+/// `WITH` text gives, because the planner answers a filtered query over a
+/// collection this small with a scan that applies neither option.
+#[test]
+fn test_explicit_ef_search_wins_over_mode_in_the_search() {
+    let (_dir, col) = setup_perfect_refusing_collection();
+    let v = [0.5_f32, 0.5, 0.5, 0.3];
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!(v));
+    let filter = crate::filter::Filter::new(crate::filter::Condition::Gte {
+        field: "idx".to_string(),
+        value: serde_json::json!(0),
+    });
+    let filtered = |query: &str| {
+        let with = crate::velesql::Parser::parse(query)
+            .expect("parse")
+            .select
+            .with_clause;
+        let opts = QuerySearchOptions::from_with_clause(with.as_ref()).expect("valid options");
+        col.search_with_filter_and_opts(&v, 5, &filter, &opts)
+    };
+    let query = |with: &str| format!("SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH {with}");
+    let perfect = query("(mode = 'perfect')");
+    for refused in [col.execute_query_str(&perfect, &params), filtered(&perfect)] {
+        let err = refused.expect_err(&perfect);
+        assert!(
+            err.to_string().contains("max_perfect_mode_vectors"),
+            "{perfect}: {err}"
+        );
+    }
+    for with in [
+        "(mode = 'perfect', ef_search = 64)",
+        "(ef_search = 64, quality = 'perfect')",
+    ] {
+        let both = query(with);
+        let plain = col.execute_query_str(&both, &params).expect(&both);
+        assert_eq!(plain.len(), 5, "{both}");
+        let narrowed = filtered(&both).expect(&both);
+        assert_eq!(narrowed.len(), 5, "filtered {both}");
+    }
+}
+
 // --- timeout_ms edge cases ---
 
 #[test]
@@ -672,7 +773,7 @@ fn test_mode_and_ef_search_both_set() {
         )
         .with_option("ef_search", crate::velesql::WithValue::Integer(4096));
     let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
-    // Both are available — search_with_opts() decides precedence
+    // Both are captured; `resolved_quality` lets the ef_search win (#2274).
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Fast)));
     assert_eq!(opts.ef_search, Some(4096));
 }
