@@ -42,6 +42,8 @@ permissions:
   contents: read
 
 env:
+  # rust-toolchain.toml's channel; pinned by scripts/tests/test_ci_toolchain_pin.py
+  RUST_VERSION: "1.90"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -121,8 +123,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # rust-toolchain.toml pins the toolchain; the rustup shim installs it
-      # on first cargo invocation.
+      # The toolchain rust-toolchain.toml pins, installed explicitly with the
+      # components it names — not by rustup in the middle of the first cargo
+      # step.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "velesdb-crossover"
@@ -203,7 +211,9 @@ jobs:
           save-if: true
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        # `+nightly`: this job installs nightly only, and a plain `cargo`
+        # would make rustup install rust-toolchain.toml's channel mid-step.
+        run: cargo +nightly install cargo-fuzz
 
       # VelesQL Parser - input utilisateur critique
       - name: Fuzz VelesQL parser
@@ -259,7 +269,9 @@ jobs:
           components: rust-src
 
       - name: Install cargo-careful
-        run: cargo install cargo-careful
+        # `+nightly`: this job installs nightly only, and a plain `cargo`
+        # would make rustup install rust-toolchain.toml's channel mid-step.
+        run: cargo +nightly install cargo-careful
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1

@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # rust-toolchain.toml's channel; pinned by scripts/tests/test_ci_toolchain_pin.py
+  RUST_VERSION: "1.90"
+
 jobs:
   gates:
     runs-on: ubuntu-latest
@@ -18,6 +22,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
       - name: Run production gates
         run: bash scripts/run-production-gates.sh

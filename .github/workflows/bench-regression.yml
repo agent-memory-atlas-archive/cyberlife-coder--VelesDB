@@ -29,6 +29,8 @@ permissions:
   contents: read
 
 env:
+  # rust-toolchain.toml's channel; pinned by scripts/tests/test_ci_toolchain_pin.py
+  RUST_VERSION: "1.90"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
@@ -47,6 +49,9 @@ jobs:
           path: base
 
       - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1

@@ -139,6 +139,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
         with:
@@ -187,6 +188,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
       
       - name: Add target
         run: rustup target add ${{ matrix.target }}
@@ -298,6 +300,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -603,6 +608,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack

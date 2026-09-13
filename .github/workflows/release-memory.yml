@@ -75,6 +75,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "release-memory"
@@ -225,6 +226,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "release-memory"
@@ -302,6 +304,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
       # Belt-and-braces: rust-toolchain.toml pins the same version as
       # `RUST_VERSION`, so the dtolnay step above already added the cross
@@ -530,12 +533,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
 
-      # rust-toolchain.toml pins the build to its own toolchain, which rustup
-      # auto-installs WITHOUT the cross-compilation target added above (the
-      # action only adds it to `stable`) — same fix as release-mcpb.yml's
-      # equivalent step, needed for the same reason (E0463 otherwise).
+      # Belt-and-braces, as in build-node: the step above already added the
+      # cross target to RUST_VERSION, the channel rust-toolchain.toml pins;
+      # this one targets whatever that file resolves to, so a drift between
+      # the two pins still cannot bring back E0463.
       - name: Add target to the pinned toolchain
         run: rustup target add ${{ matrix.target }}
 
