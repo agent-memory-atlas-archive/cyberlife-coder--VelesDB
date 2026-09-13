@@ -402,14 +402,11 @@ describe('wasmQuery', () => {
     await wasmQuery(ctx, 'docs', PURE_NEAR, { q: [0.1, 0.2] });
     expect(query).toHaveBeenCalledWith(expect.any(Float32Array), 10);
 
-    await wasmQuery(ctx, 'docs', PURE_NEAR, {
-      q: new Float32Array([0.1, 0.2]),
-      k: 5,
-    });
-    expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 5);
+    await wasmQuery(ctx, 'docs', PURE_NEAR, { q: new Float32Array([0.1, 0.2]) });
+    expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 10);
   });
 
-  it('clamps invalid k to default 10', async () => {
+  it("ignores params.k, as REST does: without LIMIT, core's default of 10 applies", async () => {
     const query = vi.fn(() => []);
     const store = buildStore({ query });
     const ctx = buildCtx('docs', store);
@@ -806,7 +803,7 @@ describe('wasmMultiQuerySearch — the weighted triple is checked in f32, as cor
 describe('wasmMultiQuerySearch — the weighted triple matters only under `weighted`, as in core (#2095)', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it.each(['rrf', 'average', 'maximum'] as const)(
+  it.each(['rrf', 'average', 'maximum', 'relative_score'] as const)(
     '%s passes a triple `weighted` would reject, since it never reads the weights',
     async (fusion) => {
       const multi = vi.fn(() => []);
@@ -822,7 +819,7 @@ describe('wasmMultiQuerySearch — the weighted triple matters only under `weigh
     }
   );
 
-  it.each(['rrf', 'average', 'maximum'] as const)(
+  it.each(['rrf', 'average', 'maximum', 'relative_score'] as const)(
     '%s accepts a partial triple, since it never reads the weights',
     async (fusion) => {
       const multi = vi.fn(() => []);
@@ -898,8 +895,8 @@ describe('WASM search — k <= 0 returns nothing, before any binding call (#2095
   });
 });
 
-describe('sparseHits — k <= 0 fetches nothing (#2095)', () => {
-  it.each([0, -1])('returns [] for k = %i without calling the sparse store', (k) => {
+describe('sparseHits — a k that is not a positive integer fetches nothing (#2095)', () => {
+  it.each([0, -1, 0.5])('returns [] for k = %s without calling the sparse store', (k) => {
     const sparse_search = vi.fn(() => [{ doc_id: 1n, score: 1 }]);
     const ids = newSparseIds();
     ids.store = buildStore({ sparse_search });
@@ -909,4 +906,129 @@ describe('sparseHits — k <= 0 fetches nothing (#2095)', () => {
     expect(sparseHits(ids, [7], [1], k)).toEqual([]);
     expect(sparse_search).not.toHaveBeenCalled();
   });
+});
+
+// ---------------------------------------------------------------------------
+// #2095 — one validation of a search's inputs, before any early return, as
+// core validates them (`validated_hybrid_params`, `validate_multi_query_inputs`).
+// ---------------------------------------------------------------------------
+
+/** How many times the binding was called through `store`. */
+function bindingCallCount(store: WasmVectorStore): number {
+  return Object.values(store)
+    .filter((f): f is ReturnType<typeof vi.fn> => typeof f === 'function' && 'mock' in f)
+    .reduce((total, f) => total + f.mock.calls.length, 0);
+}
+
+describe("WASM search — a search's inputs are validated before any early return (#2095)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([
+    ['search with k = 0', (ctx: WasmContext) => wasmSearch(ctx, 'docs', [0.1], { k: 0 })],
+    ['searchBatch with k = 0', (ctx: WasmContext) => wasmSearchBatch(ctx, 'docs', [{ vector: [0.1], k: 0 }])],
+    ['hybridSearch with k = 0', (ctx: WasmContext) => wasmHybridSearch(ctx, 'docs', [0.1], 'q', { k: 0 })],
+    ['multiQuerySearch with k = 0', (ctx: WasmContext) => wasmMultiQuerySearch(ctx, 'docs', [[0.1]], { k: 0 })],
+    [
+      'query with LIMIT 0',
+      (ctx: WasmContext) =>
+        wasmQuery(ctx, 'docs', 'SELECT * FROM docs WHERE vector NEAR $v LIMIT 0', { v: [0.1] }),
+    ],
+  ])('%s still refuses a vector of the wrong dimension', async (_label, call) => {
+    const store = buildStore();
+    const ctx = buildCtx('docs', store, { dimension: 2 });
+
+    const outcome = await settle(call(ctx));
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('DIMENSION_MISMATCH');
+    expect(bindingCallCount(store)).toBe(0);
+  });
+
+  it.each([
+    ['a short vector', [[0.1, 0.2], [0.3]]],
+    ['a long vector', [[0.1, 0.2], [0.3, 0.4, 0.5]]],
+  ])('multiQuerySearch refuses %s rather than pad or overflow it', async (_label, vectors) => {
+    const store = buildStore();
+    const ctx = buildCtx('docs', store, { dimension: 2 });
+
+    const outcome = await settle(wasmMultiQuerySearch(ctx, 'docs', vectors as number[][]));
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('DIMENSION_MISMATCH');
+    expect(bindingCallCount(store)).toBe(0);
+  });
+
+  it('searchBatch validates every entry before it runs any', async () => {
+    const store = buildStore({ search: vi.fn(() => [[1n, 0.9]]) });
+    const ctx = buildCtx('docs', store, { dimension: 2 });
+
+    const outcome = await settle(
+      wasmSearchBatch(ctx, 'docs', [{ vector: [0.1, 0.2] }, { vector: [0.1] }])
+    );
+
+    expect((outcome as VelesDBError).code).toBe('DIMENSION_MISMATCH');
+    expect(bindingCallCount(store)).toBe(0);
+  });
+
+  it.each([0.5, 1.5, Number.NaN])(
+    "every search path refuses k = %s: core's k is an integer",
+    async (k) => {
+      const denseStore = buildStore({ search: vi.fn(() => [[1n, 0.9]]) });
+      const dense = buildCtx('docs', denseStore, { dimension: 2 });
+      const sparseOnly = buildCtx('docs', buildStore(), { dimension: 0 });
+      const sparseIds = sparseOnly.getCollection('docs')!.sparseIds;
+      const sparse_search = vi.fn(() => [{ doc_id: 1n, score: 1 }]);
+      sparseIds.store = buildStore({ sparse_search });
+      sparseIds.byId.set(1n, 1);
+
+      const calls = [
+        () => wasmSearch(dense, 'docs', [0.1, 0.2], { k }),
+        () => wasmSearch(sparseOnly, 'docs', [], { k, sparseVector: { 7: 1 } }),
+        () => wasmSearchBatch(dense, 'docs', [{ vector: [0.1, 0.2], k }]),
+        () => wasmTextSearch(dense, 'docs', 'q', { k }),
+        () => wasmHybridSearch(dense, 'docs', [0.1, 0.2], 'q', { k }),
+        () => wasmMultiQuerySearch(dense, 'docs', [[0.1, 0.2]], { k }),
+      ];
+      for (const call of calls) {
+        const outcome = await settle(call());
+        expect(outcome).toBeInstanceOf(VelesDBError);
+        expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+      }
+      expect(bindingCallCount(denseStore)).toBe(0);
+      expect(sparse_search).not.toHaveBeenCalled();
+    }
+  );
+
+  it("query reads no k from its params, as REST does: the rows are LIMIT's, or core's default", async () => {
+    const query = vi.fn(() => [{ id: 1 }, { id: 2 }]);
+    const ctx = buildCtx('docs', buildStore({ query }), { dimension: 2 });
+    const NEAR = 'SELECT * FROM docs WHERE vector NEAR $v';
+
+    await wasmQuery(ctx, 'docs', NEAR, { v: [0.1, 0.2] });
+    await wasmQuery(ctx, 'docs', NEAR, { v: [0.1, 0.2], k: 1 });
+    await wasmQuery(ctx, 'docs', NEAR, { v: [0.1, 0.2], k: 0 });
+
+    const limits = query.mock.calls.map((call) => (call as unknown[])[1]);
+    expect(new Set(limits).size).toBe(1);
+    expect(limits[0]).toBeGreaterThan(0);
+  });
+});
+
+describe('wasmMultiQuerySearch — denseWeight and sparseWeight matter only under relative_score (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each(['rrf', 'average', 'maximum', 'weighted'] as const)(
+    '%s ignores denseWeight and sparseWeight, which it never reads',
+    async (fusion) => {
+      const multi = vi.fn(() => []);
+      const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+      await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+        fusion,
+        fusionParams: { denseWeight: 0.7, sparseWeight: 0.3 },
+      });
+
+      expect(multi).toHaveBeenCalledTimes(1);
+    }
+  );
 });

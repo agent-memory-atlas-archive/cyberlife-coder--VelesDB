@@ -176,8 +176,10 @@ export interface CapabilityMap {
    */
   filteredSearch: readonly FilteredSearchOperation[];
   /**
-   * `multiQuerySearch` `fusionParams` fields the backend applies. A field
-   * not listed is refused with `NOT_SUPPORTED` rather than ignored.
+   * `multiQuerySearch` `fusionParams` fields the backend applies. A field the
+   * chosen strategy reads but this list leaves out is refused with
+   * `NOT_SUPPORTED`; a field the strategy never reads is ignored, as core
+   * ignores it.
    */
   multiQueryFusionParams: readonly FusionParamName[];
   /** Named sparse indexes: `search({ sparseIndexName })` and `sparseSearchNamed`. */

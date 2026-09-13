@@ -153,19 +153,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the argument ignored now throw `NOT_SUPPORTED`, naming the backend
   and the capability: a `filter` on `textSearch`, `hybridSearch`,
   `multiQuerySearch` or a sparse `search`; `sparseIndexName`;
-  `includeVectors: true`; `fusionParams.denseWeight`, `sparseWeight` or
-  any other field `multiQueryFusionParams` does not list; under
-  `weighted`, a triple given in part; `createCollection` with
-  `storageMode` `pq` or `rabitq` (velesdb-wasm stores both as SQ8), a
-  `collectionType` other than `vector`, or `hnsw`,
+  `includeVectors: true`; under `relative_score`, `fusionParams.denseWeight`
+  or `sparseWeight`; under `weighted`, a triple given in part;
+  `createCollection` with `storageMode` `pq` or `rabitq` (velesdb-wasm
+  stores both as SQ8), a `collectionType` other than `vector`, or `hnsw`,
   `pqRescoreOversampling`, `deferredIndexing` or `asyncIndexBuilder`;
-  `query` with `timeoutMs` or `stream: true`. Under
+  `query` with `timeoutMs` or `stream: true`. A `fusionParams` field the
+  chosen strategy never reads is ignored, as core ignores it. Under
   `weighted`, a triple core would reject (a negative or non-finite weight,
   or a sum more than 0.001 from 1.0, computed in f32 as core computes it)
-  now throws `BAD_REQUEST` instead of the binding's bare string; another
-  strategy reads no weights and ignores them, as core does. A search with
-  `k` of 0 or less returns nothing without calling the binding; a sparse
-  search used to return live hits. On REST, `multiQuerySearchIds` with a
+  now throws `BAD_REQUEST` instead of the binding's bare string. Every
+  search checks its inputs first, as core does: a query vector of the
+  wrong dimension throws `DIMENSION_MISMATCH` whatever `k` is, and
+  `multiQuerySearch` refuses a short or long vector instead of padding or
+  overflowing it; a non-integer `k` throws `BAD_REQUEST`, core's `k` being
+  an integer; a `k` of 0 or less returns nothing without calling the
+  binding (a sparse search used to return live hits). `query` no longer
+  reads `params.k`, which REST ignores: a statement without `LIMIT`
+  returns core's default of 10 rows. On REST, `multiQuerySearchIds` with a
   `filter` now fails with the server's `400` instead of returning
   unfiltered ids.
 

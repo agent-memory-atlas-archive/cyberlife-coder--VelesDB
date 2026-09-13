@@ -74,9 +74,11 @@ export function freeSparse(ids: SparseIds): void {
 }
 
 /**
- * The top `k` sparse hits as `[pointId, score]`, live points only. With `k`
- * of 0 or less there is nothing to fetch: the over-fetch by `dead` would
- * otherwise return live hits the `k` cap never trims.
+ * The top `k` sparse hits as `[pointId, score]`, live points only. `k` must
+ * be a positive integer, as the search boundary guarantees
+ * (`validateSearchInputs`); anything else fetches nothing, since the
+ * over-fetch by `dead` would otherwise return live hits the `k` cap never
+ * trims.
  */
 export function sparseHits(
   ids: SparseIds,
@@ -84,7 +86,7 @@ export function sparseHits(
   values: number[],
   k: number
 ): Array<[number, number]> {
-  if (k <= 0 || ids.store === null) {
+  if (!Number.isInteger(k) || k <= 0 || ids.store === null) {
     return [];
   }
   const raw: WasmSparseResult[] = ids.store.sparse_search(

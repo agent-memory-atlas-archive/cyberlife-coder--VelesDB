@@ -388,7 +388,7 @@ Vector similarity search.
 | `sparseVector` | `Record<number, number>` | - | Sparse vector for hybrid sparse+dense search |
 | `quality` | `SearchQuality` | - | Search quality mode (e.g., `'fast'`, `'balanced'`, `'custom:256'`, `'adaptive:32:512'`) |
 
-> **WASM backend:** `filter` applies to dense search only. Combined with `sparseVector` it is refused with `NOT_SUPPORTED`, and so are `sparseIndexName` and `includeVectors: true`; none of them is silently ignored. `quality` is accepted and has nothing to tune, since WASM search scans every stored vector. `db.capabilities()` reports each case (`filteredSearch`, `namedSparseIndexes`, `includeVectors`).
+> **WASM backend:** `filter` applies to dense search only. Combined with `sparseVector` it is refused with `NOT_SUPPORTED`, and so are `sparseIndexName` and `includeVectors: true`; none of them is silently ignored. `quality` is accepted and has nothing to tune, since WASM search scans every stored vector. `k` must be an integer, as core's is (`BAD_REQUEST` otherwise), and 0 or less returns nothing. `db.capabilities()` reports each case (`filteredSearch`, `namedSparseIndexes`, `includeVectors`).
 
 ```typescript
 const results = await db.search('docs', queryVector, {
@@ -513,7 +513,7 @@ const results = await db.multiQuerySearch('docs', [emb1, emb2], {
 });
 ```
 
-> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0, computed in f32 as core computes it), with `BAD_REQUEST`. The other strategies read no weights, so they ignore them, as core does. WASM `relative_score` averages the query branches with equal weight, so `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
+> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0, computed in f32 as core computes it), with `BAD_REQUEST`. A field the chosen strategy never reads is ignored, as core ignores it. WASM `relative_score` averages the query branches with equal weight, so under `relative_score` `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. Every query vector must have the collection's dimension: a short one is refused with `DIMENSION_MISMATCH`, never padded. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
 
 #### Named sparse indexes — `sparseIndexName` vs `sparseSearchNamed()`
 
@@ -642,7 +642,7 @@ Query options:
 | `timeoutMs` | `number` | `30000` | Query timeout in milliseconds |
 | `stream` | `boolean` | `false` | Enable streaming response |
 
-> **WASM backend:** `timeoutMs` and `stream: true` are refused with `NOT_SUPPORTED`: `query()` runs in process and answers at once (`db.capabilities().queryOptions` is empty).
+> **WASM backend:** `timeoutMs` and `stream: true` are refused with `NOT_SUPPORTED`: `query()` runs in process and answers at once (`db.capabilities().queryOptions` is empty). The number of rows is the statement's `LIMIT`, or core's default of 10: `params.k` is not read, as on REST.
 
 #### `db.queryExplain(queryString, params?)`
 
