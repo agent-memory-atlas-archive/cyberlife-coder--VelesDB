@@ -1,0 +1,408 @@
+"""Tests for scripts/check-figure-sources.py, and above all its refusal.
+
+Once the repository is clean it can no longer show the guard refusing anything,
+so each test hands the guard a tree of its own (`--root`). A guard is worth
+what it refuses.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPT_PATH = Path(__file__).resolve().parent.parent / "check-figure-sources.py"
+_SPEC = importlib.util.spec_from_file_location("check_figure_sources", SCRIPT_PATH)
+guard = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(guard)
+
+
+class FigureSourcesTest(unittest.TestCase):
+    def tree(self, files: dict[str, str], claims: tuple[tuple[str, str], ...] = ()) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for rel, text in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        contract = root / guard.CONTRACT
+        contract.parent.mkdir(parents=True, exist_ok=True)
+        contract.write_text(
+            json.dumps(
+                {
+                    "claims": [
+                        {"file": c[0], "must_contain": c[1], **({"covers_section": True} if len(c) > 2 and c[2] else {})}
+                        for c in claims
+                    ]
+                }
+            )
+        )
+        return root
+
+    def flagged(self, root: Path) -> list[str]:
+        return guard.violations(root)
+
+    def test_an_unregistered_speed_ratio_in_a_guide_is_refused(self):
+        root = self.tree({"docs/guides/G.md": "The fast builder is ~2-3x faster than `new`.\n"})
+        self.assertEqual(len(self.flagged(root)), 1)
+        self.assertIn("docs/guides/G.md:1: speed ratio", self.flagged(root)[0])
+        self.assertEqual(guard.main(["--root", str(root)]), 1)
+
+    def test_a_registered_figure_passes(self):
+        root = self.tree(
+            {"docs/guides/G.md": "The fast builder is ~2-3x faster than `new`.\n"},
+            claims=(("docs/guides/G.md", "~2-3x faster"),),
+        )
+        self.assertEqual(self.flagged(root), [])
+        self.assertEqual(guard.main(["--root", str(root)]), 0)
+
+    def test_a_claim_covers_its_own_file_and_line_only(self):
+        files = {
+            "docs/guides/A.md": "Search answers in 450 µs at p50.\n",
+            "docs/guides/B.md": "Search answers in 450 µs at p50.\nInserts land in 3 ms.\n",
+        }
+        root = self.tree(files, claims=(("docs/guides/A.md", "450 µs at p50"), ("docs/guides/B.md", "450 µs")))
+        self.assertEqual(
+            [v.split(": ")[0] for v in self.flagged(root)],
+            ["docs/guides/B.md:2"],
+        )
+
+    def test_rustdoc_is_in_scope_but_not_plain_comments_or_code(self):
+        source = (
+            "/// Reaches ~90% recall at the default ef.\n"
+            "// 2x faster than the scalar loop\n"
+            'const NOTE: &str = "95% recall";\n'
+            "//! The p99 latency is 2 ms on a laptop.\n"
+        )
+        root = self.tree({"crates/c/src/lib.rs": source})
+        self.assertEqual(
+            [v.split(": ")[0] for v in self.flagged(root)],
+            ["crates/c/src/lib.rs:1", "crates/c/src/lib.rs:4"],
+        )
+
+    def test_history_archives_and_node_modules_are_out_of_scope(self):
+        figure = "Search is 3x faster.\n"
+        root = self.tree(
+            {
+                "CHANGELOG.md": figure,
+                "docs/CHANGELOG.md": figure,
+                "docs/archive/old.md": figure,
+                "sdks/ts/node_modules/dep/README.md": figure,
+            }
+        )
+        self.assertEqual(self.flagged(root), [])
+
+    def test_readmes_under_crates_and_sdks_are_in_scope(self):
+        root = self.tree({"crates/c/README.md": "12k QPS on one core.\n", "sdks/py/README.md": "95%+ recall.\n"})
+        self.assertEqual(len(self.flagged(root)), 2)
+
+    def test_a_configured_bound_is_not_a_latency_figure(self):
+        root = self.tree(
+            {"docs/guides/G.md": "Queries time out after 500 ms by default.\nThe p99 latency is 2 ms.\n"}
+        )
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/guides/G.md:2"])
+
+    def test_each_recall_and_throughput_form_is_caught(self):
+        lines = ["95%+ recall.", "recall@10 of 0.95 on SIFT.", "Recall stays at 96% or more.", "12k QPS.", "3,000 inserts/s."]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(len(self.flagged(root)), len(lines))
+
+    def test_a_section_claim_covers_its_section_and_no_other(self):
+        doc = (
+            "## 2. PQ\n"
+            "### PQ Recall (pq_recall_benchmark)\n"
+            "| Full precision | recall@10 of 0.99 |\n"
+            "| PQ m=8 | 91% recall |\n"
+            "### PQ Latency\n"
+            "| PQ m=8 | p50 at 120 µs |\n"
+        )
+        root = self.tree(
+            {"docs/BENCH.md": doc},
+            claims=(("docs/BENCH.md", "### PQ Recall (pq_recall_benchmark)", True),),
+        )
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/BENCH.md:6"])
+
+    def test_a_line_claim_does_not_cover_its_section(self):
+        doc = "### PQ Recall\n| Full precision | 99% recall |\n| PQ | 91% recall |\n"
+        root = self.tree({"docs/BENCH.md": doc}, claims=(("docs/BENCH.md", "99% recall"),))
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/BENCH.md:3"])
+
+    def test_a_user_story_tag_is_not_a_latency(self):
+        root = self.tree({"crates/c/src/lib.rs": "/// Executes a MATCH query (EPIC-045 US-002).\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_emphasis_and_footnote_marks_do_not_hide_a_ratio(self):
+        doc = "It is **130x** faster.\nBatch is 3x faster" + chr(0xB2) + " here.\nAnd 5% slower.\n"
+        root = self.tree({"docs/G.md": doc})
+        self.assertEqual(len(self.flagged(root)), 3)
+
+    def test_each_throughput_unit_is_caught(self):
+        lines = [
+            "16,151 vec/s after the fix.",
+            "1.3M queries/sec.",
+            "21.5 Gelem/s at 768D.",
+            "Import at 2,943 MB/s.",
+            "25-30 Kvec/s on one thread.",
+            "2,000 points/s.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(len(self.flagged(root)), len(lines))
+
+    def test_a_table_cell_latency_is_caught_but_not_a_configured_one(self):
+        root = self.tree({"docs/G.md": "| Search top-10 | 57.6 µs |\n| query timeout | 500 ms |\n"})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:1"])
+
+    def test_default_before_the_figure_does_not_exempt_it(self):
+        root = self.tree({"docs/G.md": "The default search answers in 2 ms.\n"})
+        self.assertEqual(len(self.flagged(root)), 1)
+
+    def test_a_verb_introduces_a_latency(self):
+        root = self.tree({"docs/G.md": "A context compiles in 3 ms.\n"})
+        self.assertEqual(len(self.flagged(root)), 1)
+
+    def test_a_claim_covers_only_the_figure_it_overlaps(self):
+        line = "Search answers in 450 µs at p50, and inserts in 3 ms.\n"
+        root = self.tree({"docs/G.md": line}, claims=(("docs/G.md", "450 µs"),))
+        self.assertEqual(len(self.flagged(root)), 1)
+        root = self.tree({"docs/G.md": line}, claims=(("docs/G.md", "450 µs"), ("docs/G.md", "3 ms")))
+        self.assertEqual(self.flagged(root), [])
+
+    def test_binding_docs_are_in_scope_but_not_their_code(self):
+        py = 'def f():\n    """Runs at 12k QPS."""\n    rate = "12k QPS"\n'
+        ts = "/**\n * Answers 2x faster.\n */\nconst note = '2x faster';\n"
+        root = self.tree(
+            {"crates/velesdb-python/python/velesdb/__init__.py": py, "sdks/typescript/src/core.ts": ts}
+        )
+        self.assertEqual(
+            sorted(v.split(": ")[0] for v in self.flagged(root)),
+            ["crates/velesdb-python/python/velesdb/__init__.py:2", "sdks/typescript/src/core.ts:2"],
+        )
+
+    def test_a_plus_after_a_throughput_is_caught(self):
+        root = self.tree({"docs/G.md": "It ingests 10,000+ points/s.\n"})
+        self.assertEqual(len(self.flagged(root)), 1)
+
+    def test_a_bare_speed_ratio_is_caught_but_not_a_size_ratio(self):
+        root = self.tree({"docs/G.md": "Batching is ~50-105x here.\nSQ8 is 4x smaller in memory.\n"})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:1"])
+
+    def test_a_ratio_that_is_no_measurement_is_left_alone(self):
+        lines = [
+            "Build with 0.5x ef on the middle layers.",
+            "It falls back to a full scan above 50x the limit.",
+            "Skip an outlier above 10x the threshold.",
+            "RaBitQ saves 32x bandwidth.",
+            "It stays near 22 ms at 1024 × 1 KB.",
+            "The loop is aligned to `8 × lane`.",
+            "Rerank retrieves 4x candidates, then keeps k.",
+            "Then once more at 2× minEf, capped at maxEf.",
+            "Binary quantization trades some recall for 32x less memory.",
+            "Eight accumulators hold 8x norm_b.",
+            "A timeout of 3x the default suits a remote server.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_measured_ratio_is_caught(self):
+        lines = ["8 threads reach ~8x the throughput of one.", "Crossing 100k docs cost **43×** per query.", "| NEON | ~1.8x |"]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(len(self.flagged(root)), len(lines))
+
+    def test_a_change_stated_as_a_percentage_is_caught(self):
+        root = self.tree({"docs/G.md": "Build time rises 31 % at 10K.\nThe hook adds a 5% overhead.\n"})
+        self.assertEqual(len(self.flagged(root)), 2)
+
+    def test_a_time_in_a_table_row_is_caught_but_not_a_configured_one(self):
+        doc = "| Kernel | Latency |\n|---|---|\n| Cosine 768D | 35.8 ns |\n| query timeout | 30 s |\n"
+        root = self.tree({"docs/G.md": doc})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:3"])
+
+    def test_a_hash_line_in_a_code_fence_does_not_end_a_section(self):
+        doc = "### Results\n```bash\n# run it\ncargo bench\n```\n| Search | 57.6 µs |\n"
+        root = self.tree({"docs/B.md": doc}, claims=(("docs/B.md", "### Results", True),))
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_section_claim_must_name_one_heading(self):
+        doc = "### Results\n| Search | 57.6 µs |\n### Results\n| Insert | 3 ms |\n"
+        root = self.tree({"docs/B.md": doc}, claims=(("docs/B.md", "### Results", True),))
+        self.assertTrue(any("matches 2 headings" in v for v in self.flagged(root)))
+
+    def test_memory_ratios_are_arithmetic_not_measurements(self):
+        root = self.tree({"docs/G.md": "SQ8 stores each vector in 4x less memory.\nBinary quantization is 32x smaller.\n"})
+        self.assertEqual(self.flagged(root), [])
+
+
+    def test_a_configured_bound_named_by_its_parameter_is_not_a_latency(self):
+        # `timeout` is one segment of `query_timeout_ms`: a table of ceilings
+        # names the parameter, not the word.
+        root = self.tree({"docs/G.md": "| `search.query_timeout_ms` | disabled | 24 h (86,400,000 ms) |\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_measured_time_beside_a_parameter_name_is_still_caught(self):
+        # No latency keyword on these rows: only the table rule sees them, so
+        # only a parameter segment (not `limit` inside `limited`) may exempt one.
+        doc = "| `export_elapsed_ms` | 2.1 ms |\n| Rate-limited export | 3 ms |\n"
+        root = self.tree({"docs/G.md": doc})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:1", "docs/G.md:2"])
+
+    def test_a_ratio_scaling_an_ef_parameter_is_left_alone(self):
+        lines = [
+            "- **Bulk** (middle 80%): 0.5x `ef_construction` -- leverages the existing",
+            "Hard queries retry at 2\u00d7 ef_search.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_word_that_merely_ends_in_ef_does_not_exempt_a_ratio(self):
+        root = self.tree({"docs/G.md": "In brief, batching is ~5x here.\n"})
+        self.assertEqual(len(self.flagged(root)), 1)
+
+    def test_the_plural_of_a_bound_exempts_a_ratio_like_its_singular(self):
+        lines = [
+            "//! - **stale penalty** \u2014 all factors inflated by 1.2\u00d7 when any histogram is stale",
+            "//! Skip the outliers above 10x the thresholds.",
+        ]
+        root = self.tree({"crates/c/src/lib.rs": "\n".join(lines) + "\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_plural_is_a_word_not_a_suffix(self):
+        root = self.tree({"docs/G.md": "The refactors brought search to 1.2\u00d7 the old throughput.\n"})
+        self.assertEqual(len(self.flagged(root)), 1)
+
+    def test_a_count_of_calls_or_simd_registers_is_not_a_ratio(self):
+        rust = "/// This replaces the prior 3-pass approach (`dot_product_neon` called 3x).\n/// Invoked 2x per row.\n"
+        root = self.tree({"crates/c/src/lib.rs": rust, "docs/G.md": "### 1. 32-Wide Unrolling (4x f32x8)\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_count_exempts_its_own_multiplier_and_no_other(self):
+        cases = {
+            "`dot_product_neon`, called 3x, made cosine ~2.5x the fused kernel's time.": ["~2.5x"],
+            "The 32-wide loop (4x f32x8) runs at ~1.8x the scalar loop.": ["~1.8x"],
+        }
+        for line, expected in cases.items():
+            self.assertEqual([line[s:e] for _, s, e in guard.figures(line)], expected, line)
+
+
+    def test_a_time_below_the_millisecond_needs_no_keyword(self):
+        # Nothing in these docs is configured in nanoseconds or microseconds,
+        # so such a number is a measurement wherever it stands.
+        lines = [
+            "Foo 40 ns.",
+            "- Cosine: ~32ns",
+            "The rotation costs ~60 us for 768D.",
+            "Warm-up is ~5\u03bcs at 4 GHz.",
+            "A push holds the lock for 10 nanoseconds.",
+            "Each probe is 3 microseconds.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(len(self.flagged(root)), len(lines))
+        self.assertTrue(all(": time with no registered measurement" in v for v in self.flagged(root)))
+
+    def test_a_millisecond_or_second_still_needs_a_keyword(self):
+        # Configured values are stated in these units (a back-off, an idle
+        # period): only a keyword, a verb or a table makes them a figure.
+        root = self.tree({"docs/G.md": "Retries back off for 100 ms.\nThe pool idles 30 s before closing.\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_time_unit_in_a_name_a_code_span_a_spec_range_or_a_simd_type_is_no_figure(self):
+        lines = [
+            "Set `timeout_us` to bound the wait.",
+            "The counter elapsed_ns and the group poll_10us are names.",
+            "Pass `--poll 10us` to the bench.",
+            "| `ef_search` | 16\u20134096 (or `auto` from mode) |",
+            "The kernel keeps its sums in u8x16 and f32x8 registers.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_a_size_word_exempts_only_the_ratio_it_qualifies(self):
+        # "4x less memory" is arithmetic. A ratio in the next clause is not
+        # about memory, whatever the line says elsewhere.
+        cases = {
+            "SQ8 stores each vector in 4x less memory.": [],
+            "It cuts peak memory usage by ~2x.": [],
+            "SQ8 needs 4x less memory and ~3x the throughput.": ["~3x"],
+            "Binary is 32x smaller; batching gives ~8x the throughput.": ["~8x"],
+        }
+        for line, expected in cases.items():
+            self.assertEqual([line[s:e] for _, s, e in guard.figures(line)], expected, line)
+
+    def test_a_size_word_further_away_or_in_another_cell_exempts_nothing(self):
+        # The size word sits within three words of its ratio, in its clause,
+        # or labels the ratio's table column or row. Anywhere else it is no
+        # licence: not four words away, not across a comma, not in the next
+        # column.
+        doc = (
+            "The quantized index answers at ~3x the old rate.\n"
+            "| Mode | Compression | Search |\n"
+            "|---|---|---|\n"
+            "| `sq8` | 4x | same |\n"
+            "| `pq` | 16x | ~3x |\n"
+            "| **Memory** | 3072 bytes | **4x** |\n"
+            "The delta is 234 MiB, 4.8x.\n"
+        )
+        root = self.tree({"docs/G.md": doc})
+        self.assertEqual(
+            [v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:1", "docs/G.md:5", "docs/G.md:7"]
+        )
+
+    def test_a_bare_quantity_in_a_code_span_is_a_figure(self):
+        # Backticks mark code, not a licence: a quantity that stands alone in
+        # its span is a figure like any other.
+        lines = [
+            "At 100K rows (`JSON scan 3.84 ms \u2192 ColumnStore 29.5 us`).",
+            "The blocker quoted `16.3 us/fact`.",
+            "Batching gives `~3x`.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(
+            [v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:1", "docs/G.md:2", "docs/G.md:3"]
+        )
+
+    def test_a_number_that_is_code_in_a_code_span_is_no_figure(self):
+        # Part of a name, a path or an option, or an operand of an expression.
+        lines = [
+            "The group `poll_10us` is a name.",
+            "Results land in `bench/10us/`.",
+            "The call `sleep(10us)` yields.",
+            "Pass `--poll 10us` to the bench.",
+            "Set `wait = 10us`.",
+            "The loop runs `4 \u00d7 dim` steps.",
+            "The filter is a `4 x u64` array.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(self.flagged(root), [])
+
+    def test_quantization_is_not_a_size_word(self):
+        # "Quantized search ~3x" states a speed. A ratio is a size only when a
+        # size word names it (memory, bytes, smaller, compression...): the
+        # technique behind it says nothing of what was measured.
+        doc = (
+            "Quantized search ~3x.\n"
+            "| Feature | VelesDB |\n"
+            "|---|---|\n"
+            "| **Quantization** | SQ8 (4x) |\n"
+            "SQ8 quantization stores vectors in 4x less memory.\n"
+        )
+        root = self.tree({"docs/G.md": doc})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:1", "docs/G.md:4"])
+
+    def test_a_bound_or_config_word_exempts_only_the_ratio_it_qualifies(self):
+        # Like a size word, a threshold, an ef or a default is about the ratio
+        # beside it: a ratio elsewhere on the line is still a figure.
+        cases = {
+            "Skip an outlier above 10x the threshold.": [],
+            "A timeout of 3x the default suits a remote server.": [],
+            "Skip an outlier above 10x the threshold; batching gives ~3x the rate.": ["~3x"],
+            "Build at 0.5x ef, and the batch lands ~2x sooner.": ["~2x"],
+            "The default is 30 s, which is 15x too long here.": ["15x"],
+        }
+        for line, expected in cases.items():
+            self.assertEqual([line[s:e] for _, s, e in guard.figures(line)], expected, line)
+
+
+if __name__ == "__main__":
+    unittest.main()

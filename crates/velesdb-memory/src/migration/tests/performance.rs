@@ -546,7 +546,7 @@ fn the_cursor_cost_per_fact_does_not_grow_like_the_offset_walk() {
 
 /// What the two rebuild regimes cost per fact, measured instead of inferred.
 ///
-/// `embedder_cost` is [`Capability::Missing`], and its blocker text quotes
+/// `embedder_cost` is [`Capability::Missing`], and its blocker text used to quote
 /// `16.3 us/fact to re-insert`. That is the REINSERTION cost, measured on the
 /// store, in the regime where the embedder is never called at all. Reading it as
 /// an embedder cost is what makes "the embedder dominates a rebuild" look
@@ -577,7 +577,7 @@ fn the_cursor_cost_per_fact_does_not_grow_like_the_offset_walk() {
 /// | ratio                           | ×23        |
 ///
 /// **×23, not orders of magnitude — and the ratio depends on the payload.**
-/// Comparing an embedding time against the `16.3 us/fact` in the blocker text
+/// Comparing an embedding time against the `16.3 us/fact` the blocker text quoted
 /// suggests a factor near ten thousand. It is wrong on both terms.
 ///
 /// Probed the same day, same 1024 dimensions, payload carrying NO text:

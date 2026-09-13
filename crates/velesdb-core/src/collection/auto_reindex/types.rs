@@ -114,11 +114,11 @@ pub struct AutoReindexConfig {
     #[serde(default = "default_min_size_for_reindex")]
     pub min_size_for_reindex: usize,
     /// Maximum acceptable latency regression (%) for rollback
-    /// Default: 10.0 (rollback if new index is >10% slower)
+    /// Default: 10.0 (roll back when latency regresses by more than this percentage)
     #[serde(default = "default_max_latency_regression_percent")]
     pub max_latency_regression_percent: f64,
     /// Maximum acceptable recall regression (%) for rollback
-    /// Default: 2.0 (rollback if recall drops by >2%)
+    /// Default: 2.0 (roll back when recall regresses by more than this percentage)
     #[serde(default = "default_max_recall_regression_percent")]
     pub max_recall_regression_percent: f64,
     /// Cooldown period between reindex attempts

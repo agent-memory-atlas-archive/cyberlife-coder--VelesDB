@@ -109,6 +109,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load call alone reports the cost as gone when it has only moved.
 
 ### Fixed
+- **Every performance figure in the guides, the reference docs, the rustdoc
+  and the bindings' docs names the run that measured it (#2266).** Only the
+  README's figures were pinned in `docs/reference/promise-contract.json`; the
+  review of #2250 found figures elsewhere that no run produced, and some that
+  contradicted the benchmark meant to back them. Each now states what its run
+  recorded, or leaves the text: `BENCHMARKS.md`'s 87.6% full-precision
+  recall@10 came from clustered data, and the run on the benchmark's own
+  uniform data (e35d9612, which restored its `>= 0.95` assert) measured 98.4%;
+  the README's SIMD kernels read Cosine 32 ns, Euclidean 26 ns and Jaccard
+  27 ns, as the April 3, 2026 run in `BENCHMARKS.md` §1 recorded them, not 33,
+  20 and 35; the fast-insert and turbo constructors are 2.8x and 4.9x faster
+  than `new` (1K × 768D, 2026-03-23), not "~2-3x" and "~3-5x". Their recall
+  figures go, like the pgvector insert ratio, the storage modes' recall and
+  training times at 768D and a 25-30 Kvec/s write rate: no run produced them.
+  The register grows from 30 claims to 270, each with its source, date,
+  machine and version: 21 cover a results table measured in one run, 38
+  record a target or configured value that no run measures, and the 192
+  measured on an earlier major carry a dated waiver scoped to 6.x.
+
+  `scripts/check-figure-sources.py`, a step of the required `lint` job,
+  refuses a figure that no claim registers: a ratio, a change in percent, a
+  recall, a throughput, a latency its keyword or verb introduces, a time
+  below the millisecond or in a table row. A size, bound or config word
+  exempts only the ratio beside it, and a number in a code span only as
+  code. It is a heuristic: a number with no unit and no such keyword, verb
+  or table context, or a figure drawn in an image, passes unseen. The
+  register, not the guard, is what binds a figure to its run.
+
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
   served at `GET /api-docs/openapi.json` by a server built with

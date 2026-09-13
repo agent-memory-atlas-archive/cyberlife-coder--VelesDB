@@ -107,7 +107,7 @@ collection.upsert([
     {"id": 1, "vector": [0.1, 0.2, 0.3, 0.4], "payload": {"key": "value"}}
 ])
 
-# Bulk insert (optimized for high-throughput - 3-7x faster)
+# Bulk insert (optimized for high throughput)
 # Uses parallel HNSW insertion + single flush at the end
 collection.upsert_bulk([
     {"id": i, "vector": vectors[i].tolist()} for i in range(10000)
@@ -427,10 +427,13 @@ equivalent to `storage_mode="full"`.
 
 For large-scale data import, use `upsert_bulk()` instead of `upsert()`:
 
-| Method | 10k vectors (768D) | Notes |
-|--------|-------------------|-------|
-| `upsert()` | ~47s | Flushes after each batch |
-| `upsert_bulk()` | **~3s** | Single flush + parallel HNSW |
+| Method | Notes |
+|--------|-------|
+| `upsert()` | Flushes after each batch |
+| `upsert_bulk()` | Single flush + parallel HNSW |
+
+No recorded run times these two at 10K × 768D; the measured Python insert rate
+(10K × 384D, `upsert`) is in [PYTHON_PERFORMANCE.md](PYTHON_PERFORMANCE.md).
 
 ```python
 # Recommended for bulk import

@@ -4,7 +4,10 @@
 
 **Goal**: prove with reproducible measurements that a developer arriving on a clean Linux machine reaches their first vector search result in well under five minutes, regardless of which language stack they pick (Python, Rust, TypeScript, or REST against the server binary).
 
-> **Frozen reference run — 2026-05-01, `velesdb-core@1.14.2` / `velesdb-server@1.14.2`.**
+> **Frozen reference run — 2026-04-29, `velesdb-core@1.13.7` / `velesdb-server@1.13.7`.**
+> Those are the timestamp of its JSON report and the versions the harness pinned
+> that day; a later version-alignment pass had relabeled the run 1.14.2 without
+> re-running it.
 > The numbers below are a point-in-time measurement, not a live dashboard. The
 > `scripts/dx-timing/scenario_*.sh` harness has since been re-pinned to a
 > newer release (currently `3.12.0`) so it keeps installing cleanly, but these
@@ -32,9 +35,9 @@ Each scenario was run **three times** in a freshly created Docker container, wit
 | Scenario | Base image | What's pre-installed | What the timer covers |
 |----------|------------|----------------------|-----------------------|
 | **A. Python** | `ubuntu:24.04` + `python3` + `python3-venv` + `python3-pip` | minimal CPython stack | `python3 -m venv` → `pip install velesdb numpy` → import + open + create + upsert + search |
-| **B. Rust** | `rust:1-slim` | latest stable Rust toolchain (≥ 1.95) | `cargo new` → `cargo add velesdb-core@1.14.2 serde_json` → `cargo run --release` |
+| **B. Rust** | `rust:1-slim` | latest stable Rust toolchain (≥ 1.95) | `cargo new` → `cargo add velesdb-core@1.13.7 serde_json` → `cargo run --release` |
 | **C. TypeScript** | `node:20-slim` | Node 20 + npm | `mkdir` → `npm install @wiscale/velesdb-sdk` → `node index.mjs` (WASM init + upsert + search) |
-| **D. Server** | `rust:1-slim` (with `pkg-config`, `libssl-dev`, `curl`) | Rust toolchain ready to compile | `cargo install --locked velesdb-server@1.14.2` → start binary → wait `/health` → POST collection + points + search via REST |
+| **D. Server** | `rust:1-slim` (with `pkg-config`, `libssl-dev`, `curl`) | Rust toolchain ready to compile | `cargo install --locked velesdb-server@1.13.7` → start binary → wait `/health` → POST collection + points + search via REST |
 
 Timing harness: [`scripts/dx-timing/run_all.sh`](../../scripts/dx-timing/run_all.sh). Per-scenario scripts: [`scenario_python.sh`](../../scripts/dx-timing/scenario_python.sh), [`scenario_rust.sh`](../../scripts/dx-timing/scenario_rust.sh), [`scenario_node.sh`](../../scripts/dx-timing/scenario_node.sh), [`scenario_server.sh`](../../scripts/dx-timing/scenario_server.sh).
 
