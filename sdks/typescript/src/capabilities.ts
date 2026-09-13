@@ -58,12 +58,20 @@ type DeclaresFilter<P> = P extends readonly (infer Item)[]
         : false
       : false;
 
+/** The argument list of function type `F`. */
+type ArgumentsOf<F> = F extends (...args: infer A extends readonly unknown[]) => unknown ? A : never;
+
+/** Whether any of the argument types `A` declares a `filter`. */
+type AnyDeclaresFilter<A extends readonly unknown[]> = true extends {
+  [I in keyof A]: DeclaresFilter<NonNullable<A[I]>>;
+}[number]
+  ? true
+  : false;
+
 /** The {@link IVelesDBBackend} methods with an argument that declares a `filter`. */
 type FilterTakingMethod = {
-  [M in keyof IVelesDBBackend]-?: IVelesDBBackend[M] extends (...args: infer A) => unknown
-    ? true extends { [I in keyof A]: DeclaresFilter<NonNullable<A[I]>> }[number]
-      ? M
-      : never
+  [M in keyof IVelesDBBackend]-?: AnyDeclaresFilter<ArgumentsOf<IVelesDBBackend[M]>> extends true
+    ? M
     : never;
 }[keyof IVelesDBBackend];
 
