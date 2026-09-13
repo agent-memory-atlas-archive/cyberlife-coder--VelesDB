@@ -126,12 +126,12 @@ not.
 That is a repeat on one machine, not a reproduction, and it is all the evidence
 supports. A re-run on another machine, CPU-only with `num_ctx` 4096, produced
 different counts, and nothing says what moved: none of the 26 screening files
-the two campaigns published records the Ollama version or the decode options
-they ran with, and the 2 that hold their model's digest hold it by accident
-(#1949). Until a campaign that records them is run again, the tiers above are
-**unverified** beyond the machine that measured them. That re-run, with a
-declared `num_ctx`, is pending: it waits on #1956, and on the models being
-present on a machine that can run them.
+the two campaigns published records the Ollama version, or any decode option
+they ran with but the generation cap, and the 2 that hold their model's digest
+hold it by accident (#1949). Until a campaign that records them is run again,
+the tiers above are **unverified** beyond the machine that measured them. That
+re-run, with a declared `num_ctx`, is pending: it waits on #1956, and on the
+models being present on a machine that can run them.
 
 If you need timings, run the bench on your own quiet machine. Numbers from
 someone else's hardware would not transfer anyway: what Metal does on unified

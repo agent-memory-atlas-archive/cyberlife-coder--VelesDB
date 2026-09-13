@@ -1175,6 +1175,30 @@ class ProvenanceReportTest(unittest.TestCase):
                         report_table(rendered, "## Configurations")["m"].get("provenance"),
                         "unverified")
 
+    def test_a_file_older_than_its_settings_is_credited_with_its_generation_cap(self):
+        """Every 2026-08-16 screening file records `generation_cap`, the cap the bench sends
+        as `num_predict` (to an OpenAI-compatible server as `max_tokens`): of the decode
+        options, that one is on the record (#2280 review)."""
+        legacy = {"config": "m", "generation_cap": 512}
+        self.assertIn("lack `ollama_version`, `digest`, `num_ctx`, `temperature`, `constrained`,",
+                      bench.render_report({"configurations": {"m": legacy}}))
+        self.assertIn("`num_ctx`, `num_predict`, `temperature`",
+                      bench.render_report({"configurations": {"m": {"config": "m"}}}))
+
+    def test_what_a_server_or_a_binary_names_prints_on_one_line_escaped(self):
+        """A version or a digest is the server's text, and a `--version` line the binary's, as
+        a reason is: a `|` or a line break in one would split its row (#2280 review)."""
+        entry = with_value(recorded_entry(verified=True), ("runtime", "ollama_version"),
+                           "0.1 | junk\nnext")
+        entry["runtime"]["model_digests"]["m"] = "0123456789|abcdef"
+        entry["settings"]["num_ctx"] = "2048 | 4096"
+        entry["origin"]["binary"]["version"] = "velesdb-memory 1.0 | dirty\nbuild"
+        rendered = bench.render_report({"configurations": {"m": entry}})
+        self.assertIn("| ollama 0.1 \\| junk next · 0123456789\\|a · ctx 2048 \\| 4096 |",
+                      rendered)
+        self.assertIn(f" · velesdb-memory 1.0 \\| dirty build ({DIGEST[:12]}) |", rendered)
+        self.assertEqual(sum(line.startswith("| `m`") for line in rendered.splitlines()), 1)
+
 
 class ProvenanceWiringTest(unittest.TestCase):
     """`screen` writes the record and `report --from-dir` prints it, through `main`.
@@ -1466,6 +1490,24 @@ class EndToEndRuntimeTest(unittest.TestCase):
             "missing": {"path": bench.OUTSIDE_REPOSITORY,
                         "version": "velesdb-memory --version exited 3"}})
 
+    def test_a_binary_that_does_not_answer_in_time_is_recorded_with_the_reason(self):
+        """Production gives what it asks `ANSWER_TIMEOUT_S`, then records it missing with the
+        reason (#2280 review). The binary is launched once, patiently, so the first launch of
+        a new file is paid; asked again it never answers, loaded machine or idle."""
+        script = ("#!/bin/sh\nif [ -n \"$BENCH_WARM_UP\" ]; then echo 'velesdb-memory 1.0.0'; "
+                  "exit 0; fi\nexec sleep 30\n")
+        with tempfile.TemporaryDirectory() as bin_dir:
+            binary = Path(bin_dir) / "velesdb-memory"
+            binary.write_text(script, encoding="utf-8")
+            binary.chmod(0o755)
+            with patient_launches(), mock.patch.dict(os.environ, {"BENCH_WARM_UP": "1"}):
+                warmed = bench.launched_binary(binary)
+            with mock.patch.object(bench, "ANSWER_TIMEOUT_S", 1):
+                silent = bench.launched_binary(binary)
+        self.assertEqual(warmed["version"], "velesdb-memory 1.0.0")
+        self.assertEqual((silent["version"], silent["missing"].get("version")),
+                         (None, "velesdb-memory --version did not answer within 1 s"))
+
     def test_a_binary_records_the_first_line_of_its_version(self):
         script = "#!/bin/sh\necho 'velesdb-memory 1.2.3'\necho 'built from a dirty tree'\n"
         record, _rendered = self.endtoend_then_report(script=script)
@@ -1512,22 +1554,28 @@ class EndToEndRuntimeTest(unittest.TestCase):
 # ------------------------------------------------------------------ checkout --
 
 
+def git_commit(root: Path, *paths: str) -> None:
+    """Commit `paths`, each taken as written, in the checkout at `root`: under no one's name,
+    unsigned, and with hooks off, since a global one has no business in a scratch checkout."""
+    git_answer(root, "add", "--", *(f":(literal){path}" for path in paths))
+    git_answer(root, "-c", "user.name=bench", "-c", "user.email=bench@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+               "commit", "--quiet", "--message", "scratch")
+
+
 @contextlib.contextmanager
 def scratch_checkout():
     """A git checkout of a committed `cases.json` and `notes.txt`, standing in for the repository.
 
     What git answers about it depends on the test alone, not on the state of the checkout
-    running the suite. Hooks are off: a global one has no business in it.
+    running the suite.
     """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         (root / "cases.json").write_text("{}\n", encoding="utf-8")
         (root / "notes.txt").write_text("notes\n", encoding="utf-8")
-        for argv in (["init", "--quiet"], ["add", "cases.json", "notes.txt"],
-                     ["-c", "user.name=bench", "-c", "user.email=bench@example.invalid",
-                      "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
-                      "commit", "--quiet", "--message", "cases"]):
-            git_answer(root, *argv)
+        git_answer(root, "init", "--quiet")
+        git_commit(root, "cases.json", "notes.txt")
         with mock.patch.object(bench, "ROOT", root):
             yield root
 
@@ -1539,20 +1587,53 @@ class CheckoutOriginTest(unittest.TestCase):
     commit: a file that is at no commit.
     """
 
-    def test_a_cases_file_git_does_not_track_is_not_named(self):
+    def test_a_cases_file_the_commit_does_not_hold_is_not_named(self):
         with scratch_checkout() as root:
             (root / "draft.json").write_text("{}\n", encoding="utf-8")
             origin = bench.run_origin(root / "draft.json", None)
         self.assertEqual((origin["cases_file"], origin["missing"].get("cases_file")),
-                         (None, bench.UNTRACKED))
+                         (None, bench.NOT_AT_COMMIT))
+
+    def test_a_file_staged_but_not_committed_is_not_named(self):
+        """The recorded commit is asked, not git's index: a staged file is at no commit yet."""
+        with scratch_checkout() as root:
+            (root / "staged.json").write_text("{}\n", encoding="utf-8")
+            git_answer(root, "add", "staged.json")
+            origin = bench.run_origin(root / "staged.json", None)
+        self.assertIsNone(origin["cases_file"])
+        self.assertEqual(origin["missing"].get("cases_file"), bench.NOT_AT_COMMIT)
+
+    def test_a_committed_file_taken_out_of_the_index_is_named_and_marked(self):
+        """`git rm --cached` leaves the file at the recorded commit, and differing from it."""
+        with scratch_checkout() as root:
+            git_answer(root, "rm", "--quiet", "--cached", "cases.json")
+            origin = bench.run_origin(root / "cases.json", None)
+        self.assertEqual((origin["cases_file"], origin["cases_file_modified"]),
+                         ("cases.json", True))
+
+    def test_a_commit_git_cannot_read_leaves_its_reason(self):
+        """Asked about a commit it does not have, git fails: the reason names the command."""
+        with scratch_checkout() as root:
+            path, gap = bench._tracked_path(root / "cases.json", "0" * 40)
+        self.assertIsNone(path)
+        self.assertRegex(gap, r"^git ls-tree --name-only 0{40} -- :\(literal\)cases\.json "
+                              r"exited \d+$")
 
     def test_a_name_git_would_read_as_a_pattern_is_taken_as_written(self):
-        """`case?.json`, read as a pattern, matches the tracked `cases.json`: it is not it."""
+        """As pathspecs, `:cases.json` names `cases.json` and `case?.json` matches it: neither
+        is that file. An untracked `:cases.json` is at no commit, and a committed `case?.json`
+        does not differ from the commit because its sibling does (#2280 review)."""
         with scratch_checkout() as root:
+            (root / ":cases.json").write_text("{}\n", encoding="utf-8")
+            colon = bench.run_origin(root / ":cases.json", None)
             (root / "case?.json").write_text("{}\n", encoding="utf-8")
-            origin = bench.run_origin(root / "case?.json", None)
-        self.assertEqual((origin["cases_file"], origin["missing"].get("cases_file")),
-                         (None, bench.UNTRACKED))
+            git_commit(root, "case?.json")
+            (root / "cases.json").write_text('{"cases": []}\n', encoding="utf-8")
+            pattern = bench.run_origin(root / "case?.json", None)
+        self.assertEqual((colon["cases_file"], colon["missing"].get("cases_file")),
+                         (None, bench.NOT_AT_COMMIT))
+        self.assertEqual((pattern["cases_file"], pattern["cases_file_modified"]),
+                         ("case?.json", False))
 
     def test_a_tracked_cases_file_is_named_and_marked_when_it_differs_from_the_commit(self):
         """Marked when it differs itself: another tracked file's edit marks the commit only."""
@@ -1580,7 +1661,8 @@ class CheckoutOriginTest(unittest.TestCase):
         self.assertIs(origin["uncommitted_changes"], False)
 
     def test_a_checkout_git_cannot_read_leaves_its_reasons(self):
-        """Outside any repository git answers nothing: each null says which command failed."""
+        """Outside any repository git answers nothing: each null says why, the command that
+        failed or, for the cases file, that no commit was recorded to look it up in."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             (root / "cases.json").write_text("{}\n", encoding="utf-8")
@@ -1589,9 +1671,9 @@ class CheckoutOriginTest(unittest.TestCase):
                 origin = bench.run_origin(root / "cases.json", None)
         asked = ("commit", "uncommitted_changes", "cases_file", "cases_file_modified")
         self.assertEqual({key: origin[key] for key in asked}, dict.fromkeys(asked))
-        self.assertRegex(origin["missing"]["cases_file"],
-                         r"^git ls-files -- :\(literal\)cases\.json exited \d+$")
-        self.assertEqual(origin["missing"]["cases_file_modified"], origin["missing"]["cases_file"])
+        missing = origin["missing"]
+        self.assertEqual((missing["cases_file"], missing["cases_file_modified"]),
+                         (bench.NO_COMMIT, bench.NO_COMMIT))
         self.assertRegex(origin["missing"]["uncommitted_changes"], r"^git status .* exited \d+$")
 
     def test_a_run_from_another_directory_names_the_checkout_of_its_bench(self):

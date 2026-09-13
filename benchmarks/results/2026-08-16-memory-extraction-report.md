@@ -5,7 +5,7 @@ re-run the generator instead.
 
 ## Configurations
 
-**Unverified: 16 of 16 rows** — their result files lack `ollama_version`, `digest`, `num_ctx`, `num_predict`, `temperature`, `constrained`, so their counts can be neither replayed nor compared with another run's.
+**Unverified: 16 of 16 rows** — their result files lack `ollama_version`, `digest`, `num_ctx`, `temperature`, `constrained`, so their counts can be neither replayed nor compared with another run's.
 
 **Rows sum different numbers of runs** — 4 with 1 run, 12 with 2 runs. Each count adds up the errors of all its runs: compare two rows per run, not as printed.
 

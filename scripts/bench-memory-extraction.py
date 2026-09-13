@@ -1361,9 +1361,11 @@ def utc_now() -> str:
 # Why a result file names no cases file: a path outside the repository names a
 # directory on one machine, not a file anyone else can open.
 OUTSIDE_REPOSITORY = "not under the repository, and a local path is not recorded"
-# Why it names none inside the checkout: an untracked file is at no commit, so its
-# path beside the recorded commit would name a file nobody can check out.
-UNTRACKED = "not tracked by git: no commit holds it"
+# Why it names none inside the checkout: the recorded commit does not hold it, so its
+# path beside that commit would name a file nobody can check out.
+NOT_AT_COMMIT = "not at the recorded commit, so its path there names nothing"
+# Why none is looked up at all when the run could record no commit.
+NO_COMMIT = "no commit was recorded to look it up in"
 
 
 # How long a command the bench asks, git or a binary's `--version`, has to answer
@@ -1377,12 +1379,14 @@ def _answer(argv: "list[str]", command: str) -> "tuple[str | None, str | None]":
 
     Its input is closed, so a binary that reads it instead of answering the flag
     it is asked ends rather than waiting on the bench's terminal. It has
-    `ANSWER_TIMEOUT_S` to answer.
+    `ANSWER_TIMEOUT_S` to answer; past that it is killed, and the reason says so.
     """
     try:
         done = subprocess.run(argv, capture_output=True, text=True,
                               timeout=ANSWER_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return None, f"{command} did not answer within {ANSWER_TIMEOUT_S} s"
         return None, f"{command} did not run ({type(exc).__name__})"
     if done.returncode != 0:
         return None, f"{command} exited {done.returncode}"
@@ -1403,17 +1407,25 @@ def _in_repository(path: Path) -> "str | None":
 
 
 def _literal(path: str) -> str:
-    """`path` as a pathspec git takes as written: as a pattern, `case?.json` is `cases.json`."""
+    """`path` as a pathspec git takes as written: `case?.json` would match `cases.json`, and
+    `:cases.json` would name it."""
     return f":(literal){path}"
 
 
-def _tracked_path(path: Path) -> "tuple[str | None, str | None]":
-    """`path` relative to the repository if git tracks it, or why it is not recorded."""
+def _tracked_path(path: Path, commit: "str | None") -> "tuple[str | None, str | None]":
+    """`path` relative to the repository if the recorded `commit` holds it, or why not.
+
+    The commit is asked, not git's index, which can disagree with it both ways: a
+    file staged but not committed is at no commit, and one committed then taken out
+    of the index is still at this one (#1949).
+    """
     relative = _in_repository(path)
     if relative is None:
         return None, OUTSIDE_REPOSITORY
-    listed, gap = _git("ls-files", "--", _literal(relative))
-    return (relative, None) if listed else (None, gap or UNTRACKED)
+    if not commit:
+        return None, NO_COMMIT
+    listed, gap = _git("ls-tree", "--name-only", commit, "--", _literal(relative))
+    return (relative, None) if listed else (None, gap or NOT_AT_COMMIT)
 
 
 def _changed(*pathspec: str) -> "tuple[bool | None, str | None]":
@@ -1484,8 +1496,8 @@ def run_origin(cases_file: Path, binary: "dict | None") -> dict:
     renderer's machine and checkout as the campaign's, and a cases file under a
     local worktree path (#1949). A commit alone would claim that the code at it
     ran, so `uncommitted_changes` says whether tracked files differed from it.
-    The cases file is recorded by its path in the repository, and only if git
-    tracks it (`_tracked_path`), with `cases_file_modified` saying whether it
+    The cases file is recorded by its path in the repository, and only if the
+    recorded commit holds it (`_tracked_path`), with `cases_file_modified` saying whether it
     differed from the commit; otherwise both are null, with the reason.
     Whatever else goes unanswered stays null, with the reason under `missing`.
     A commit does not identify the binary a run drove, which may have been
@@ -1494,7 +1506,7 @@ def run_origin(cases_file: Path, binary: "dict | None") -> dict:
     """
     commit, commit_gap = _git("rev-parse", "HEAD")
     changed, changed_gap = _changed()
-    cases_path, cases_gap = _tracked_path(cases_file)
+    cases_path, cases_gap = _tracked_path(cases_file, commit)
     cases_changed, cases_changed_gap = (_changed(_literal(cases_path)) if cases_path
                                         else (None, cases_gap))
     origin = {
@@ -2019,10 +2031,16 @@ def missing_provenance(entry: dict) -> "list[str]":
     not wrong, but not checkable, so the report says so instead of printing the
     counts as settled. Options are checked for presence, not truth: `0` and
     `False` are values a run sends. A version or a digest counts only as a
-    string (`_text`): a file is read as it is.
+    string (`_text`): a file is read as it is. `num_predict` is on the record
+    wherever `generation_cap` is: every screening file, those written before
+    `settings` among them, records the cap `screen` hands its backend, which sends
+    it as `num_predict` (to an OpenAI-compatible server as `max_tokens`), as the
+    bench already did on 2026-08-16.
     """
     runtime = _mapping(entry.get("runtime"))
     recorded = set(_mapping(entry.get("settings")))
+    if isinstance(entry.get("generation_cap"), int):
+        recorded.add("num_predict")
     if _text(runtime.get("ollama_version")):
         recorded.add("ollama_version")
     if _text(_mapping(runtime.get("model_digests")).get(entry.get("config"))):
@@ -2030,22 +2048,29 @@ def missing_provenance(entry: dict) -> "list[str]":
     return [field for field in PROVENANCE_FIELDS if field not in recorded]
 
 
-def _unverified_reason(entry: dict) -> str:
-    """Why a row is unverified, as its run recorded it, fit for a table cell.
+def _inline(text: str) -> str:
+    """`text` fit for a table cell: on one line, cut to `REASON_WIDTH`, its pipes escaped.
 
-    The first reason under `runtime.missing`: a server down, or without an
-    endpoint, leaves one per question it did not answer, and the first says
-    why. They are the server's own words, so the reason is put on one line, cut
-    to `REASON_WIDTH`, and its pipes escaped: a junk reply would otherwise split
-    the row. Empty when the file records none, as no file written before the
-    record does.
+    What a server or a binary says of itself, or why it said nothing, is its own
+    words: a line break would split the row, a pipe its cells, and a junk reply
+    can run to kilobytes. The file keeps the text whole.
     """
-    missing = _mapping(_mapping(entry.get("runtime")).get("missing"))
-    reason = next((value for value in missing.values() if isinstance(value, str)), "")
-    line = " ".join(reason.split())
+    line = " ".join(text.split())
     if len(line) > REASON_WIDTH:
         line = line[:REASON_WIDTH - 1] + "…"
     return line.replace("|", "\\|")
+
+
+def _unverified_reason(entry: dict) -> str:
+    """Why a row is unverified, as its run recorded it, fit for a table cell (`_inline`).
+
+    The first reason under `runtime.missing`: a server down, or without an
+    endpoint, leaves one per question it did not answer, and the first says
+    why. Empty when the file records none, as no file written before the record
+    does.
+    """
+    missing = _mapping(_mapping(entry.get("runtime")).get("missing"))
+    return _inline(next((value for value in missing.values() if isinstance(value, str)), ""))
 
 
 def _provenance_cell(entry: dict) -> str:
@@ -2054,15 +2079,16 @@ def _provenance_cell(entry: dict) -> str:
     An unverified row prints why beside the verdict when its run recorded a
     reason (`_unverified_reason`): an end-to-end run is unverified because the
     daemon chose its server, a screening run because its server was down or
-    would not say, and neither because its file predates the record.
+    would not say, and neither because its file predates the record. What a
+    verified row's server named is printed through `_inline` too.
     """
     if missing_provenance(entry):
         why = _unverified_reason(entry)
         return f"unverified ({why})" if why else "unverified"
     runtime = entry["runtime"]
     digest = runtime["model_digests"][entry["config"]]
-    return (f"ollama {runtime['ollama_version']} · {digest[:SHORT_DIGEST]} "
-            f"· ctx {entry['settings']['num_ctx']}")
+    return (f"ollama {_inline(runtime['ollama_version'])} · {_inline(digest[:SHORT_DIGEST])} "
+            f"· ctx {_inline(str(entry['settings']['num_ctx']))}")
 
 
 # How an origin cell marks a commit, or the cases file, by whether it differed from
@@ -2081,10 +2107,11 @@ def _marked(name: object, changed: object, width: "int | None" = None) -> str:
 
 
 def _binary_part(binary: dict) -> str:
-    """A run's binary in its origin cell: the version it reported, and its sha256 cut to
-    `SHORT_DIGEST`, or `unhashed` when the run had none to take (a server over HTTP)."""
+    """A run's binary in its origin cell: the version it reported (`_inline`), and its sha256
+    cut to `SHORT_DIGEST`, or `unhashed` when the run had none to take (a server over HTTP)."""
     digest = _text(binary.get("sha256"))
-    return f"{binary.get('version') or '?'} ({digest[:SHORT_DIGEST] if digest else 'unhashed'})"
+    version = _inline(str(binary.get("version") or "?"))
+    return f"{version} ({digest[:SHORT_DIGEST] if digest else 'unhashed'})"
 
 
 def _origin_cell(entry: dict) -> str:
