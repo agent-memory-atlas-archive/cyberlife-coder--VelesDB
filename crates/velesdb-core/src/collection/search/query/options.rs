@@ -34,11 +34,14 @@ impl QuerySearchOptions {
     ///
     /// Maps the `mode` option, or its alias `quality`, to a
     /// [`SearchQuality`](crate::SearchQuality) through
-    /// [`WithClause::search_quality`](crate::velesql::WithClause::search_quality):
-    /// a mode that is not a string or does not parse is a query error, not a
-    /// silently ignored override (#2267). The query validator rejects such a
-    /// mode first on every query path; this keeps the conversion honest for a
-    /// direct caller.
+    /// [`WithClause::search_quality`](crate::velesql::WithClause::search_quality),
+    /// and `ef_search` through
+    /// [`WithClause::ef_search`](crate::velesql::WithClause::ef_search): a
+    /// mode that is not a string or does not parse, or an `ef_search` outside
+    /// the documented range, is a query error, not a silently ignored
+    /// override (#2267, #2274). The query validator rejects both first on
+    /// every query path; this keeps the conversion honest for a direct
+    /// caller.
     pub(crate) fn from_with_clause(
         with: Option<&crate::velesql::WithClause>,
     ) -> crate::error::Result<Self> {
@@ -47,8 +50,7 @@ impl QuerySearchOptions {
         };
 
         let quality = with.search_quality().map_err(crate::error::Error::Query)?;
-
-        let ef_search = with.get_ef_search();
+        let ef_search = with.ef_search().map_err(crate::error::Error::Query)?;
         let force_rerank = with.get_rerank();
 
         Ok(Self {

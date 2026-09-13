@@ -5586,7 +5586,7 @@
               "integer",
               "null"
             ],
-            "description": "HNSW `ef_search` parameter.",
+            "description": "HNSW `ef_search` parameter, in `[16, 4096]`. Any other value is\nrefused with a `400` naming the range (#2274). A batch entry's is\nchecked but not applied, like `mode`.",
             "example": 128,
             "minimum": 0
           },

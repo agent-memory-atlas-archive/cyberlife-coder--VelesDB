@@ -147,12 +147,53 @@ impl WithClause {
     }
 
     /// Gets ef_search if specified.
+    ///
+    /// Silently drops a value it cannot read as a plain non-negative integer
+    /// — a typo, a string, or a negative literal (the grammar accepts a
+    /// leading `-`) — rather than reporting it. A caller that must refuse
+    /// such a value instead of treating it as "not given" uses
+    /// [`Self::ef_search`]; one that only needs to know whether an inline
+    /// value was given at all (to decide whether to inject a default over
+    /// it) uses [`Self::ef_search_value`], which sees a value this method
+    /// cannot read (#2274).
     #[must_use]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get_ef_search(&self) -> Option<usize> {
         self.get("ef_search")
             .and_then(WithValue::as_integer)
             .map(|v| v as usize)
+    }
+
+    /// The raw value `WITH (ef_search = ...)` gives, or `None` when the
+    /// option is absent. See [`Self::ef_search`] for the validated reading.
+    #[must_use]
+    pub fn ef_search_value(&self) -> Option<&WithValue> {
+        self.get("ef_search")
+    }
+
+    /// The `ef_search` `WITH (ef_search = ...)` asks for, checked against the
+    /// documented range (`docs/VELESQL_SPEC.md`), or `None` when the option
+    /// is absent. Unlike [`Self::get_ef_search`], a value that is not an
+    /// integer, or one outside `[16, 4096]` — `-1`, say, which
+    /// [`Self::get_ef_search`] would cast to near `usize::MAX` — is an error
+    /// here, never a silent fall-back to no override (#2274).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the accepted type or range for a value that
+    /// is not an integer, or an integer outside the documented range.
+    pub fn ef_search(&self) -> Result<Option<usize>, String> {
+        let Some(value) = self.ef_search_value() else {
+            return Ok(None);
+        };
+        let Some(raw) = value.as_integer() else {
+            return Err(format!(
+                "ef_search must be an integer between {} and {}",
+                crate::api_types::MIN_EF_SEARCH,
+                crate::api_types::MAX_EF_SEARCH
+            ));
+        };
+        crate::api_types::parse_with_ef_search(raw).map(Some)
     }
 
     /// Gets timeout in milliseconds if specified.

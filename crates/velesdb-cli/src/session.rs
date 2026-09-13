@@ -121,9 +121,10 @@ impl SessionSettings {
                 let ef = value
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid integer: {value}"))?;
-                if !(16..=4096).contains(&ef) {
-                    return Err(format!("ef_search must be between 16 and 4096, got {ef}"));
-                }
+                // Same range the config file and every query-time `WITH
+                // (ef_search = ...)` enforce (#2274) — one definition,
+                // `velesdb_core::api_types::validate_ef_search`.
+                velesdb_core::api_types::validate_ef_search(ef)?;
                 self.ef_search = Some(ef);
                 Ok(())
             }

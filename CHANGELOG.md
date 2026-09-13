@@ -7,12 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **Note for the next release**: this train contains a **breaking** behaviour
-> change (#2267, the first entry under `### Changed`): a search `mode` VelesQL
-> or REST cannot parse now fails instead of running at the default quality,
-> and a collection's own `execute_aggregate` refuses a query the validator
-> rejects. The declared SemVer policy (`docs/FAQ.md`) makes a breaking change
-> a major bump: tag the next release accordingly.
+> **Note for the next release**: this train contains **breaking** behaviour
+> changes (#2267 and #2274, the first two entries under `### Changed`): a
+> search `mode` VelesQL or REST cannot parse, and an `ef_search` outside
+> `[16, 4096]`, now fail instead of running at the default quality or an
+> uncapped traversal, and a collection's own `execute_aggregate` refuses a
+> query the validator rejects. The declared SemVer policy (`docs/FAQ.md`)
+> makes a breaking change a major bump: tag the next release accordingly.
 
 ### Added
 - **`LockRank::ENTRY_POINT_PROMOTION` (rank 8) in the public lock-rank
@@ -494,6 +495,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `GROUP BY` with no vector `NEAR` (`V006`), as the VelesQL spec documents.
   The note at the top of `[Unreleased]` says what that means for the next
   release's version.
+
+- **BREAKING (REST, VelesQL, bindings) — an `ef_search` outside `[16, 4096]`
+  now fails instead of running silently (#2274).** `WITH (ef_search = ...)`
+  in VelesQL read the option as `get("ef_search").and_then(as_integer)`, under
+  an `#[allow(clippy::cast_sign_loss)]` that hid the actual defect: the
+  grammar accepts a leading `-` on any integer, so `ef_search = -1` cast to
+  `usize::MAX` and ran an uncapped graph traversal, neither exhaustive nor
+  covered by `limits.max_perfect_mode_vectors`; a non-integer value (a typo,
+  `ef_search = 'high'`) was silently ignored. `api_types::validate_ef_search`
+  (already non-negative input — REST, the CLI, the config file, bindings) and
+  `api_types::parse_with_ef_search` (VelesQL's signed grammar) now reject such
+  a value, and every entry point checks it:
+  - VelesQL checks `ef_search` in the query validator, before any dispatch:
+    every query shape fails with `V014`, mirroring `V013` for `mode` (#2267).
+    `WithClause::ef_search` is the one validated reading; `get_ef_search`
+    keeps its old silent-drop behavior for callers already past validation,
+    and `ef_search_value` reads whether an inline value was given at all,
+    like `mode_value` does for `mode`;
+  - REST answers `400` on `/search` and `/search/ids`, before the collection's
+    circuit breaker counts the request, and on `/search/batch`, naming the
+    entry (a batch checks each entry's `ef_search` but still applies none);
+  - the CLI's `\set ef_search` and the config file's `[search].ef_search`
+    already enforced this same range independently; they now call the one
+    definition instead of a copy of the bound;
+  - `velesdb-python`'s `search_with_ef` raises `ValueError` for an
+    out-of-range value instead of passing it straight to the HNSW traversal.
+
+  This holds in every build with `persistence`. The WASM executor reads no
+  `WITH` option, so it neither applies nor checks `ef_search`, matching `mode`.
+
+  Breaking for a client, over REST, VelesQL, the CLI, the config file, or the
+  Python binding, that sent an `ef_search` outside `[16, 4096]` and got either
+  results at an uncapped or near-useless traversal, or a silently ignored
+  override: it now gets a `400` (REST), a `422` with `V014` (VelesQL over
+  `/query`), a `String`/`ValueError` (the CLI, config, or Python), each naming
+  the accepted range. The note at the top of `[Unreleased]` covers this
+  alongside #2267.
 
 - **`.vectors` now has a v2 format: the payload starts page-aligned at byte
   4096 instead of byte 16.** The header fields are unchanged and at the same

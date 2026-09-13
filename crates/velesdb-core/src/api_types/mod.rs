@@ -178,3 +178,49 @@ pub fn parse_search_mode(mode: &str) -> Result<crate::SearchQuality, String> {
     mode_to_search_quality(mode)
         .ok_or_else(|| format!("Unknown search mode '{mode}'. {SEARCH_MODE_FORMS}"))
 }
+
+/// Minimum accepted `ef_search`, per `docs/VELESQL_SPEC.md`.
+pub const MIN_EF_SEARCH: usize = 16;
+
+/// Maximum accepted `ef_search`, per `docs/VELESQL_SPEC.md`.
+pub const MAX_EF_SEARCH: usize = 4096;
+
+/// Validates an `ef_search` value already known to be non-negative (REST, the
+/// CLI, the config file, bindings) against the documented range. `VelesQL`'s
+/// `WITH (ef_search = ...)`, whose grammar accepts a leading `-` that a plain
+/// cast would wrap to a huge `usize`, goes through [`parse_with_ef_search`]
+/// instead (#2274).
+///
+/// # Errors
+///
+/// Returns a message naming the accepted range when `ef` falls outside it.
+pub fn validate_ef_search(ef: usize) -> Result<(), String> {
+    if (MIN_EF_SEARCH..=MAX_EF_SEARCH).contains(&ef) {
+        Ok(())
+    } else {
+        Err(format!(
+            "ef_search must be between {MIN_EF_SEARCH} and {MAX_EF_SEARCH}, got {ef}"
+        ))
+    }
+}
+
+/// Parses a `WITH (ef_search = ...)` integer into a validated `usize`.
+///
+/// The `VelesQL` grammar accepts a leading `-` on any integer literal
+/// (`grammar.pest`'s `integer` rule), and casting a negative value straight
+/// to `usize` wraps it to a huge number — `-1 as usize` is `usize::MAX` — an
+/// uncapped graph traversal rather than the refusal this function gives
+/// instead (#2274).
+///
+/// # Errors
+///
+/// Returns a message naming the accepted range when `ef` is negative or
+/// outside it.
+pub fn parse_with_ef_search(ef: i64) -> Result<usize, String> {
+    usize::try_from(ef)
+        .ok()
+        .filter(|v| (MIN_EF_SEARCH..=MAX_EF_SEARCH).contains(v))
+        .ok_or_else(|| {
+            format!("ef_search must be an integer between {MIN_EF_SEARCH} and {MAX_EF_SEARCH}, got {ef}")
+        })
+}

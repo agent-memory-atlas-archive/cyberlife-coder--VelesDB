@@ -351,7 +351,9 @@ pub struct SearchRequest {
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(example = "balanced"))]
     pub mode: Option<String>,
-    /// HNSW `ef_search` parameter.
+    /// HNSW `ef_search` parameter, in `[16, 4096]`. Any other value is
+    /// refused with a `400` naming the range (#2274). A batch entry's is
+    /// checked but not applied, like `mode`.
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(example = 128))]
     pub ef_search: Option<usize>,

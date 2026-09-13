@@ -527,7 +527,11 @@ class Collection:
         principal: Optional[str] = None,
         tenant: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search with custom HNSW ef_search parameter."""
+        """Search with custom HNSW ef_search parameter.
+
+        Raises:
+            ValueError: if ef_search is outside [16, 4096].
+        """
         ...
 
     def search_ids(

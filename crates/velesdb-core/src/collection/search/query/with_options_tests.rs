@@ -519,20 +519,57 @@ fn test_mode_balanced_is_default_equivalent() {
 
 // --- ef_search edge cases ---
 
+/// Below the documented `[16, 4096]` range: rejected rather than passed
+/// through as a near-useless one-hop traversal (#2274).
 #[test]
-fn test_ef_search_zero() {
+fn test_ef_search_zero_is_rejected() {
     let with = crate::velesql::WithClause::new()
         .with_option("ef_search", crate::velesql::WithValue::Integer(0));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
-    assert_eq!(opts.ef_search, Some(0));
+    let err = QuerySearchOptions::from_with_clause(Some(&with))
+        .expect_err("out-of-range ef_search should be rejected");
+    assert!(err.to_string().contains('0'));
 }
 
+/// Above the documented range: rejected rather than run as an oversized
+/// traversal (#2274).
 #[test]
-fn test_ef_search_very_large() {
+fn test_ef_search_very_large_is_rejected() {
     let with = crate::velesql::WithClause::new()
         .with_option("ef_search", crate::velesql::WithValue::Integer(100_000));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
-    assert_eq!(opts.ef_search, Some(100_000));
+    let err = QuerySearchOptions::from_with_clause(Some(&with))
+        .expect_err("out-of-range ef_search should be rejected");
+    assert!(err.to_string().contains("100000"));
+}
+
+/// `ef_search = -1` must not cast to `usize::MAX` and run an uncapped
+/// traversal (#2274).
+#[test]
+fn test_ef_search_negative_is_rejected() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    let err = col
+        .execute_query_str(
+            "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = -1)",
+            &params,
+        )
+        .expect_err("negative ef_search should be rejected");
+    assert!(err.to_string().contains("V014"), "{err}");
+}
+
+/// A non-integer `ef_search` is ignored today; it must fail instead (#2274).
+#[test]
+fn test_ef_search_non_integer_is_rejected() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    let err = col
+        .execute_query_str(
+            "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 'high')",
+            &params,
+        )
+        .expect_err("non-integer ef_search should be rejected");
+    assert!(err.to_string().contains("V014"), "{err}");
 }
 
 // --- timeout_ms edge cases ---
