@@ -162,19 +162,19 @@ const FILTERED_CALLS: Record<string, Call> = {
 };
 
 /**
- * `fusionParams` exercising each field; the weighted triple only travels
- * whole and must sum to 1.0. The values are exact in f32 and differ from
- * every other argument a multi-query call passes, so `reachesBinding` can
- * only find them.
+ * Each `fusionParams` field, under the strategy that reads it: the weighted
+ * triple only travels whole, under `weighted`, and must sum to 1.0. The
+ * values are exact in f32 and differ from every other argument a
+ * multi-query call passes, so `reachesBinding` can only find them.
  */
 const WEIGHTED_VALUES = { avgWeight: 0.5, maxWeight: 0.375, hitWeight: 0.125 };
-const FUSION_PARAMS: Record<string, Record<string, number>> = {
-  k: { k: 37 },
-  avgWeight: WEIGHTED_VALUES,
-  maxWeight: WEIGHTED_VALUES,
-  hitWeight: WEIGHTED_VALUES,
-  denseWeight: { denseWeight: 0.75 },
-  sparseWeight: { sparseWeight: 0.625 },
+const FUSION_PARAMS: Record<string, { fusion: string; fusionParams: Record<string, number> }> = {
+  k: { fusion: 'rrf', fusionParams: { k: 37 } },
+  avgWeight: { fusion: 'weighted', fusionParams: WEIGHTED_VALUES },
+  maxWeight: { fusion: 'weighted', fusionParams: WEIGHTED_VALUES },
+  hitWeight: { fusion: 'weighted', fusionParams: WEIGHTED_VALUES },
+  denseWeight: { fusion: 'relative_score', fusionParams: { denseWeight: 0.75 } },
+  sparseWeight: { fusion: 'relative_score', fusionParams: { sparseWeight: 0.625 } },
 };
 
 /** A `createCollection` setting for each `CollectionConfig` field, and how to see it applied. */
@@ -290,9 +290,9 @@ const LIST_PROBES: Record<ListCapability, (value: string) => Probe> = {
   filteredSearch: (op) =>
     option(entryFor(FILTERED_CALLS, 'filteredSearch', op), reachesBinding(FILTER)),
   multiQueryFusionParams: (name) => {
-    const fusionParams = entryFor(FUSION_PARAMS, 'multiQueryFusionParams', name);
+    const { fusion, fusionParams } = entryFor(FUSION_PARAMS, 'multiQueryFusionParams', name);
     return option(
-      (b) => b.multiQuerySearch(C, [V], { fusionParams }),
+      (b) => b.multiQuerySearch(C, [V], { fusion: fusion as never, fusionParams }),
       reachesBinding(fusionParams[name])
     );
   },

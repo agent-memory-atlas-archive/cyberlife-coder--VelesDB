@@ -21,7 +21,7 @@ import {
   wasmQuery,
 } from '../src/backends/wasm-search';
 import { NotFoundError, VelesDBError } from '../src/types';
-import { newSparseIds } from '../src/backends/wasm-sparse';
+import { newSparseIds, sparseHits } from '../src/backends/wasm-sparse';
 import type {
   CollectionData,
   WasmContext,
@@ -719,6 +719,7 @@ describe('wasmMultiQuerySearch — fusionParams reach the binding or are refused
     expect(outcome).toBeInstanceOf(VelesDBError);
     expect((outcome as VelesDBError).code).toBe('NOT_SUPPORTED');
     expect((outcome as VelesDBError).message).toMatch(/avgWeight, maxWeight and hitWeight/);
+    expect((outcome as VelesDBError).message).toContain('multiQueryFusionParams');
     expect(multi).not.toHaveBeenCalled();
   });
 });
@@ -799,5 +800,113 @@ describe('wasmMultiQuerySearch — the weighted triple is checked in f32, as cor
     await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: 'weighted', fusionParams });
 
     expect(multi).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('wasmMultiQuerySearch — the weighted triple matters only under `weighted`, as in core (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each(['rrf', 'average', 'maximum'] as const)(
+    '%s passes a triple `weighted` would reject, since it never reads the weights',
+    async (fusion) => {
+      const multi = vi.fn(() => []);
+      const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+      await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+        fusion,
+        fusionParams: { avgWeight: 0.5, maxWeight: 0.5, hitWeight: 0.5 },
+      });
+
+      expect(multi).toHaveBeenCalledTimes(1);
+      expect(multi.mock.calls[0]![5]).toBeNull();
+    }
+  );
+
+  it.each(['rrf', 'average', 'maximum'] as const)(
+    '%s accepts a partial triple, since it never reads the weights',
+    async (fusion) => {
+      const multi = vi.fn(() => []);
+      const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+      await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+        fusion,
+        fusionParams: { avgWeight: 0.5 },
+      });
+
+      expect(multi).toHaveBeenCalledTimes(1);
+      expect(multi.mock.calls[0]![5]).toBeNull();
+    }
+  );
+});
+
+describe('WASM search — k <= 0 returns nothing, before any binding call (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  /** A collection whose binding would return a hit on every path, with one retired sparse id. */
+  function collectionWithHits(dimension: number) {
+    const store = buildStore({
+      search: vi.fn(() => [[1n, 0.9]]),
+      search_with_filter: vi.fn(() => [{ id: 1n, score: 0.9 }]),
+      text_search: vi.fn(() => [{ id: 1n, payload: {} }]),
+      hybrid_search: vi.fn(() => [{ id: 1n, score: 0.9 }]),
+      multi_query_search: vi.fn(() => [[1n, 0.9]]),
+      query: vi.fn(() => [{ id: 1 }]),
+    });
+    const fuse = vi.fn(() => [{ doc_id: 1n, score: 0.9 }]);
+    const ctx = buildCtx('docs', store, { dimension, wasmModule: { hybrid_search_fuse: fuse } });
+    const sparseIds = ctx.getCollection('docs')!.sparseIds;
+    const sparseStore = buildStore({ sparse_search: vi.fn(() => [{ doc_id: 1n, score: 1 }]) });
+    sparseIds.store = sparseStore;
+    sparseIds.byId.set(1n, 1);
+    sparseIds.dead = 1;
+    const bindingCalls = () =>
+      [store, sparseStore]
+        .flatMap((s) => Object.values(s))
+        .filter((f): f is ReturnType<typeof vi.fn> => typeof f === 'function' && 'mock' in f)
+        .reduce((total, f) => total + f.mock.calls.length, fuse.mock.calls.length);
+    return { ctx, bindingCalls };
+  }
+
+  it.each([0, -1])('every search path returns [] for k = %i and never calls the binding', async (k) => {
+    const dense = collectionWithHits(2);
+    const sparseOnly = collectionWithHits(0);
+
+    const results = [
+      await wasmSearch(dense.ctx, 'docs', [0.1, 0.2], { k }),
+      await wasmSearch(dense.ctx, 'docs', [0.1, 0.2], { k, filter: TENANT_FILTER }),
+      await wasmSearch(dense.ctx, 'docs', [0.1, 0.2], { k, sparseVector: { 7: 1 } }),
+      await wasmSearch(sparseOnly.ctx, 'docs', [], { k, sparseVector: { 7: 1 } }),
+      await wasmSearchBatch(dense.ctx, 'docs', [{ vector: [0.1, 0.2], k }]),
+      await wasmTextSearch(dense.ctx, 'docs', 'q', { k }),
+      await wasmHybridSearch(dense.ctx, 'docs', [0.1, 0.2], 'q', { k }),
+      await wasmMultiQuerySearch(dense.ctx, 'docs', [[0.1, 0.2]], { k }),
+    ];
+
+    expect(results).toEqual([[], [], [], [], [[]], [], [], []]);
+    expect(dense.bindingCalls() + sparseOnly.bindingCalls()).toBe(0);
+  });
+
+  it('query with LIMIT 0 returns no rows and never calls the binding', async () => {
+    const { ctx, bindingCalls } = collectionWithHits(2);
+
+    const response = await wasmQuery(ctx, 'docs', 'SELECT * FROM docs WHERE vector NEAR $v LIMIT 0', {
+      v: [0.1, 0.2],
+    });
+
+    expect(response.results).toEqual([]);
+    expect(bindingCalls()).toBe(0);
+  });
+});
+
+describe('sparseHits — k <= 0 fetches nothing (#2095)', () => {
+  it.each([0, -1])('returns [] for k = %i without calling the sparse store', (k) => {
+    const sparse_search = vi.fn(() => [{ doc_id: 1n, score: 1 }]);
+    const ids = newSparseIds();
+    ids.store = buildStore({ sparse_search });
+    ids.byId.set(1n, 1);
+    ids.dead = 1;
+
+    expect(sparseHits(ids, [7], [1], k)).toEqual([]);
+    expect(sparse_search).not.toHaveBeenCalled();
   });
 });

@@ -513,7 +513,7 @@ const results = await db.multiQuerySearch('docs', [emb1, emb2], {
 });
 ```
 
-> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0, computed in f32 as core computes it), with `BAD_REQUEST`. WASM `relative_score` averages the query branches with equal weight, so `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
+> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0, computed in f32 as core computes it), with `BAD_REQUEST`. The other strategies read no weights, so they ignore them, as core does. WASM `relative_score` averages the query branches with equal weight, so `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
 
 #### Named sparse indexes — `sparseIndexName` vs `sparseSearchNamed()`
 

@@ -12,6 +12,7 @@ import type {
   QueryOptions,
   QueryApiResponse,
   FusionParams,
+  FusionStrategy,
 } from '../types';
 import type { FilterInput } from '../filter';
 import { NotFoundError, VelesDBError } from '../types';
@@ -158,6 +159,9 @@ export async function wasmSearch(
 
   const k = options?.k ?? 10;
   refuseUnhonouredSearchOptions(options);
+  if (k <= 0) {
+    return [];
+  }
 
   if (options?.sparseVector) {
     const { indices, values } = ctx.sparseVectorToArrays(options.sparseVector);
@@ -238,6 +242,9 @@ export async function wasmTextSearch(
   }
   requireWasmFilterSupport('textSearch', options?.filter);
   const k = options?.k ?? 10;
+  if (k <= 0) {
+    return [];
+  }
   // The binding's third argument names one payload field to match. It is
   // not a filter, which is why a filter is refused above.
   const raw: WasmSearchResultItem[] = collection.store.text_search(query, k, null);
@@ -258,6 +265,9 @@ export async function wasmHybridSearch(
   requireWasmFilterSupport('hybridSearch', options?.filter);
   const queryVector = vector instanceof Float32Array ? vector : new Float32Array(vector);
   const k = options?.k ?? 10;
+  if (k <= 0) {
+    return [];
+  }
   const vectorWeight = options?.vectorWeight ?? 0.5;
   const raw: WasmHybridResult[] = collection.store.hybrid_search(
     queryVector, textQuery, k, vectorWeight
@@ -311,25 +321,32 @@ function validateWeightedTriple(weights: readonly number[]): void {
  * Translate `fusionParams` into velesdb-wasm's `multi_query_search`
  * arguments, refusing what the binding cannot apply.
  *
- * The three weighted-fusion weights travel as one argument, and the binding
- * applies core's defaults only when that argument is absent. A partial
- * triple is therefore refused rather than completed with guessed values, and
- * a complete one is checked against core's rule.
+ * Core reads the weighted triple under `weighted` only (velesdb-wasm's
+ * `fuse_results`, velesdb-server's `build_fusion_strategy`), so another
+ * strategy gets none, whatever the caller set. Under `weighted`, the three
+ * weights travel as one argument, and the binding applies core's defaults
+ * only when that argument is absent: a partial triple is therefore refused
+ * rather than completed with guessed values, and a complete one is checked
+ * against core's rule.
  */
-function wasmFusionArgs(params: FusionParams | undefined): {
+function wasmFusionArgs(
+  strategy: FusionStrategy,
+  params: FusionParams | undefined
+): {
   rrfK: number;
   weights: Float32Array | null;
 } {
   requireWasmFieldsListed('multiQueryFusionParams', 'multiQuerySearch fusionParams', params);
   const rrfK = params?.k ?? 60;
   const weights = WEIGHTED_TRIPLE.map((name) => params?.[name]).filter(isSet);
-  if (weights.length === 0) {
+  if (strategy !== 'weighted' || weights.length === 0) {
     return { rrfK, weights: null };
   }
   if (weights.length !== WEIGHTED_TRIPLE.length) {
     wasmNotSupported(
-      'multiQuerySearch with only some of fusionParams avgWeight, maxWeight and ' +
-        'hitWeight (velesdb-wasm takes the three together)'
+      "multiQuerySearch under 'weighted' with only some of fusionParams avgWeight, maxWeight " +
+        "and hitWeight (capability 'multiQueryFusionParams' lists the three, which velesdb-wasm " +
+        'takes together)'
     );
   }
   validateWeightedTriple(weights);
@@ -347,8 +364,10 @@ export async function wasmMultiQuerySearch(
     throw new NotFoundError(`Collection '${collectionName}'`);
   }
   requireWasmFilterSupport('multiQuerySearch', options?.filter);
-  const { rrfK, weights } = wasmFusionArgs(options?.fusionParams);
-  if (vectors.length === 0) {
+  const strategy = options?.fusion ?? 'rrf';
+  const { rrfK, weights } = wasmFusionArgs(strategy, options?.fusionParams);
+  const k = options?.k ?? 10;
+  if (vectors.length === 0 || k <= 0) {
     return [];
   }
 
@@ -360,11 +379,10 @@ export async function wasmMultiQuerySearch(
     flat.set(src, idx * dimension);
   });
 
-  const strategy = options?.fusion ?? 'rrf';
   const raw: WasmSearchResultItem[] = collection.store.multi_query_search(
     flat,
     numVectors,
-    options?.k ?? 10,
+    k,
     strategy,
     rrfK,
     weights
@@ -462,10 +480,14 @@ export async function wasmQuery(
     );
   }
   const k = resolveQueryK(parsed.limit, params?.k);
-  const raw: Record<string, unknown>[] = collection.store.query(
-    paramsVector instanceof Float32Array ? paramsVector : new Float32Array(paramsVector),
-    k
-  );
+  // `LIMIT 0` asks for no rows: there is nothing to ask the binding.
+  const raw: Record<string, unknown>[] =
+    k <= 0
+      ? []
+      : collection.store.query(
+          paramsVector instanceof Float32Array ? paramsVector : new Float32Array(paramsVector),
+          k
+        );
 
   return {
     results: raw,

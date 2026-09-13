@@ -430,11 +430,23 @@ function expectRefusal(outcome: unknown, capability: string): void {
 function sparseIdsOf(
   backend: WasmBackend,
   collection: string
-): { dead: number; byId: Map<bigint, unknown>; vectors: Map<bigint, unknown> } {
+): {
+  store: MockVectorStore | null;
+  dead: number;
+  byId: Map<bigint, unknown>;
+  vectors: Map<bigint, unknown>;
+} {
   const internals = backend as unknown as {
     collections: Map<
       string,
-      { sparseIds: { dead: number; byId: Map<bigint, unknown>; vectors: Map<bigint, unknown> } }
+      {
+        sparseIds: {
+          store: MockVectorStore | null;
+          dead: number;
+          byId: Map<bigint, unknown>;
+          vectors: Map<bigint, unknown>;
+        };
+      }
     >;
   };
   return internals.collections.get(collection)!.sparseIds;
@@ -551,6 +563,49 @@ describe('WasmBackend — upsert indexes sparse vectors; sparse search sees live
     expect(await hitIds({ 9: 1 })).toEqual([]);
     const [hit] = await backend.search('s', [], { sparseVector: { 11: 2 } });
     expect(hit).toMatchObject({ id: '1', score: 2 });
+  });
+
+  it('frees the sparse store a rebuild replaces', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    await backend.upsert('s', { id: 2, vector: [], sparseVector: { 8: 1 } });
+    const replaced = sparseIdsOf(backend, 's').store!;
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 9: 1 } });
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 10: 1 } });
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 11: 1 } });
+
+    const current = sparseIdsOf(backend, 's').store!;
+    expect(current).not.toBe(replaced);
+    expect(replaced.free).toHaveBeenCalledTimes(1);
+    expect(current.free).not.toHaveBeenCalled();
+  });
+
+  it('frees the sparse store when a rebuild leaves no live sparse vector', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    const replaced = sparseIdsOf(backend, 's').store!;
+    await backend.delete('s', 1);
+
+    expect(sparseIdsOf(backend, 's').store).toBeNull();
+    expect(replaced.free).toHaveBeenCalledTimes(1);
+  });
+
+  it('deleteCollection frees the vector store and the sparse store', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    const vectors = storeOf(backend, 's');
+    const sparse = sparseIdsOf(backend, 's').store!;
+    await backend.deleteCollection('s');
+
+    expect(vectors.free).toHaveBeenCalledTimes(1);
+    expect(sparse.free).toHaveBeenCalledTimes(1);
+  });
+
+  it('close frees the vector store and the sparse store', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    const vectors = storeOf(backend, 's');
+    const sparse = sparseIdsOf(backend, 's').store!;
+    await backend.close();
+
+    expect(vectors.free).toHaveBeenCalledTimes(1);
+    expect(sparse.free).toHaveBeenCalledTimes(1);
   });
 
   it('still returns k live points when dead postings outrank them', async () => {
