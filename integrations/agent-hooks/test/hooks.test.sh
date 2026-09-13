@@ -973,6 +973,10 @@ wc_expect() {
   fi
 }
 
+# A second project, for the checks that span two.
+PROJECT_B_DIR="$TMP_TEST_DIR/project-b"
+mkdir -p "$PROJECT_B_DIR"
+printf '{"project": "test-project-b", "session": "rolling"}\n' > "$PROJECT_B_DIR/.velesdb-hooks.json"
 wc_sid="test-wc-$$"
 wc_call "$HOOKS_DIR" "$wc_sid-a" "$WC_SAVE" test-project campaign-a "$WC_SAVED"
 wc_text="$(wc_context "$HOOKS_DIR" "$wc_sid-a" startup)"
@@ -1083,6 +1087,44 @@ jq -cn --arg host "$wc_sid-y" '{host: $host, project: "test-project", session: "
 wc_expect "Working context: a record that names no save or load is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-y" startup)" rolling
 
+# A save reminder names only a session the conversation saved: after a load
+# alone, Stop and PreCompact still name the configured one.
+wc_call "$HOOKS_DIR" "$wc_sid-ab" "$WC_LOAD" test-project campaign-only-read "$WC_FOUND"
+wc_expect "Working context: after a load only, Stop names the configured session" \
+  "$(wc_reason "$HOOKS_DIR" stop "$wc_sid-ab")" rolling
+wc_expect "Working context: after a load only, PreCompact names the configured session" \
+  "$(wc_reason "$HOOKS_DIR" pre-compact "$wc_sid-ab")" rolling
+
+# A save names its own project, wherever the conversation's cwd is: it is kept
+# for that project, and that project's edit batch names it.
+wc_call "$HOOKS_DIR" "$wc_sid-ac" "$WC_SAVE" test-project-b campaign-from-a "$WC_SAVED"
+wc_expect "Working context: a save for another project is kept for that project" \
+  "$(WC_CWD="$PROJECT_B_DIR" wc_context "$HOOKS_DIR" "$wc_sid-ac" startup)" campaign-from-a
+wc_batch="$(jq -cn '[{project: "test-project-b", session: "rolling", root: "/b"}]')"
+wc_batch="$(bash -c 'source "$1/lib/common.sh"; adopt_batch_sessions "$2" "$3"' _ "$HOOKS_DIR" "$wc_sid-ac" "$wc_batch" 2>/dev/null || true)"
+if [ "$(printf '%s' "$wc_batch" | jq -r '.[0].session' 2>/dev/null)" = campaign-from-a ]; then
+  pass "Working context: that project's edit batch names it"
+else
+  fail "Working context: that project's edit batch names it: $wc_batch"
+fi
+
+# A project name holding a control character is refused before it is split: a
+# tab would cut it into this project's name and overwrite its record.
+wc_call "$HOOKS_DIR" "$wc_sid-ae" "$WC_SAVE" test-project campaign-z "$WC_SAVED"
+wc_call "$HOOKS_DIR" "$wc_sid-ae" "$WC_SAVE" $'test-project\tb' campaign-t "$WC_SAVED"
+wc_expect "Working context: a project name holding a tab does not overwrite this project's record" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-ae" startup)" campaign-z
+
+# An edit batch asks for a save: after a load alone it keeps the configured one.
+wc_call "$HOOKS_DIR" "$wc_sid-ad" "$WC_LOAD" test-project-b campaign-b-read "$WC_FOUND"
+wc_batch="$(jq -cn '[{project: "test-project-b", session: "rolling", root: "/b"}]')"
+wc_batch="$(bash -c 'source "$1/lib/common.sh"; adopt_batch_sessions "$2" "$3"' _ "$HOOKS_DIR" "$wc_sid-ad" "$wc_batch" 2>/dev/null || true)"
+if [ "$(printf '%s' "$wc_batch" | jq -r '.[0].session' 2>/dev/null)" = rolling ]; then
+  pass "Working context: after a load only, an edit batch keeps the configured session"
+else
+  fail "Working context: after a load only, an edit batch keeps the configured session: $wc_batch"
+fi
+
 # A trailing newline is refused too; a check anchored like jq's `$` admits one.
 wc_call "$HOOKS_DIR" "$wc_sid-k" "$WC_SAVE" test-project $'campaign-k\n' "$WC_SAVED"
 wc_expect "Working context: a name ending in a newline is not adopted" \
@@ -1099,9 +1141,6 @@ wc_expect "Working context: a save through the underscore tool name is adopted" 
   "$(wc_context "$HOOKS_DIR" "$wc_sid-l" startup)" campaign-l
 
 # One host session, two projects: each keeps the working context saved for it.
-PROJECT_B_DIR="$TMP_TEST_DIR/project-b"
-mkdir -p "$PROJECT_B_DIR"
-printf '{"project": "test-project-b", "session": "rolling"}\n' > "$PROJECT_B_DIR/.velesdb-hooks.json"
 wc_call "$HOOKS_DIR" "$wc_sid-m" "$WC_SAVE" test-project campaign-ma "$WC_SAVED"
 WC_CWD="$PROJECT_B_DIR" wc_call "$HOOKS_DIR" "$wc_sid-m" "$WC_SAVE" test-project-b campaign-mb "$WC_SAVED"
 wc_expect "Working context: a save in another project keeps this one's" \
@@ -1136,8 +1175,13 @@ wc_expect "Working context (Codex): SessionStart after a compaction names it" \
 wc_expect "Working context (Codex): Stop names it" \
   "$(wc_reason "$CODEX_HOOKS_DIR" stop "$wc_sid-codex")" campaign-codex
 wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-load" "$WC_LOAD" test-project campaign-cl "$WC_FOUND"
-wc_expect "Working context (Codex): a load that found one is adopted" \
-  "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-load" compact)" campaign-cl
+wc_text="$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-load" compact)"
+if printf '%s' "$wc_text" | grep -qF 'load_working_context(project="test-project", session="campaign-cl")' \
+  && printf '%s' "$wc_text" | grep -qF 'save_working_context(project="test-project", session="rolling")'; then
+  pass "Working context (Codex): after a load only, the load names it and the save the configured one"
+else
+  fail "Working context (Codex): after a load only, the load names it and the save the configured one: $wc_text"
+fi
 wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-failed" "$WC_SAVE" test-project campaign-x '{"error":"refused"}' true
 wc_expect "Working context (Codex): a failed save is not adopted" \
   "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-failed" startup)" rolling

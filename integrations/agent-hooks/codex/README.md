@@ -93,8 +93,8 @@ statusMessage = "velesdb-memory: record recall and working context"
 The lifecycle hooks derive `project` from `basename(cwd)` and use
 `session="rolling"` by default; once a conversation saves its working context
 under another session of the same project, or loads one that exists, its
-`SessionStart` and `Stop` reminders name that session instead (the last it saved,
-or else the last it loaded). The edit guard
+reminders name that session instead: the load reminder the last it saved, or
+else the last it loaded; a save reminder only one it saved. The edit guard
 resolves every `Add`, `Update`,
 `Delete`, and `Move` target in `tool_input.command`, so a patch issued from a
 different cwd still observes each target repository's policy. To pin identity,

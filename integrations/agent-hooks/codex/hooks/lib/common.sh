@@ -336,8 +336,9 @@ recall_targets_current_project() {
 # Stop: naming the default after a compaction makes it load a stale context, or
 # save over one another conversation owns. PostToolUse records the session of
 # each successful save_working_context, and of each load_working_context that
-# found one, per host session and for the current project only; a load never
-# replaces a recorded save. The reminders adopt it.
+# found one, per host session and per project the call names; a load never
+# replaces a recorded save. A load reminder adopts either; a save reminder only a
+# session the conversation saved.
 
 # The session name a reminder may quote: a letter or digit, then up to 127
 # letters, digits, `.`, `_`, `:` or `-`. jq checks it on the JSON string as it
@@ -356,14 +357,15 @@ working_context_found() {
   ' >/dev/null 2>&1
 }
 
-# working_context_call PAYLOAD: print `save NAME` or `load NAME` for a
-# successful working-context call for the current project; fail for any other
-# call.
+# working_context_call PAYLOAD: print `VIA<TAB>PROJECT<TAB>NAME` for a
+# successful working-context call; fail for any other call. The project is the
+# call's own: a conversation may save the context of a repository other than
+# the one its cwd is in, and Stop names each edited repository's own. It must be
+# a non-empty string with no control character, so it keys a record exactly.
 working_context_call() {
   local payload="$1"
   local tool_name
   local via
-  local session
   tool_name="$(printf '%s' "$payload" | jq -r '.tool_name // empty')"
   case "$tool_name" in
     mcp__velesdb-memory__save_working_context|mcp__velesdb_memory__save_working_context)
@@ -380,13 +382,12 @@ working_context_call() {
       ;;
   esac
   successful_tool_response "$payload" || return 1
-  session="$(printf '%s' "$payload" | jq -r --arg project "$PROJECT" --arg class "$WORKING_SESSION_CLASS" '
-    select(.tool_input.project == $project)
-    | .tool_input.session
-    | select(type == "string" and test("\\A" + $class + "\\z"))
-  ' 2>/dev/null)" || return 1
-  [ -n "$session" ] || return 1
-  printf '%s %s' "$via" "$session"
+  printf '%s' "$payload" | jq -r --arg via "$via" --arg class "$WORKING_SESSION_CLASS" '
+    .tool_input
+    | select((.project | type == "string" and length > 0 and (test("[[:cntrl:]]") | not))
+      and (.session | type == "string" and test("\\A" + $class + "\\z")))
+    | "\($via)\t\(.project)\t\(.session)"
+  ' 2>/dev/null
 }
 
 # working_session_marker HOST_SESSION PROJECT: the private record of the working
@@ -414,53 +415,61 @@ recorded_working_session() {
 }
 
 # remember_working_session HOST_SESSION PAYLOAD: record the session of a
-# successful working-context call for the current project. A save names the
-# context this conversation writes; a load names one it read. So a load never
-# replaces a recorded save: reading a sibling's context must not make Stop save
-# over it.
+# successful working-context call, for the project the call names. A save names
+# the context this conversation writes; a load names one it read. So a load
+# never replaces a recorded save.
 remember_working_session() {
   local call
+  local via
+  local project
+  local session
   local recorded
   local marker
   call="$(working_context_call "$2")" || return 1
-  if [ "${call%% *}" = load ]; then
-    recorded="$(recorded_working_session "$1" "$PROJECT")" || recorded=""
+  [ -n "$call" ] || return 1
+  IFS=$'\t' read -r via project session <<<"$call"
+  if [ "$via" = load ]; then
+    recorded="$(recorded_working_session "$1" "$project")" || recorded=""
     [ "${recorded%% *}" != save ] || return 0
   fi
-  marker="$(working_session_marker "$1" "$PROJECT")" || return 1
+  marker="$(working_session_marker "$1" "$project")" || return 1
   write_private_marker "$marker" \
-    "$(jq -cn --arg host "$1" --arg project "$PROJECT" --arg via "${call%% *}" --arg session "${call#* }" \
+    "$(jq -cn --arg host "$1" --arg project "$project" --arg via "$via" --arg session "$session" \
       '{host: $host, project: $project, via: $via, session: $session}')"
 }
 
-# adopted_session_for HOST_SESSION PROJECT: print the working context that host
-# session last saved, or else last loaded, for that project.
+# adopted_session_for HOST_SESSION PROJECT KIND: print the working context a
+# reminder may name for that project. KIND `any`, for a load reminder: the last
+# session this host session saved, or else the last it loaded, which it may
+# resume. Any other KIND, for a save reminder: only one it saved, since a save
+# reminder must never name a context the conversation only read.
 adopted_session_for() {
   local recorded
   recorded="$(recorded_working_session "$1" "$2")" || return 1
   [ -n "$recorded" ] || return 1
+  [ "$3" = any ] || [ "${recorded%% *}" = save ] || return 1
   printf '%s' "${recorded#* }"
 }
 
-# adopt_working_session HOST_SESSION: set SESSION to the working context this
-# host session last saved or loaded for the current project. Fails, leaving
-# SESSION as configured, when there is none.
+# adopt_working_session HOST_SESSION KIND: set SESSION to the working context a
+# reminder of that KIND may name for the current project (see
+# adopted_session_for). Fails, leaving SESSION as configured, when there is none.
 adopt_working_session() {
   local session
-  session="$(adopted_session_for "$1" "$PROJECT")" || return 1
+  session="$(adopted_session_for "$1" "$PROJECT" "$2")" || return 1
   SESSION="$session"
 }
 
 # adopt_batch_sessions HOST_SESSION TARGETS: TARGETS, a JSON array of
 # {project, session, root} as PreToolUse froze them, with each session replaced
-# by the one this host session last saved or loaded for that project. Project
-# names are read NUL-delimited, since one can hold a newline.
+# by the one this host session last saved for that project: the checklist asks
+# for a save. Project names are read NUL-delimited, since one can hold a newline.
 adopt_batch_sessions() {
   local targets="$2"
   local project
   local session
   while IFS= read -r -d '' project; do
-    session="$(adopted_session_for "$1" "$project")" || continue
+    session="$(adopted_session_for "$1" "$project" save)" || continue
     targets="$(printf '%s' "$targets" | jq -c --arg p "$project" --arg s "$session" \
       'map(if .project == $p then .session = $s else . end)')" || return 1
   done < <(printf '%s' "$targets" | jq -j '[.[].project] | unique[] | . + "\u0000"')

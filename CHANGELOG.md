@@ -117,8 +117,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load a context it never wrote, and at Stop to save over one another
   conversation may own. PostToolUse now records the session of each successful
   `save_working_context`, and of each `load_working_context` that found one,
-  per host session and project; a load never replaces a recorded save, so reading
-  another conversation's context does not make Stop save over it. The reminders
+  per host session and per project the call names; a load never replaces a
+  recorded save. A load reminder (SessionStart) names the last session the
+  conversation saved, or else the last it loaded; a save reminder (PreCompact,
+  Stop, Codex's post-compaction reminder) names only one it saved, so reading
+  another conversation's context never makes it save over that one. The reminders
   name that session, and so does
   the checklist an opted-in repository's Stop gives for an edit batch; after a
   compaction the Claude Code SessionStart hook asks to load it again. Codex runs

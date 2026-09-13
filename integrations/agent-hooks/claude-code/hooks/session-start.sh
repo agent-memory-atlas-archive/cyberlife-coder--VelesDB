@@ -31,7 +31,7 @@ fi
 
 resolve_config "$cwd"
 session_note=""
-if adopt_working_session "$session_id"; then
+if adopt_working_session "$session_id" any; then
   session_note=", the working context this conversation last saved or loaded,"
 fi
 
