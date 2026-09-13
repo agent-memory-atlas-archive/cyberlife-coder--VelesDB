@@ -117,7 +117,8 @@ fi
 if [ "${#dirty_records[@]}" -gt 0 ]; then
   targets="$(jq -sc '[.[] | {project, session, root}]' "${dirty_records[@]}")"
   # Each repository is named with the working context this conversation last
-  # saved or loaded for it, not the session PreToolUse froze into its record.
+  # saved for it, else with the session PreToolUse froze into its record: the
+  # checklist asks for a save, so a session it only loaded is never named.
   if adopted_targets="$(adopt_batch_sessions "$session_id" "$targets")"; then
     targets="$adopted_targets"
   fi

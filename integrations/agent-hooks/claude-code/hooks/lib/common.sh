@@ -386,6 +386,7 @@ recall_targets_current_project() {
   [ "$scoped_project" = "$PROJECT" ]
 }
 
+# >>> BEGIN: shared byte for byte with the other host's lib/common.sh; test/hooks.test.sh checks it.
 # --- The working context this conversation uses -------------------------------
 # The configured `session` (`.velesdb-hooks.json`, else "rolling") is only a
 # default. A conversation that keeps its state under another session — one per
@@ -619,3 +620,5 @@ promote_pending_recall() {
   done
   rmdir "$dir" 2>/dev/null || true
 }
+
+# <<< END: shared byte for byte with the other host's lib/common.sh; test/hooks.test.sh checks it.

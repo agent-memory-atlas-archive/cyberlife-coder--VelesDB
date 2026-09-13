@@ -37,8 +37,9 @@ if [ -n "$session_id" ] && successful_memory_recall "$payload"; then
   fi
 fi
 
-# The working context this conversation saves or loads becomes the one the
-# SessionStart and Stop reminders name (lib/common.sh).
+# A session this conversation saves becomes the one the SessionStart and Stop
+# reminders name; one it only loads, the one SessionStart asks it to load
+# (lib/common.sh).
 if [ -n "$session_id" ]; then
   remember_working_session "$session_id" "$payload" || true
 fi

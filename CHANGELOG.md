@@ -120,17 +120,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per host session and per project the call names; a load never replaces a
   recorded save. A load reminder (SessionStart) names the last session the
   conversation saved, or else the last it loaded; a save reminder (PreCompact,
-  Stop, Codex's post-compaction reminder) names only one it saved, so reading
-  another conversation's context never makes it save over that one. The reminders
-  name that session, and so does
-  the checklist an opted-in repository's Stop gives for an edit batch; after a
-  compaction the Claude Code SessionStart hook asks to load it again. Codex runs
-  the hook only for the tools its PostToolUse matcher names: the installer and
-  the snippet now include the two working-context tools. A load that found
-  nothing, another project's session, a failed call and a name outside
-  `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` are ignored; jq checks each name as it was
-  sent, a NUL byte or a trailing newline included, before any shell reads it, so
-  none can redirect the reminders or carry text into them.
+  Stop and the checklist an opted-in repository's Stop gives for an edit batch,
+  Codex's post-compaction reminder) names only one it saved, and otherwise the
+  configured one, so reading another conversation's context never makes it
+  save over that one. After a compaction the Claude Code SessionStart hook asks
+  to load the working context again. Codex runs the hook only for the tools its
+  PostToolUse matcher names: the installer and the snippet now include the two
+  working-context tools. A call naming another project is never adopted for
+  this one; it is kept under its own. A load that found nothing, a failed call,
+  a project name that is empty or holds a control character, and a session
+  name outside `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` are ignored; jq checks each
+  name as it was sent, a NUL byte or a trailing newline included, before any
+  shell reads it, so none can redirect the reminders or carry text into them.
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
   served at `GET /api-docs/openapi.json` by a server built with
