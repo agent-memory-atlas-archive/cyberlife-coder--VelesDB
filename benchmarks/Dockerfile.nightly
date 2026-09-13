@@ -1,5 +1,6 @@
-# VelesDB Benchmark Dockerfile - Rust Nightly
-# Required for anndists dependency (uses edition 2024)
+# VelesDB Benchmark Dockerfile
+# Once built on nightly for the anndists dependency; the workspace no longer
+# depends on it, so this image builds with rust-toolchain.toml's toolchain.
 
 FROM rust:slim-bookworm AS builder
 
@@ -8,14 +9,18 @@ LABEL version="6.0.0"
 
 WORKDIR /app
 
-# Install nightly and build dependencies
+# Install build dependencies
 # hadolint ignore=DL3008
-RUN rustup default nightly && \
-    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+# The toolchain rust-toolchain.toml pins -- the one CI tests -- installed
+# from that file before anything reaches cargo.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update --profile minimal
 
 # Copy manifests and source
 COPY Cargo.toml Cargo.lock ./

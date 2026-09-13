@@ -13,6 +13,11 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# The toolchain rust-toolchain.toml pins -- the one CI tests -- installed
+# from that file before anything reaches cargo.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update --profile minimal
+
 # Copy manifests and source
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates

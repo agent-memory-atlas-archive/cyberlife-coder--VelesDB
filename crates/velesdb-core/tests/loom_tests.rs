@@ -6,7 +6,7 @@
 //! # Running Loom Tests
 //!
 //! ```bash
-//! cargo +nightly test --features loom --test loom_tests
+//! RUSTFLAGS="--cfg loom" cargo test --features loom,persistence --test loom_tests
 //! ```
 //!
 //! # EPIC-023: Loom Concurrency Testing

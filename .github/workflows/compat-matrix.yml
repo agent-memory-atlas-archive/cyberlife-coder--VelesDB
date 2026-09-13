@@ -92,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # loom needs only `--cfg loom`, so the pinned toolchain, not nightly.
+      # loom needs only `--cfg loom`, which the pinned toolchain builds.
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install --no-self-update --profile minimal
 
