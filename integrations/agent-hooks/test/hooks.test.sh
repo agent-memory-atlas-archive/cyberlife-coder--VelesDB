@@ -1028,7 +1028,7 @@ wc_expect "Working context: a name carrying a quote is not adopted" \
 
 # A record reached through a symlink is not ours: never adopted.
 wc_key="$(printf '%s\n%s' "$wc_sid-i" test-project | cksum)"
-jq -cn --arg host "$wc_sid-i" '{host: $host, project: "test-project", session: "campaign-linked"}' \
+jq -cn --arg host "$wc_sid-i" '{host: $host, project: "test-project", via: "save", session: "campaign-linked"}' \
   > "$TMP_TEST_DIR/linked-record"
 ln -s "$TMP_TEST_DIR/linked-record" "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
 wc_expect "Working context: a symlinked record is not adopted" \
@@ -1037,10 +1037,51 @@ wc_expect "Working context: a symlinked record is not adopted" \
 # The record is re-checked when read: one planted with a name the capture
 # would have refused is not adopted either.
 wc_key="$(printf '%s\n%s' "$wc_sid-j" test-project | cksum)"
-jq -cn --arg host "$wc_sid-j" '{host: $host, project: "test-project", session: "x\" and more"}' \
+jq -cn --arg host "$wc_sid-j" '{host: $host, project: "test-project", via: "save", session: "x\" and more"}' \
   > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
 wc_expect "Working context: a planted record with an unsafe name is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-j" startup)" rolling
+
+# A NUL byte is refused where the name is read, before any shell: `$(…)` would
+# drop it and record another name.
+wc_payload="$(jq -n --arg cwd "$PROJECT_DIR" --arg sid "$wc_sid-u" \
+  '{session_id: $sid, cwd: $cwd, hook_event_name: "PostToolUse",
+    tool_name: "mcp__velesdb-memory__save_working_context",
+    tool_input: {project: "test-project", session: "camp\u0000aign"},
+    tool_response: [{type: "text", text: "{\"id\":1}"}]}')"
+bash "$HOOKS_DIR/post-tool-use.sh" <<<"$wc_payload" >/dev/null 2>&1 || true
+wc_expect "Working context: a name holding a NUL byte is not adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-u" startup)" rolling
+
+# A save names the context the conversation writes, a load one it read: a load
+# after a save does not replace it, a save after a load does.
+wc_call "$HOOKS_DIR" "$wc_sid-v" "$WC_SAVE" test-project campaign-own "$WC_SAVED"
+wc_call "$HOOKS_DIR" "$wc_sid-v" "$WC_LOAD" test-project campaign-sibling "$WC_FOUND"
+wc_expect "Working context: a load after a save does not replace it" \
+  "$(wc_reason "$HOOKS_DIR" stop "$wc_sid-v")" campaign-own
+wc_call "$HOOKS_DIR" "$wc_sid-w" "$WC_LOAD" test-project campaign-read "$WC_FOUND"
+wc_call "$HOOKS_DIR" "$wc_sid-w" "$WC_SAVE" test-project campaign-written "$WC_SAVED"
+wc_expect "Working context: a save after a load replaces it" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-w" startup)" campaign-written
+
+# An edit batch's project whose name holds a newline still gets its session.
+wc_key="$(printf '%s\n%s' "$wc_sid-x" $'multi\nline' | cksum)"
+jq -cn --arg host "$wc_sid-x" --arg project $'multi\nline' '{host: $host, project: $project, via: "save", session: "campaign-x"}' \
+  > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
+wc_batch="$(jq -cn --arg project $'multi\nline' '[{project: $project, session: "rolling", root: "/r"}]')"
+wc_batch="$(bash -c 'source "$1/lib/common.sh"; adopt_batch_sessions "$2" "$3"' _ "$HOOKS_DIR" "$wc_sid-x" "$wc_batch" 2>/dev/null || true)"
+if [ "$(printf '%s' "$wc_batch" | jq -r '.[0].session' 2>/dev/null)" = campaign-x ]; then
+  pass "Working context: a batch project whose name holds a newline gets its session"
+else
+  fail "Working context: a batch project whose name holds a newline gets its session: $wc_batch"
+fi
+
+# A record that does not say whether a save or a load made it is not ours.
+wc_key="$(printf '%s\n%s' "$wc_sid-y" test-project | cksum)"
+jq -cn --arg host "$wc_sid-y" '{host: $host, project: "test-project", session: "campaign-y"}' \
+  > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
+wc_expect "Working context: a record that names no save or load is not adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-y" startup)" rolling
 
 # A trailing newline is refused too; a check anchored like jq's `$` admits one.
 wc_call "$HOOKS_DIR" "$wc_sid-k" "$WC_SAVE" test-project $'campaign-k\n' "$WC_SAVED"
@@ -1078,12 +1119,12 @@ wc_expect "Working context: another host session's save does not erase this one'
 # can share: a record naming another host session, or another project, is not
 # adopted.
 wc_key="$(printf '%s\n%s' "$wc_sid-n" test-project | cksum)"
-jq -cn '{host: "another-host-session", project: "test-project", session: "campaign-n"}' \
+jq -cn '{host: "another-host-session", project: "test-project", via: "save", session: "campaign-n"}' \
   > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
 wc_expect "Working context: a record naming another host session is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-n" startup)" rolling
 wc_key="$(printf '%s\n%s' "$wc_sid-o" test-project | cksum)"
-jq -cn --arg host "$wc_sid-o" '{host: $host, project: "another-project", session: "campaign-o"}' \
+jq -cn --arg host "$wc_sid-o" '{host: $host, project: "another-project", via: "save", session: "campaign-o"}' \
   > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
 wc_expect "Working context: a record naming another project is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-o" startup)" rolling
@@ -1104,6 +1145,9 @@ wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-q1" "$WC_SAVE" test-project campaign-c
 wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-q2" "$WC_SAVE" test-project campaign-cq2 "$WC_SAVED"
 wc_expect "Working context (Codex): another host session's save does not erase this one's" \
   "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-q1" startup)" campaign-cq1
+wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-us" "mcp__velesdb_memory__save_working_context" test-project campaign-cus "$WC_SAVED"
+wc_expect "Working context (Codex): a save through the underscore tool name is adopted" \
+  "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-us" compact)" campaign-cus
 wc_expect "Working context (Codex): another host session keeps the configured one" \
   "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-other" startup)" rolling
 

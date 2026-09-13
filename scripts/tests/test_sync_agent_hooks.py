@@ -1224,11 +1224,10 @@ class CodexMatcherCoversEveryObservedTool(unittest.TestCase):
             start = library.index(f"{function}() {{")
             body = library[start : library.index("\n}\n", start)]
             accepted |= set(re.findall(r"mcp__velesdb[-_]memory__[a-z_]+", body))
-        self.assertTrue(
-            {"mcp__velesdb-memory__save_working_context", "mcp__velesdb_memory__load_working_context"}
-            <= accepted,
-            accepted,
-        )
+        both_spellings = {
+            f"mcp__velesdb{sep}memory__{tool}_working_context" for sep in "-_" for tool in ("save", "load")
+        }
+        self.assertTrue(both_spellings <= accepted, sorted(both_spellings - accepted))
         missed = sorted(name for name in accepted if not re.search(matcher, name))
         self.assertEqual(missed, [], f"the Codex PostToolUse matcher {matcher!r} omits them")
 

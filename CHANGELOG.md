@@ -117,13 +117,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load a context it never wrote, and at Stop to save over one another
   conversation may own. PostToolUse now records the session of each successful
   `save_working_context`, and of each `load_working_context` that found one,
-  per host session and project. The reminders name that session, and so does
+  per host session and project; a load never replaces a recorded save, so reading
+  another conversation's context does not make Stop save over it. The reminders
+  name that session, and so does
   the checklist an opted-in repository's Stop gives for an edit batch; after a
   compaction the Claude Code SessionStart hook asks to load it again. Codex runs
   the hook only for the tools its PostToolUse matcher names: the installer and
   the snippet now include the two working-context tools. A load that found
   nothing, another project's session, a failed call and a name outside
-  `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`, compared byte for byte, are ignored:
+  `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` are ignored; jq checks each name as it was
+  sent, a NUL byte or a trailing newline included, before any shell reads it, so
   none can redirect the reminders or carry text into them.
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,

@@ -184,7 +184,8 @@ Works with zero further setup (each project defaults to
 deliberate project label instead of the directory name. The configured
 `session` is a default, not a pin: once a conversation saves its working
 context under another session of the same project, or loads one that exists,
-its `SessionStart`, `PreCompact` and `Stop` reminders name that session. A
+its `SessionStart`, `PreCompact` and `Stop` reminders name that session (the
+last it saved, or else the last it loaded: a load never replaces a save). A
 load that found nothing, another project's session, a failed call and a name
 outside `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` are ignored. The blocking
 recall-before-edit guard is stricter: it stays disabled unless that file sets
