@@ -40,7 +40,7 @@ fs2 = { version = "0.4", optional = true }
 # Secure sibling temporary files for durable extraction-job snapshots. The
 # dependency follows `persistence`, so wasm/no-default consumers do not carry
 # filesystem code.
-tempfile = { version = "3", optional = true }
+tempfile = { workspace = true, optional = true }
 # Pinned to rmcp's schemars (1.2.x) so domain types and MCP DTOs share one
 # JsonSchema derive — no duplicate wire/domain structs.
 schemars = "1"
