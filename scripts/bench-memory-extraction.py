@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import datetime
 import hashlib
 import http.client
@@ -60,6 +61,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -1379,17 +1381,17 @@ NO_COMMIT = "no commit was recorded to compare it with"
 ANSWER_TIMEOUT_S = 30
 
 
-def _answer(argv: "list[str]", command: str,
-            env: "dict[str, str] | None" = None) -> "tuple[str | None, str | None]":
+def _answer(argv: "list[str]", command: str, env: "dict[str, str] | None" = None,
+            feed: str = "") -> "tuple[str | None, str | None]":
     """What a command prints, or why there is nothing: `command` names it in the reason.
 
-    Its input is closed, so a binary that reads it instead of answering the flag
-    it is asked ends rather than waiting on the bench's terminal. It has
+    Its input is `feed`, then closed, so a binary that reads it instead of answering
+    the flag it is asked ends rather than waiting on the bench's terminal. It has
     `ANSWER_TIMEOUT_S` to answer; past that it is killed, and the reason says so.
     """
     try:
         done = subprocess.run(argv, capture_output=True, text=True, env=env,
-                              timeout=ANSWER_TIMEOUT_S, stdin=subprocess.DEVNULL)
+                              timeout=ANSWER_TIMEOUT_S, input=feed)
     except (OSError, subprocess.SubprocessError) as exc:
         if isinstance(exc, subprocess.TimeoutExpired):
             return None, f"{command} did not answer within {ANSWER_TIMEOUT_S} s"
@@ -1399,9 +1401,35 @@ def _answer(argv: "list[str]", command: str,
     return done.stdout.strip(), None
 
 
-def _git(*argv: str, env: "dict[str, str] | None" = None) -> "tuple[str | None, str | None]":
+def _git(*argv: str, env: "dict[str, str] | None" = None,
+         feed: str = "") -> "tuple[str | None, str | None]":
     """One answer from git about the checkout this script runs from, or why there is none."""
-    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}", env)
+    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}", env, feed)
+
+
+def _paths(listing: str) -> "frozenset[str]":
+    """The paths a git command printed with `-z`, one per NUL."""
+    return frozenset(filter(None, listing.split("\0")))
+
+
+def _exit_on(signum: int, _frame: object) -> None:
+    """A signal raised as `SystemExit`, so what a `with` or a `finally` holds is released."""
+    raise SystemExit(128 + signum)
+
+
+@contextlib.contextmanager
+def _exits_on_sigterm():
+    """SIGTERM ends the process through `SystemExit` while this lasts (#1949).
+
+    Python's default handler ends it at once, and a scratch directory a `with` holds
+    is left behind. The bench runs this from its main thread, the one a handler can be
+    set from.
+    """
+    previous = signal.signal(signal.SIGTERM, _exit_on)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _in_repository(path: Path) -> "str | None":
@@ -1418,10 +1446,9 @@ def _literal(path: str) -> str:
     return f":(literal){path}"
 
 
-def _committed_file(path: Path,
-                    commit: "str | None") -> "tuple[tuple[str, str] | None, str | None]":
-    """`path` relative to the repository, and the object id of the file the recorded
-    `commit` holds there; or None, and why it holds none.
+def _committed_path(path: Path, commit: "str | None") -> "tuple[str | None, str | None]":
+    """`path` relative to the repository if the recorded `commit` holds a file there; or
+    None, and why it holds none.
 
     The commit is asked, not git's index, which can disagree with it both ways: a
     file staged but not committed is at no commit, and one committed then taken out
@@ -1437,52 +1464,59 @@ def _committed_file(path: Path,
     fields = (entry or "").partition("\t")[0].split()
     if fields[1:2] != ["blob"]:
         return None, gap or NOT_AT_COMMIT
-    return (relative, fields[2]), None
+    return relative, None
 
 
-def _differs(relative: str, blob: str) -> "tuple[bool | None, str | None]":
-    """Whether the file at `relative` differs from the committed `blob`, or why git did not say.
+def _cases_origin(cases_file: Path, commit: "str | None", changed: "frozenset[str] | None",
+                  changed_gap: "str | None") -> "tuple[dict, dict]":
+    """The cases file as `origin` records it, and why each field it leaves null is null.
 
-    Its content is hashed as a commit would store it, through the filters its
-    attributes name, so a checkout that turned its line endings into CRLF has not
-    changed it. Git's index is not asked: after `rm --cached`, an edit staged then
-    undone, or under `--skip-worktree`, it answers for something else (#1949).
+    Whether it differs is read from the comparison `uncommitted_changes` comes from
+    (`_changed`): one comparison answers both, so the two cannot disagree.
     """
-    stored, gap = _git("hash-object", "--", relative)
-    return (None if stored is None else stored != blob), gap
-
-
-def _cases_origin(cases_file: Path, commit: "str | None") -> "tuple[dict, dict]":
-    """The cases file as `origin` records it, and why each field it leaves null is null."""
     fields = ("cases_file", "cases_file_modified")
-    committed, gap = _committed_file(cases_file, commit)
-    if committed is None:
+    relative, gap = _committed_path(cases_file, commit)
+    if relative is None:
         return dict.fromkeys(fields), dict.fromkeys(fields, gap)
-    changed, changed_gap = _differs(*committed)
-    return dict(zip(fields, (committed[0], changed))), {"cases_file_modified": changed_gap}
+    modified = None if changed is None else relative in changed
+    return dict(zip(fields, (relative, modified))), {"cases_file_modified": changed_gap}
 
 
-def _changed(commit: "str | None") -> "tuple[bool | None, str | None]":
-    """Whether a file the recorded `commit` holds differs from it in the working tree, or is
-    missing; or why git did not say.
+def _materialized(paths: "frozenset[str]") -> "tuple[frozenset[str] | None, str | None]":
+    """`paths` less those a sparse checkout's rules leave out of the working tree, or why git
+    did not say. Outside a sparse checkout, every path is in it."""
+    sparse, _ = _git("config", "--bool", "core.sparseCheckout")
+    if sparse != "true" or not paths:
+        return paths, None
+    kept, gap = _git("sparse-checkout", "check-rules", "-z", feed="\0".join(sorted(paths)))
+    return (None, gap) if kept is None else (_paths(kept), None)
+
+
+def _changed(commit: "str | None") -> "tuple[frozenset[str] | None, str | None]":
+    """The files the recorded `commit` holds that differ from it in the working tree, or
+    are missing; or why git did not say.
 
     Asked of the commit through an index of its own, never the checkout's: `read-tree`
     fills a scratch index with the commit, `update-index --refresh` hashes each working
-    file through its filters, and `diff-files` names what differs or is gone. The
-    checkout's index answers for something else after `rm --cached`, an edit staged then
-    undone, or under `--skip-worktree` (#1949). An untracked file is not counted: it
-    changes no committed code.
+    file as git itself would against that commit, line-ending rules included, and
+    `diff-files` names what differs or is gone. The checkout's index answers for
+    something else after `rm --cached`, an edit staged then undone, or under
+    `--skip-worktree`, and `hash-object`, which reads no index, normalises a CRLF file
+    that `text=auto` leaves as committed (#1949). What a sparse checkout's rules leave
+    out of the working tree is not missing (`_materialized`). An untracked file is not
+    counted: it changes no committed code. A SIGTERM on the way still removes the
+    scratch index (`_exits_on_sigterm`).
     """
     if not commit:
         return None, NO_COMMIT
-    with tempfile.TemporaryDirectory(prefix="velesdb-bench-index-") as scratch:
+    with _exits_on_sigterm(), tempfile.TemporaryDirectory(prefix="velesdb-bench-index-") as scratch:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
         for argv in (("read-tree", commit), ("update-index", "-q", "--refresh"),
-                     ("diff-files", "--name-only")):
+                     ("diff-files", "--name-only", "-z")):
             answer, gap = _git(*argv, env=env)
             if gap:
                 return None, gap
-    return bool(answer), None
+        return _materialized(_paths(answer))
 
 
 def _sha256_of(path: Path) -> "tuple[str | None, str | None]":
@@ -1558,12 +1592,12 @@ def run_origin(cases_file: Path, binary: "dict | None") -> dict:
     """
     commit, commit_gap = _git("rev-parse", "HEAD")
     changed, changed_gap = _changed(commit)
-    cases, cases_reasons = _cases_origin(cases_file, commit)
+    cases, cases_reasons = _cases_origin(cases_file, commit, changed, changed_gap)
     origin = {
         "machine": platform.machine() or None,
         "os": platform.platform(terse=True) or None,
         "commit": commit or None,
-        "uncommitted_changes": changed,
+        "uncommitted_changes": None if changed is None else bool(changed),
         **cases,
     }
     reasons = {"machine": "the platform names no machine",

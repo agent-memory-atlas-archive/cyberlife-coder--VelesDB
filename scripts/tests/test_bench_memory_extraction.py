@@ -46,9 +46,12 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import warnings
@@ -1678,12 +1681,43 @@ def check_out_with_crlf(root: Path, name: str) -> None:
     git_answer(root, "checkout", "--", name)
 
 
-# States in which git's index answers for something other than the working files, each with
-# whether the file then differs from the recorded commit.
+def commit_crlf_before_text_auto(root: Path, name: str) -> None:
+    """`name` committed with CRLF line endings, then `* text=auto` committed: the file is the
+    commit's byte for byte, though `hash-object`, which reads no index, would normalise it."""
+    (root / name).write_bytes(b'{"a": 1}\r\n')
+    git_commit(root, name)
+    (root / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    git_commit(root, ".gitattributes")
+
+
+def check_out_sparsely(root: Path, _name: str) -> None:
+    """A sparse checkout whose cone leaves a committed directory out of the working tree; the
+    files at the root, `name` among them, stay in it."""
+    for directory in ("kept", "left-out"):
+        (root / directory).mkdir()
+        (root / directory / "file.txt").write_text(f"{directory}\n", encoding="utf-8")
+    git_commit(root, "kept/file.txt", "left-out/file.txt")
+    git_answer(root, "sparse-checkout", "set", "kept")
+    # git removes the left-out file unless it cannot tell it clean; the checkout does not
+    # materialize it either way, so the state is made the same every time.
+    shutil.rmtree(root / "left-out", ignore_errors=True)
+
+
+def edit_in_a_sparse_checkout(root: Path, name: str) -> None:
+    check_out_sparsely(root, name)
+    (root / name).write_text(EDITED, encoding="utf-8")
+
+
+# States of a checkout in which git's index, or a comparison that reads no index, answers for
+# something other than the working files, each with whether the file then differs from the
+# recorded commit.
 INDEX_STATES = (("taken out of the index", take_out_of_the_index, False),
                 ("edited, staged and put back", stage_an_edit_then_undo_it, False),
                 ("edited under --skip-worktree", edit_hidden_by("--skip-worktree"), True),
-                ("edited under --assume-unchanged", edit_hidden_by("--assume-unchanged"), True))
+                ("edited under --assume-unchanged", edit_hidden_by("--assume-unchanged"), True),
+                ("committed with CRLF before `* text=auto`", commit_crlf_before_text_auto, False),
+                ("in a clean sparse checkout", check_out_sparsely, False),
+                ("edited inside a sparse checkout's cone", edit_in_a_sparse_checkout, True))
 
 
 class CheckoutOriginTest(unittest.TestCase):
@@ -1749,8 +1783,8 @@ class CheckoutOriginTest(unittest.TestCase):
     def test_a_commit_git_cannot_read_leaves_its_reason(self):
         """Asked about a commit it does not have, git fails: the reason names the command."""
         with scratch_checkout() as root:
-            committed, gap = bench._committed_file(root / "cases.json", "0" * 40)
-        self.assertIsNone(committed)
+            path, gap = bench._committed_path(root / "cases.json", "0" * 40)
+        self.assertIsNone(path)
         self.assertRegex(gap, r"^git ls-tree 0{40} -- :\(literal\)cases\.json exited \d+$")
 
     def test_a_name_git_would_read_as_a_pattern_is_taken_as_written(self):
@@ -1804,6 +1838,63 @@ class CheckoutOriginTest(unittest.TestCase):
                 origin = bench.run_origin(root / "cases.json", None)
                 self.assertIs(origin["uncommitted_changes"], changed)
                 self.assertEqual(git_answer(root, "ls-files", "--stage", "-v"), index)
+
+    def test_a_comparison_git_cannot_make_names_the_command_that_failed(self):
+        """A required clean filter that fails, or sparse rules git cannot read, stops the
+        comparison: both fields it answers are null, and their reason names the command
+        that failed (#2280 review)."""
+        def failing_filter(root: Path) -> None:
+            (root / ".gitattributes").write_text("cases.json filter=gone\n", encoding="utf-8")
+            git_commit(root, ".gitattributes")
+            git_answer(root, "config", "filter.gone.clean", "false")
+            git_answer(root, "config", "filter.gone.required", "true")
+
+        def unreadable_sparse_rules(root: Path) -> None:
+            git_answer(root, "config", "core.sparseCheckout", "true")
+            (root / "notes.txt").write_text(EDITED, encoding="utf-8")
+
+        for prepare, command in ((failing_filter, "update-index -q --refresh"),
+                                 (unreadable_sparse_rules, "sparse-checkout check-rules -z")):
+            with self.subTest(command), scratch_checkout() as root:
+                prepare(root)
+                origin = bench.run_origin(root / "cases.json", None)
+                for field in ("uncommitted_changes", "cases_file_modified"):
+                    self.assertIsNone(origin[field])
+                    self.assertRegex(origin["missing"][field],
+                                     rf"^git {re.escape(command)} exited \d+$")
+
+    def test_a_terminated_run_leaves_no_scratch_index_behind(self):
+        """SIGTERM while the scratch index exists: Python's default handler ends the process
+        without cleaning up, so the bench raises it as `SystemExit` for that span (#2280
+        review). A child blocked inside the span is signalled once it says it is there."""
+        child = textwrap.dedent(f"""
+            import importlib.util, time
+            spec = importlib.util.spec_from_file_location("bench", {str(SCRIPT_PATH)!r})
+            bench = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(bench)
+            def blocked(*_argv, **_options):
+                print("inside", flush=True)
+                time.sleep(600)
+            bench._git = blocked
+            bench._changed("0" * 40)
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            process = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE,
+                                       text=True, env={**os.environ, "TMPDIR": tmp})
+            try:
+                self.assertEqual(process.stdout.readline().strip(), "inside")
+                during = sorted(path.name for path in Path(tmp).iterdir())
+                process.send_signal(signal.SIGTERM)
+                code = process.wait(timeout=LAUNCH_PATIENCE_S)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                process.stdout.close()
+            after = sorted(path.name for path in Path(tmp).iterdir())
+        self.assertTrue(during and all(name.startswith("velesdb-bench-index-") for name in during),
+                        during)
+        self.assertEqual((code, after), (128 + signal.SIGTERM, []))
 
     def test_an_untracked_file_is_no_change_to_the_commit(self):
         """`uncommitted_changes` is about the files the commit holds: a stray draft changes no
