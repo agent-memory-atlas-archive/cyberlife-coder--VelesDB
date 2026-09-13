@@ -513,7 +513,7 @@ const results = await db.multiQuerySearch('docs', [emb1, emb2], {
 });
 ```
 
-> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0, computed in f32 as core computes it), with `BAD_REQUEST`. A field the chosen strategy never reads is ignored, as core ignores it. Strategy names are read as core reads them, in any case and with the aliases `avg`, `max` and `rsf`; an unknown one is refused with `BAD_REQUEST`, and so is a multi-query search with no vector or more than 10. WASM `relative_score` averages the query branches with equal weight, so under `relative_score` `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. Every query vector must have the collection's dimension: a short one is refused with `DIMENSION_MISMATCH`, never padded. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
+> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0, computed in f32 as core computes it), with `BAD_REQUEST`. A field the chosen strategy never reads is ignored, as core ignores it. TypeScript callers pass the canonical names of `FusionStrategy`; from untyped (JavaScript) callers, the runtime reads a name as core does, in any case and with the aliases `avg`, `max` and `rsf`, and refuses an unknown name, or a value that is not a string, with `BAD_REQUEST`. `db.multiQuerySearch` refuses an empty vector list with `VALIDATION_ERROR`, as it always has, and the WASM backend refuses more than 10 vectors with `BAD_REQUEST`, as core does. WASM `relative_score` averages the query branches with equal weight, so under `relative_score` `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. Every query vector must have the collection's dimension: a short one is refused with `DIMENSION_MISMATCH`, never padded. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
 
 #### Named sparse indexes — `sparseIndexName` vs `sparseSearchNamed()`
 
@@ -642,7 +642,7 @@ Query options:
 | `timeoutMs` | `number` | `30000` | Query timeout in milliseconds |
 | `stream` | `boolean` | `false` | Enable streaming response |
 
-> **WASM backend:** `timeoutMs` and `stream: true` are refused with `NOT_SUPPORTED`: `query()` runs in process and answers at once (`db.capabilities().queryOptions` is empty). The number of rows is the statement's `LIMIT`, capped at core's 100,000, or core's default of 10: `params.k` is not read, as on REST.
+> **WASM backend:** `timeoutMs` and `stream: true` are refused with `NOT_SUPPORTED`: `query()` runs in process and answers at once (`db.capabilities().queryOptions` is empty). The number of rows is the statement's `LIMIT`, capped at core's 100,000, or core's default of 10: `params.k` is not read, as on REST. A `LIMIT` too large for a u64 is refused with `BAD_REQUEST`, as core's parser refuses it.
 
 #### `db.queryExplain(queryString, params?)`
 

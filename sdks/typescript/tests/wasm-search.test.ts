@@ -1139,3 +1139,63 @@ describe('WASM search — the rest of core input rules (#2095)', () => {
     expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 100_000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2095 round 7 — a strategy that is not a string, and a LIMIT past a u64.
+// ---------------------------------------------------------------------------
+
+describe('wasmMultiQuerySearch — a strategy that is not a string (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([5, { name: 'rrf' }])('refuses %p with BAD_REQUEST, before the binding sees it', async (fusion) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: fusion as never })
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect(multi).not.toHaveBeenCalled();
+  });
+
+  it('reads a null strategy as absent, rrf, as the REST backend does', async () => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: null as never });
+
+    expect((multi.mock.calls[0] as unknown[])[3]).toBe('rrf');
+  });
+});
+
+describe("wasmQuery — LIMIT is read as core's parser reads it, a u64 (#2095)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('refuses LIMIT 18446744073709551616, one past the largest u64', async () => {
+    const query = vi.fn(() => [{ id: 1 }]);
+    const ctx = buildCtx('docs', buildStore({ query }), { dimension: 2 });
+
+    const outcome = await settle(
+      wasmQuery(ctx, 'docs', 'SELECT * FROM docs WHERE vector NEAR $v LIMIT 18446744073709551616', {
+        v: [0.1, 0.2],
+      })
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('caps LIMIT 18446744073709551615, the largest u64, at 100,000', async () => {
+    const query = vi.fn(() => [{ id: 1 }]);
+    const ctx = buildCtx('docs', buildStore({ query }), { dimension: 2 });
+
+    await wasmQuery(ctx, 'docs', 'SELECT * FROM docs WHERE vector NEAR $v LIMIT 18446744073709551615', {
+      v: [0.1, 0.2],
+    });
+
+    expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 100_000);
+  });
+});

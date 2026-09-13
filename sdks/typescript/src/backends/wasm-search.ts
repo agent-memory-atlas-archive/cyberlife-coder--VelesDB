@@ -360,13 +360,18 @@ const FUSION_STRATEGY_NAMES: ReadonlyMap<string, FusionStrategy> = new Map([
   ['rsf', 'relative_score'],
 ]);
 
-/** The canonical strategy `name` stands for, as core reads it; an unknown name is refused. */
-function canonicalStrategy(name: string): FusionStrategy {
-  const strategy = FUSION_STRATEGY_NAMES.get(name.toLowerCase());
+/**
+ * The canonical strategy `name` stands for, as core reads it. `name` comes
+ * from the caller unchecked, and an untyped (JavaScript) caller can pass any
+ * value: one that is not a string, or a name core does not know, is refused.
+ */
+function canonicalStrategy(name: unknown): FusionStrategy {
+  const strategy =
+    typeof name === 'string' ? FUSION_STRATEGY_NAMES.get(name.toLowerCase()) : undefined;
   if (strategy === undefined) {
     throw new VelesDBError(
-      `Unknown fusion strategy '${name}': core accepts average (avg), maximum (max), rrf, ` +
-        'weighted and relative_score (rsf), in any case',
+      `Unknown fusion strategy '${String(name)}': core accepts average (avg), maximum (max), ` +
+        'rrf, weighted and relative_score (rsf), in any case',
       'BAD_REQUEST'
     );
   }
@@ -514,6 +519,9 @@ interface PureNearQuery {
   limit?: number;
 }
 
+/** The largest `LIMIT` core's parser takes: it reads the value as a u64 (`velesql/parser/helpers.rs`). */
+const LARGEST_U64 = 2n ** 64n - 1n;
+
 /** Parse `queryString` against the pure-NEAR shape or throw `NOT_SUPPORTED`. */
 function parsePureNearQuery(queryString: string): PureNearQuery {
   const match = PURE_NEAR_QUERY.exec(queryString);
@@ -529,6 +537,12 @@ function parsePureNearQuery(queryString: string): PureNearQuery {
   }
   const parsed: PureNearQuery = { from: match[1]!, param: match[2]! };
   if (match[3] !== undefined) {
+    if (BigInt(match[3]) > LARGEST_U64) {
+      throw new VelesDBError(
+        `Invalid LIMIT value '${match[3]}': core's parser reads LIMIT as a u64`,
+        'BAD_REQUEST'
+      );
+    }
     parsed.limit = Number(match[3]);
   }
   return parsed;

@@ -512,17 +512,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every search checks its inputs first, as core does. A query vector of
   the wrong dimension throws `DIMENSION_MISMATCH` whatever `k` is, and
   `multiQuerySearch` refuses a short or long vector instead of padding or
-  overflowing it. `multiQuerySearch` takes 1 to 10 vectors, as core's does:
-  an empty list, which used to return `[]`, and more than 10 now throw
-  `BAD_REQUEST`. A non-integer or negative `k` throws `BAD_REQUEST`, core's
-  `k` being unsigned, and a `k` of 0 returns nothing without calling the
-  binding (a sparse search used to return live hits). A fusion strategy
-  name is read as core reads it, in any case and with the aliases `avg`,
-  `max` and `rsf`, and an unknown one throws `BAD_REQUEST`: `'rsf'` used to
-  let `denseWeight` through, and `'WEIGHTED'` dropped the caller's triple.
-  `query` no longer reads `params.k`, which REST ignores: a statement
-  without `LIMIT` returns core's default of 10 rows, and `LIMIT` is capped
-  at core's 100,000. On REST, `multiQuerySearchIds` with a `filter` now
+  overflowing it. The WASM backend's `multiQuerySearch` takes 1 to 10
+  vectors, as core's does, and more than 10 now throw `BAD_REQUEST`.
+  `db.multiQuerySearch` still refuses an empty list with
+  `VALIDATION_ERROR` before any backend sees it; only a direct
+  `WasmBackend.multiQuerySearch` call, which returned `[]` for one, now
+  throws `BAD_REQUEST`. A non-integer or negative `k` throws
+  `BAD_REQUEST`, core's `k` being unsigned, and a `k` of 0 returns nothing
+  without calling the binding (a sparse search used to return live hits).
+  At runtime a fusion strategy name is read as core reads it, in any case
+  and with the aliases `avg`, `max` and `rsf`, spellings that only untyped
+  (JavaScript) callers can send, since the `FusionStrategy` type keeps the
+  canonical names; an unknown name, or a value that is not a string,
+  throws `BAD_REQUEST`. `'rsf'` used to let `denseWeight` through, and
+  `'WEIGHTED'` dropped the caller's triple. `query` no longer reads
+  `params.k`, which REST ignores: a statement without `LIMIT` returns
+  core's default of 10 rows, `LIMIT` is capped at core's 100,000, and one
+  too large for a u64 throws `BAD_REQUEST`, as core's parser refuses it.
+  On REST, `multiQuerySearchIds` with a `filter` now
   fails with the server's `400` instead of returning unfiltered ids.
 
 - **BREAKING (REST, VelesQL, bindings) — an unparseable search `mode` now
