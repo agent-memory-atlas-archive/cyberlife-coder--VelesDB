@@ -108,9 +108,10 @@ if [ -n "$session_id" ] && successful_memory_recall "$payload"; then
 fi
 # A session this conversation saves becomes the one the SessionStart,
 # PreCompact and Stop reminders name; one it only loads, the one SessionStart
-# asks it to load (lib/common.sh).
+# asks it to load (lib/common.sh). The tool name read above is passed in, so
+# no other tool costs the recording a jq run.
 if [ -n "$session_id" ]; then
-  remember_working_session "$session_id" "$payload" || true
+  remember_working_session "$session_id" "$tool_name" "$payload" || true
 fi
 [ -n "$session_id" ] || session_id="unknown-session"
 

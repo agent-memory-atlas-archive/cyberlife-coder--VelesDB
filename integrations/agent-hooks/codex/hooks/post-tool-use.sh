@@ -12,6 +12,7 @@ require_jq
 payload="$(read_stdin_payload)"
 cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null || true)"
 session_id="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null || true)"
+tool_name="$(printf '%s' "$payload" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 [ -n "$cwd" ] || cwd="$PWD"
 
 resolve_config "$cwd"
@@ -39,8 +40,9 @@ fi
 
 # A session this conversation saves becomes the one the SessionStart and Stop
 # reminders name; one it only loads, the one SessionStart asks it to load
-# (lib/common.sh).
+# (lib/common.sh). It is handed the tool name read above, so no other tool
+# costs the recording a jq run.
 if [ -n "$session_id" ]; then
-  remember_working_session "$session_id" "$payload" || true
+  remember_working_session "$session_id" "$tool_name" "$payload" || true
 fi
 echo '{}'

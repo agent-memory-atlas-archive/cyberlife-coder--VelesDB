@@ -337,9 +337,10 @@ recall_targets_current_project() {
 # Stop: naming the default after a compaction makes it load a stale context, or
 # save over one another conversation owns. PostToolUse records the session of
 # each successful save_working_context, and of each load_working_context that
-# found one, per host session and per project the call names; a load never
-# replaces a recorded save. A load reminder adopts either; a save reminder only a
-# session the conversation saved.
+# found one, per host session and per project the call names. Saves and loads
+# are recorded apart, so a load never writes over a save, even when the two
+# calls' hooks overlap. A load reminder adopts the saved session, else the
+# loaded one; a save reminder only a session the conversation saved.
 
 # The session name a reminder may quote: a letter or digit, then up to 127
 # letters, digits, `.`, `_`, `:` or `-`. jq checks it on the JSON string as it
@@ -358,17 +359,17 @@ working_context_found() {
   ' >/dev/null 2>&1
 }
 
-# working_context_call PAYLOAD: print `VIA<TAB>PROJECT<TAB>NAME` for a
-# successful working-context call; fail for any other call. The project is the
-# call's own: a conversation may save the context of a repository other than
-# the one its cwd is in, and Stop names each edited repository's own. It must be
-# a non-empty string with no control character, so it keys a record exactly.
+# working_context_call TOOL_NAME PAYLOAD: print `VIA<TAB>PROJECT<TAB>NAME` for a
+# successful working-context call; fail for any other call. TOOL_NAME is the
+# payload's, as PostToolUse already read it: that hook runs on every tool call,
+# and no other tool may cost a jq run here. The project is the call's own: a
+# conversation may save the context of a repository other than the one its cwd
+# is in, and Stop names each edited repository's own. It must be a non-empty
+# string with no control character, so it keys a record exactly.
 working_context_call() {
-  local payload="$1"
-  local tool_name
+  local payload="$2"
   local via
-  tool_name="$(printf '%s' "$payload" | jq -r '.tool_name // empty')"
-  case "$tool_name" in
+  case "$1" in
     mcp__velesdb-memory__save_working_context|mcp__velesdb_memory__save_working_context)
       via=save
       ;;
@@ -391,49 +392,50 @@ working_context_call() {
   ' 2>/dev/null
 }
 
-# working_session_marker HOST_SESSION PROJECT: the private record of the working
-# context one host session uses for one project. The memory store keys working
-# contexts by project name, so the record does too.
+# working_session_marker HOST_SESSION PROJECT VIA: the private record of the
+# session one host session last saved (VIA `save`) or loaded (VIA `load`) for
+# one project. A save and a load never share a record, so no hook writes a
+# record the other kind of call wrote. The memory store keys working contexts
+# by project name, so the record does too.
 working_session_marker() {
-  sentinel_path "working-session" "$(printf '%s\n%s' "$1" "$2")"
+  sentinel_path "working-session-$3" "$(printf '%s\n%s' "$1" "$2")"
 }
 
-# recorded_working_session HOST_SESSION PROJECT: print `VIA NAME` from the
-# record that host session keeps for that project. The record must name both,
-# since its file name is a checksum two host sessions can share, and its name
-# passes the same check as at capture.
+# recorded_working_session HOST_SESSION PROJECT VIA: print the session name in
+# the VIA record that host session keeps for that project. The file must hold
+# exactly one record: a second one would add a line to what a reminder quotes.
+# The record must name the host session and the project, since its file name
+# is a checksum two host sessions can share, and say VIA; its name passes the
+# same check as at capture.
 recorded_working_session() {
   local marker
   [ -n "$1" ] || return 1
-  marker="$(working_session_marker "$1" "$2")" || return 1
+  marker="$(working_session_marker "$1" "$2" "$3")" || return 1
   valid_private_marker "$marker" || return 1
-  jq -r --arg host "$1" --arg project "$2" --arg class "$WORKING_SESSION_CLASS" '
-    select(type == "object" and .host == $host and .project == $project
-      and (.via == "save" or .via == "load")
+  jq -rs --arg host "$1" --arg project "$2" --arg via "$3" --arg class "$WORKING_SESSION_CLASS" '
+    select(length == 1) | .[0]
+    | select(type == "object" and .host == $host and .project == $project and .via == $via
       and (.session | type == "string" and test("\\A" + $class + "\\z")))
-    | "\(.via) \(.session)"
+    | .session
   ' "$marker" 2>/dev/null
 }
 
-# remember_working_session HOST_SESSION PAYLOAD: record the session of a
-# successful working-context call, for the project the call names. A save names
-# the context this conversation writes; a load names one it read. So a load
-# never replaces a recorded save.
+# remember_working_session HOST_SESSION TOOL_NAME PAYLOAD: record the session of
+# a successful working-context call, for the project the call names, in the
+# record of its kind. A save names the context this conversation writes, a load
+# one it read. Nothing is read before the write: the two kinds never share a
+# record, so a load never replaces a save, however their hooks overlap, and
+# write_private_marker replaces a record whole.
 remember_working_session() {
   local call
   local via
   local project
   local session
-  local recorded
   local marker
-  call="$(working_context_call "$2")" || return 1
+  call="$(working_context_call "$2" "$3")" || return 1
   [ -n "$call" ] || return 1
   IFS=$'\t' read -r via project session <<<"$call"
-  if [ "$via" = load ]; then
-    recorded="$(recorded_working_session "$1" "$project")" || recorded=""
-    [ "${recorded%% *}" != save ] || return 0
-  fi
-  marker="$(working_session_marker "$1" "$project")" || return 1
+  marker="$(working_session_marker "$1" "$project" "$via")" || return 1
   write_private_marker "$marker" \
     "$(jq -cn --arg host "$1" --arg project "$project" --arg via "$via" --arg session "$session" \
       '{host: $host, project: $project, via: $via, session: $session}')"
@@ -443,13 +445,19 @@ remember_working_session() {
 # reminder may name for that project. KIND `any`, for a load reminder: the last
 # session this host session saved, or else the last it loaded, which it may
 # resume. Any other KIND, for a save reminder: only one it saved, since a save
-# reminder must never name a context the conversation only read.
+# reminder must never name a context the conversation only read. A reminder
+# quotes the name inside a call, so a value holding a newline is refused,
+# whatever the record held.
 adopted_session_for() {
-  local recorded
-  recorded="$(recorded_working_session "$1" "$2")" || return 1
-  [ -n "$recorded" ] || return 1
-  [ "$3" = any ] || [ "${recorded%% *}" = save ] || return 1
-  printf '%s' "${recorded#* }"
+  local session
+  session="$(recorded_working_session "$1" "$2" save)" || session=""
+  if [ -z "$session" ] && [ "$3" = any ]; then
+    session="$(recorded_working_session "$1" "$2" load)" || session=""
+  fi
+  case "$session" in
+    '' | *$'\n'*) return 1 ;;
+  esac
+  printf '%s' "$session"
 }
 
 # adopt_working_session HOST_SESSION KIND: set SESSION to the working context a
