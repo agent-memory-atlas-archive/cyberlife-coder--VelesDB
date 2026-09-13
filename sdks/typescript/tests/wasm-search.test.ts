@@ -21,6 +21,7 @@ import {
   wasmQuery,
 } from '../src/backends/wasm-search';
 import { NotFoundError, VelesDBError } from '../src/types';
+import { newSparseIds } from '../src/backends/wasm-sparse';
 import type {
   CollectionData,
   WasmContext,
@@ -65,6 +66,7 @@ function buildCtx(
     config: { dimension: opts.dimension ?? 2, metric: 'cosine' },
     store,
     payloads: opts.payloads ?? new Map(),
+    sparseIds: newSparseIds(),
     createdAt: new Date(),
   };
   const module: WasmModule = {
@@ -172,6 +174,8 @@ describe('wasmSearch — filter / sparse / hybrid branches', () => {
     const sparse_search = vi.fn(() => [{ doc_id: 5n, score: 0.7 }]);
     const store = buildStore({ sparse_search });
     const ctx = buildCtx('docs', store, { dimension: 0 });
+    // Sparse id 5 is point 5's live sparse vector (see wasm-sparse.ts).
+    ctx.getCollection('docs')!.sparseIds.byId.set(5n, 5);
 
     const result = await wasmSearch(ctx, 'docs', [], {
       sparseVector: { 1: 0.5, 2: 0.3 },
@@ -677,7 +681,7 @@ describe('wasmMultiQuerySearch — fusionParams reach the binding or are refused
 
     await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: 'weighted' });
 
-    expect(multi.mock.calls[0]![5]).toBeUndefined();
+    expect(multi.mock.calls[0]![5]).toBeNull();
   });
 
   it.each(['denseWeight', 'sparseWeight'] as const)(
@@ -713,5 +717,52 @@ describe('wasmMultiQuerySearch — fusionParams reach the binding or are refused
     expect((outcome as VelesDBError).code).toBe('NOT_SUPPORTED');
     expect((outcome as VelesDBError).message).toMatch(/avgWeight, maxWeight and hitWeight/);
     expect(multi).not.toHaveBeenCalled();
+  });
+});
+
+describe('wasmMultiQuerySearch — a weighted triple core would reject is BAD_REQUEST (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([
+    ['does not sum to 1.0', { avgWeight: 0.5, maxWeight: 0.5, hitWeight: 0.5 }],
+    ['sums to 1.0 past the 0.001 tolerance', { avgWeight: 0.6, maxWeight: 0.3, hitWeight: 0.102 }],
+    ['has a negative weight', { avgWeight: 1.5, maxWeight: -0.25, hitWeight: -0.25 }],
+    ['has a non-finite weight', { avgWeight: Number.NaN, maxWeight: 0.5, hitWeight: 0.5 }],
+  ])('refuses a triple that %s, before the binding sees it', async (_label, fusionParams) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: 'weighted', fusionParams })
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect(multi).not.toHaveBeenCalled();
+  });
+
+  it("passes a triple within core's 0.001 tolerance of 1.0", async () => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+      fusion: 'weighted',
+      fusionParams: { avgWeight: 0.6, maxWeight: 0.3, hitWeight: 0.1005 },
+    });
+
+    expect(multi).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("wasmSearchBatch — each entry's filter reaches the binding (#2095)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('filters every entry through search_with_filter', async () => {
+    const search_with_filter = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ search_with_filter }));
+
+    await wasmSearchBatch(ctx, 'docs', [{ vector: [0.1, 0.2], filter: TENANT_FILTER }]);
+
+    expect(search_with_filter).toHaveBeenCalledWith(expect.any(Float32Array), 10, TENANT_FILTER);
   });
 });

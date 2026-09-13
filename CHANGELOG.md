@@ -114,26 +114,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `filter` on: velesdb-wasm's `text_search(query, k, field?)` has no filter
   slot, so rows the filter excluded came back. `hybridSearch`,
   `multiQuerySearch` and `search` with a `sparseVector` dropped their
-  filters the same way, and `search` ignored `sparseIndexName` and
-  `includeVectors: true`. `multiQuerySearch` passed only `fusionParams.k`,
-  because the SDK typed the binding's `multi_query_search` from a hand copy
-  that predated the `weights` argument velesdb-wasm has taken since 4.0.0.
-  `avgWeight`, `maxWeight` and `hitWeight` now reach the binding as its
-  single `[avg, max, hit]` argument, and the binding's search parameters
-  are read from its own declaration file. `db.capabilities()` reported
-  `sparseSearch: false` on WASM while sparse search ran. `WASM_CAPABILITIES`
-  is now the one table the WASM backend consults before it uses an option:
-  it reports `sparseSearch: true` and gains `filteredSearch`,
-  `multiQueryFusionParams`, `namedSparseIndexes`, `includeVectors` and
-  `idOnlySearch`, and a conformance test probes every key against the
-  backend. **Behaviour change, WASM backend only:** these calls used to
-  succeed with the argument silently ignored and now throw `NOT_SUPPORTED`,
-  naming the backend and the capability: a `filter` on `textSearch`,
-  `hybridSearch`, `multiQuerySearch` or a sparse `search`;
-  `sparseIndexName`; `includeVectors: true`; `fusionParams.denseWeight`,
-  `sparseWeight` (WASM `relative_score` weighs its branches equally) or any
-  other field `multiQueryFusionParams` does not list; and a weighted triple
-  given in part. The REST backend is unchanged.
+  filters the same way; `search` ignored `sparseIndexName` and
+  `includeVectors: true`; `createCollection` ignored `storageMode` and the
+  HNSW, PQ-rescoring and indexing settings; `query` ignored `timeoutMs` and
+  `stream`. `upsert` and `upsertBatch` never gave the binding a
+  `sparseVector`, so sparse search found nothing, whatever
+  `db.capabilities().sparseSearch` said. `multiQuerySearch` passed only
+  `fusionParams.k`, because the SDK typed the binding's
+  `multi_query_search` from a hand copy that predated the `weights`
+  argument velesdb-wasm has taken since 4.0.0.
+
+  The weights now reach the binding, and every binding method the SDK
+  calls is declared with the binding's own full parameter list, optional
+  parameters made required, so an argument the SDK computes and does not
+  pass fails the typecheck. Sparse vectors are indexed. The binding cannot
+  delete postings, so each sparse upsert gets a fresh sparse id and a
+  replaced or deleted point's old one is retired: it never matches again.
+  `createCollection` creates the store in the requested `storageMode`.
+  `WASM_CAPABILITIES` is the one table the backend consults before it uses
+  an option. It gains `filteredSearch`, `multiQueryFusionParams`,
+  `namedSparseIndexes`, `includeVectors`, `idOnlySearch`, `storageModes`,
+  `collectionTypes`, `collectionConfig` and `queryOptions`; the
+  filter-taking entry points are derived from the backend interface, so a
+  new one cannot be missed; and a conformance test probes every key and
+  value against the backend. The REST backend's `multiQuerySearchIds`
+  dropped a `filter` too: it now sends it on, so velesdb-server's refusal
+  reaches the caller. The SDK's CI job now also runs its lint script.
+
+  **Behaviour change.** On the WASM backend, calls that used to succeed
+  with the argument ignored now throw `NOT_SUPPORTED`, naming the backend
+  and the capability: a `filter` on `textSearch`, `hybridSearch`,
+  `multiQuerySearch` or a sparse `search`; `sparseIndexName`;
+  `includeVectors: true`; `fusionParams.denseWeight`, `sparseWeight` or
+  any other field `multiQueryFusionParams` does not list; a weighted
+  triple given in part; `createCollection` with `storageMode` `pq` or
+  `rabitq` (velesdb-wasm stores both as SQ8), a `collectionType` other
+  than `vector`, or `hnsw`, `pqRescoreOversampling`, `deferredIndexing` or
+  `asyncIndexBuilder`; `query` with `timeoutMs` or `stream: true`. A
+  weighted triple core would reject (a negative or non-finite weight, or a
+  sum more than 0.001 from 1.0) now throws `BAD_REQUEST` instead of the
+  binding's bare string. On REST, `multiQuerySearchIds` with a `filter`
+  now fails with the server's `400` instead of returning unfiltered ids.
 
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,

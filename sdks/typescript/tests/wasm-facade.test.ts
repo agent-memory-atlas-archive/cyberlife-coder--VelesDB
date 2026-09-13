@@ -31,7 +31,12 @@ class MockVectorStore {
   query = vi.fn(() => []);
   len = 0;
   is_empty = true;
+  sparse_insert = vi.fn();
   constructor(public dimension: number, _metric: string) {}
+
+  static new_with_mode(dimension: number, metric: string, _mode: string): MockVectorStore {
+    return new MockVectorStore(dimension, metric);
+  }
 }
 
 const mockWasmModule = {

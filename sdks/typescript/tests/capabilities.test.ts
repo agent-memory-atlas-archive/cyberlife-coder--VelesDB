@@ -10,9 +10,11 @@
 import { describe, it, expect } from 'vitest';
 import { VelesDB, RestBackend, WasmBackend } from '../src/index';
 import {
+  CAPABILITY_LIST_UNIVERSES,
   REST_CAPABILITIES,
   WASM_CAPABILITIES,
   type CapabilityMap,
+  type ListCapability,
 } from '../src/capabilities';
 
 // Every CapabilityMap key that must exist — any addition here must
@@ -57,7 +59,7 @@ describe('CapabilityMap — structural contract', () => {
     expect(Object.isFrozen(WASM_CAPABILITIES)).toBe(true);
   });
 
-  it.each(['velesqlFusionStrategies', 'filteredSearch', 'multiQueryFusionParams'] as const)(
+  it.each(Object.keys(CAPABILITY_LIST_UNIVERSES) as ListCapability[])(
     'exposes %s as a frozen string array on both maps',
     (key) => {
       for (const map of [REST_CAPABILITIES, WASM_CAPABILITIES]) {
@@ -93,13 +95,22 @@ describe('REST_CAPABILITIES — full-feature contract', () => {
     expect(REST_CAPABILITIES.namedSparseIndexes).toBe(true);
     expect(REST_CAPABILITIES.includeVectors).toBe(true);
     expect(REST_CAPABILITIES.idOnlySearch).toBe(true);
+    // Every filter-taking entry point but /search/multi/ids, whose server
+    // endpoint refuses a filter.
     expect([...REST_CAPABILITIES.filteredSearch]).toEqual([
       'search',
       'sparseSearch',
+      'searchBatch',
+      'searchIds',
       'textSearch',
       'hybridSearch',
       'multiQuerySearch',
+      'sparseSearchNamed',
+      'scroll',
     ]);
+    for (const key of ['storageModes', 'collectionTypes', 'collectionConfig', 'queryOptions'] as const) {
+      expect(REST_CAPABILITIES[key]).toEqual(CAPABILITY_LIST_UNIVERSES[key]);
+    }
     expect([...REST_CAPABILITIES.multiQueryFusionParams]).toEqual([
       'k',
       'avgWeight',
@@ -129,7 +140,17 @@ describe('WASM_CAPABILITIES — focused subset', () => {
   });
 
   it('filters dense search only, and lists the fusion params its binding takes', () => {
-    expect([...WASM_CAPABILITIES.filteredSearch]).toEqual(['search']);
+    expect([...WASM_CAPABILITIES.filteredSearch]).toEqual(['search', 'searchBatch']);
+    expect([...WASM_CAPABILITIES.storageModes]).toEqual(['full', 'sq8', 'binary']);
+    expect([...WASM_CAPABILITIES.collectionTypes]).toEqual(['vector']);
+    expect([...WASM_CAPABILITIES.collectionConfig]).toEqual([
+      'dimension',
+      'metric',
+      'storageMode',
+      'collectionType',
+      'description',
+    ]);
+    expect([...WASM_CAPABILITIES.queryOptions]).toEqual([]);
     expect([...WASM_CAPABILITIES.multiQueryFusionParams]).toEqual([
       'k',
       'avgWeight',

@@ -19,9 +19,10 @@ import { wasmNotSupported } from './shared';
 import {
   isSet,
   requireWasmCapability,
+  requireWasmFieldsListed,
   requireWasmFilterSupport,
-  requireWasmFusionParams,
 } from './wasm-capability-guards';
+import { sparseHits } from './wasm-sparse';
 import type {
   WasmContext,
   WasmDenseResult,
@@ -42,17 +43,13 @@ function searchSparseOnly(
   values: number[],
   k: number
 ): SearchResult[] {
-  const sparseResults: WasmSparseResult[] = collection!.store.sparse_search(
-    new Uint32Array(indices),
-    new Float32Array(values),
-    k
+  return sparseHits(collection!.store, collection!.sparseIds, indices, values, k).map(
+    ([id, score]) => ({
+      id: String(id),
+      score,
+      payload: collection!.payloads.get(ctx.canonicalPayloadKeyFromResultId(id)),
+    })
   );
-
-  return sparseResults.map(r => ({
-    id: String(r.doc_id),
-    score: r.score,
-    payload: collection!.payloads.get(ctx.canonicalPayloadKeyFromResultId(r.doc_id)),
-  }));
 }
 
 function searchHybridFusion(
@@ -64,18 +61,10 @@ function searchHybridFusion(
   k: number
 ): SearchResult[] {
   const denseResults: WasmDenseResult[] = collection!.store.search(queryVector, k);
-  const sparseResults: WasmSparseResult[] = collection!.store.sparse_search(
-    new Uint32Array(indices),
-    new Float32Array(values),
-    k
-  );
-
   const denseForFuse: Array<[number, number]> = denseResults.map(
     ([id, score]) => [Number(id), score]
   );
-  const sparseForFuse: Array<[number, number]> = sparseResults.map(
-    r => [Number(r.doc_id), r.score]
-  );
+  const sparseForFuse = sparseHits(collection!.store, collection!.sparseIds, indices, values, k);
 
   const fused: WasmSparseResult[] = ctx.wasmModule.hybrid_search_fuse(
     denseForFuse, sparseForFuse, 60, k
@@ -196,14 +185,16 @@ export async function wasmSearchBatch(
     k?: number;
     filter?: FilterInput;
     /**
-     * Search quality preset. Forwarded through to `wasmSearch` which
-     * currently ignores it because the WASM backend does not yet
-     * support ef_search / SearchQuality. Accepted at the type level
-     * for API parity with the REST backend.
+     * Search quality preset, forwarded to `wasmSearch`. It has nothing to
+     * tune there: WASM search scans every stored vector, which meets the
+     * recall of any preset.
      */
     quality?: import('../types').SearchQuality;
   }>
 ): Promise<SearchResult[][]> {
+  for (const s of searches) {
+    requireWasmFilterSupport('searchBatch', s.filter);
+  }
   const results: SearchResult[][] = [];
   for (const s of searches) {
     results.push(
@@ -249,7 +240,7 @@ export async function wasmTextSearch(
   const k = options?.k ?? 10;
   // The binding's third argument names one payload field to match. It is
   // not a filter, which is why a filter is refused above.
-  const raw: WasmSearchResultItem[] = collection.store.text_search(query, k, undefined);
+  const raw: WasmSearchResultItem[] = collection.store.text_search(query, k, null);
   return raw.map(r => mapWasmResult(ctx, collection, r));
 }
 
@@ -285,29 +276,56 @@ export async function wasmHybridSearch(
 const WEIGHTED_TRIPLE = ['avgWeight', 'maxWeight', 'hitWeight'] as const;
 
 /**
+ * How far from 1.0 a weighted triple may sum: core's `validate_weight_sum`
+ * (`crates/velesdb-core/src/fusion/strategy.rs`). The binding checks it
+ * again, but reports a failure as a bare string instead of an error.
+ */
+const WEIGHTED_SUM_TOLERANCE = 0.001;
+
+/**
+ * Refuse, as core does, a weighted triple with a negative or non-finite
+ * weight, or one that does not sum to 1.0.
+ */
+function validateWeightedTriple(weights: readonly number[]): void {
+  const sum = weights.reduce((total, weight) => total + weight, 0);
+  const invalid = weights.some((weight) => !Number.isFinite(weight) || weight < 0);
+  if (invalid || Math.abs(sum - 1) > WEIGHTED_SUM_TOLERANCE) {
+    throw new VelesDBError(
+      'multiQuerySearch weighted fusion: avgWeight, maxWeight and hitWeight must be ' +
+        `finite, non-negative and sum to 1.0 within ${WEIGHTED_SUM_TOLERANCE}; ` +
+        `got ${weights.join(', ')}`,
+      'BAD_REQUEST'
+    );
+  }
+}
+
+/**
  * Translate `fusionParams` into velesdb-wasm's `multi_query_search`
  * arguments, refusing what the binding cannot apply.
  *
  * The three weighted-fusion weights travel as one argument, and the binding
  * applies core's defaults only when that argument is absent. A partial
- * triple is therefore refused rather than completed with guessed values.
+ * triple is therefore refused rather than completed with guessed values, and
+ * a complete one is checked against core's rule.
  */
 function wasmFusionArgs(params: FusionParams | undefined): {
   rrfK: number;
-  weights: Float32Array | undefined;
+  weights: Float32Array | null;
 } {
-  requireWasmFusionParams(params);
+  requireWasmFieldsListed('multiQueryFusionParams', 'multiQuerySearch fusionParams', params);
+  const rrfK = params?.k ?? 60;
   const weights = WEIGHTED_TRIPLE.map((name) => params?.[name]).filter(isSet);
-  if (weights.length !== 0 && weights.length !== WEIGHTED_TRIPLE.length) {
+  if (weights.length === 0) {
+    return { rrfK, weights: null };
+  }
+  if (weights.length !== WEIGHTED_TRIPLE.length) {
     wasmNotSupported(
       'multiQuerySearch with only some of fusionParams avgWeight, maxWeight and ' +
         'hitWeight (velesdb-wasm takes the three together)'
     );
   }
-  return {
-    rrfK: params?.k ?? 60,
-    weights: weights.length === 0 ? undefined : new Float32Array(weights),
-  };
+  validateWeightedTriple(weights);
+  return { rrfK, weights: new Float32Array(weights) };
 }
 
 export async function wasmMultiQuerySearch(
@@ -414,12 +432,13 @@ export async function wasmQuery(
   collectionName: string,
   queryString: string,
   params?: Record<string, unknown>,
-  _options?: QueryOptions
+  options?: QueryOptions
 ): Promise<QueryApiResponse> {
   const collection = ctx.getCollection(collectionName);
   if (!collection) {
     throw new NotFoundError(`Collection '${collectionName}'`);
   }
+  requireWasmFieldsListed('queryOptions', 'query', options);
   const parsed = parsePureNearQuery(queryString);
   if (parsed.from !== collectionName) {
     throw new VelesDBError(

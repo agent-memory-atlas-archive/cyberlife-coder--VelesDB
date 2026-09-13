@@ -260,6 +260,8 @@ Create a vector collection.
 | `hnsw` | `{ m?: number, efConstruction?: number }` | - | HNSW index tuning |
 | `description` | `string` | - | Optional description |
 
+> **WASM backend:** `storageMode` takes `full`, `sq8` or `binary`, by those names. `pq` and `rabitq` are refused with `NOT_SUPPORTED`, since velesdb-wasm would store them as SQ8, and so is any `collectionType` other than `vector`. `hnsw`, `pqRescoreOversampling`, `deferredIndexing` and `asyncIndexBuilder` are refused too: WASM builds no HNSW graph and scans every stored vector, so they have nowhere to go. `db.capabilities()` lists what applies (`storageModes`, `collectionTypes`, `collectionConfig`).
+
 ##### Storage Modes
 
 | Mode | Memory (768D) | Compression | Use Case |
@@ -325,6 +327,8 @@ await db.upsert('docs', {
   sparseVector: { 42: 0.8, 99: 0.3 }  // optional sparse vector for hybrid search
 });
 ```
+
+> **WASM backend:** a `sparseVector` is indexed with the point, so sparse search finds it. A later `sparseVector` for the same id replaces it, an upsert without one keeps it (as core does), and a deleted point never comes back in sparse results.
 
 #### `db.upsertBatch(collection, documents)`
 
@@ -509,7 +513,7 @@ const results = await db.multiQuerySearch('docs', [emb1, emb2], {
 });
 ```
 
-> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest. WASM `relative_score` averages the query branches with equal weight, so `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
+> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest, and so is a set core would reject (a negative or non-finite weight, or a sum more than 0.001 from 1.0), with `BAD_REQUEST`. WASM `relative_score` averages the query branches with equal weight, so `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
 
 #### Named sparse indexes — `sparseIndexName` vs `sparseSearchNamed()`
 
@@ -637,6 +641,8 @@ Query options:
 |--------|------|---------|-------------|
 | `timeoutMs` | `number` | `30000` | Query timeout in milliseconds |
 | `stream` | `boolean` | `false` | Enable streaming response |
+
+> **WASM backend:** `timeoutMs` and `stream: true` are refused with `NOT_SUPPORTED`: `query()` runs in process and answers at once (`db.capabilities().queryOptions` is empty).
 
 #### `db.queryExplain(queryString, params?)`
 
@@ -1142,7 +1148,7 @@ import {
 4. **Use `searchIds()`** when you only need IDs and scores (skips payload transfer)
 5. **Use `streamInsert()`** for high-throughput ingestion with backpressure handling
 6. **Pre-initialize** the client at app startup (`await db.init()`)
-7. **Tune HNSW** with `hnsw: { m: 16, efConstruction: 200 }` for higher recall
+7. **Tune HNSW** with `hnsw: { m: 16, efConstruction: 200 }` for higher recall (REST backend; WASM builds no HNSW graph)
 
 ## License
 

@@ -7,16 +7,26 @@
 
 import type { CollectionConfig } from '../types';
 import type { SparseVector } from '../types';
-import type { VectorStore as BindingVectorStore } from '@wiscale/velesdb-wasm';
+import type {
+  VectorStore as BindingVectorStore,
+  hybrid_search_fuse as bindingHybridSearchFuse,
+} from '@wiscale/velesdb-wasm';
 
 /**
- * Parameter list of a velesdb-wasm `VectorStore` method, read from the
- * binding's declaration file. A hand-copied list went stale: it omitted the
- * `weights` argument `multi_query_search` has taken since velesdb-wasm
- * 4.0.0, so the SDK never passed it (#2095).
+ * The full parameter list of a velesdb-wasm function, read from the
+ * binding's declaration file, with its optional parameters made required.
+ *
+ * wasm-bindgen emits every `Option<T>` as an optional parameter, so a call
+ * that leaves one out type-checks against the binding's own declaration: the
+ * SDK computed `multi_query_search`'s `weights` and never passed them
+ * (#2095). Declared with this list, every binding method the SDK calls must
+ * receive every argument (`null` for "none"), so a new or unpassed argument
+ * fails the typecheck.
  */
-type BindingParams<M extends keyof BindingVectorStore> =
-  BindingVectorStore[M] extends (...args: infer P) => unknown ? P : never;
+type AllParams<F> = F extends (...args: infer P) => unknown ? Required<P> : never;
+
+/** {@link AllParams} of a `VectorStore` method. */
+type StoreParams<M extends keyof BindingVectorStore> = AllParams<BindingVectorStore[M]>;
 
 // ---------------------------------------------------------------------------
 // WASM result types — mirror the shapes returned by velesdb-wasm
@@ -63,78 +73,84 @@ export type WasmSearchResultItem =
 
 /** Typed interface for the velesdb-wasm VectorStore class instance. */
 export interface WasmVectorStore {
+  // Every method takes the binding's full parameter list (`StoreParams`);
+  // only the result shapes, which the binding types as `any`, are stated here.
+
   /** Release WASM memory. */
-  free(): void;
+  free(...args: StoreParams<'free'>): void;
 
   /** Insert a vector by ID. */
-  insert(id: bigint, vector: Float32Array): void;
+  insert(...args: StoreParams<'insert'>): void;
 
   /** Insert a vector with JSON payload. */
-  insert_with_payload(id: bigint, vector: Float32Array, payload: unknown): void;
+  insert_with_payload(...args: StoreParams<'insert_with_payload'>): void;
 
   /** Batch insert: array of [id, vector] pairs. */
-  insert_batch(batch: Array<[bigint, number[]]>): void;
+  insert_batch(...args: StoreParams<'insert_batch'>): void;
 
   /** Pre-allocate memory for additional vectors. */
-  reserve(additional: number): void;
+  reserve(...args: StoreParams<'reserve'>): void;
 
-  /** Remove a vector by ID. Returns true if found. */
-  remove(id: bigint): boolean;
+  /** Remove a vector by ID. Returns true if found. It leaves the ID's sparse postings in place. */
+  remove(...args: StoreParams<'remove'>): boolean;
 
   /** Get a point by ID. Returns point object or null. */
-  get(id: bigint): WasmPoint | null;
+  get(...args: StoreParams<'get'>): WasmPoint | null;
 
   /** Whether the store is empty (getter property). */
-  readonly is_empty: boolean;
+  readonly is_empty: BindingVectorStore['is_empty'];
 
   /** Number of vectors in the store (getter property). */
-  readonly len: number;
-
-  // The search methods take their parameter lists from the binding's own
-  // declaration file (`BindingParams`); only the result shapes, which the
-  // binding types as `any`, are stated here.
+  readonly len: BindingVectorStore['len'];
 
   /** k-NN dense search. Returns array of [id, score] tuples. */
-  search(...args: BindingParams<'search'>): WasmDenseResult[];
+  search(...args: StoreParams<'search'>): WasmDenseResult[];
 
   /** k-NN search with metadata filter. Returns array of {id, score, payload}. */
-  search_with_filter(...args: BindingParams<'search_with_filter'>): WasmFilteredResult[];
+  search_with_filter(...args: StoreParams<'search_with_filter'>): WasmFilteredResult[];
+
+  /** Add a document's sparse postings. Nothing removes them afterwards (`wasm-sparse.ts`). */
+  sparse_insert(...args: StoreParams<'sparse_insert'>): void;
 
   /** Sparse index search. Returns array of {doc_id, score}. */
-  sparse_search(...args: BindingParams<'sparse_search'>): WasmSparseResult[];
+  sparse_search(...args: StoreParams<'sparse_search'>): WasmSparseResult[];
 
   /**
    * Text search on payload fields. The third argument names one payload
    * field to match; this method takes no filter.
    */
-  text_search(...args: BindingParams<'text_search'>): WasmSearchResultItem[];
+  text_search(...args: StoreParams<'text_search'>): WasmSearchResultItem[];
 
   /** Hybrid vector + text search. Returns array of {id, score, payload}. */
-  hybrid_search(...args: BindingParams<'hybrid_search'>): WasmHybridResult[];
+  hybrid_search(...args: StoreParams<'hybrid_search'>): WasmHybridResult[];
 
   /**
    * Multi-query search with fusion: `(vectors, num_vectors, k, strategy,
-   * rrf_k?, weights?)`, `weights` being the weighted strategy's
+   * rrf_k, weights)`, `weights` being the weighted strategy's
    * `[avg, max, hit]`. Returns mixed result items.
    */
-  multi_query_search(...args: BindingParams<'multi_query_search'>): WasmSearchResultItem[];
+  multi_query_search(...args: StoreParams<'multi_query_search'>): WasmSearchResultItem[];
 
   /** VelesQL-style query returning multi-model results. */
-  query(...args: BindingParams<'query'>): Record<string, unknown>[];
+  query(...args: StoreParams<'query'>): Record<string, unknown>[];
 }
 
 // ---------------------------------------------------------------------------
 // WasmModule — typed interface for the imported WASM package
 // ---------------------------------------------------------------------------
 
-/** Constructor signature for the VectorStore class exported by velesdb-wasm. */
+/** The static side of the VectorStore class exported by velesdb-wasm. */
 export interface WasmVectorStoreConstructor {
-  new (dimension: number, metric: string): WasmVectorStore;
+  /** Create a store holding its vectors in `mode` (`full`, `sq8`, `binary`, …). */
+  new_with_mode(...args: AllParams<typeof BindingVectorStore.new_with_mode>): WasmVectorStore;
 }
 
 /** Typed interface for the @wiscale/velesdb-wasm module. */
 export interface WasmModule {
   /** WASM initialization function (must be called once before use).
+   *
+   * The one binding function not declared with {@link AllParams}: a browser
+   * calls it with no argument and Node with the module bytes.
    *
    * Accepts an optional argument that wasm-bindgen forwards to its loader:
    *  - browser: omit, the loader will fetch the .wasm next to the JS module.
@@ -148,12 +164,23 @@ export interface WasmModule {
   VectorStore: WasmVectorStoreConstructor;
 
   /** Fuse dense + sparse search results via Reciprocal Rank Fusion. */
-  hybrid_search_fuse(
-    denseResults: Array<[number, number]>,
-    sparseResults: Array<[number, number]>,
-    rrfK: number,
-    k?: number
-  ): WasmSparseResult[];
+  hybrid_search_fuse(...args: AllParams<typeof bindingHybridSearchFuse>): WasmSparseResult[];
+}
+
+/**
+ * Sparse bookkeeping for one collection: each sparse upsert is indexed under
+ * a fresh sparse id, and a replaced or deleted point's id is retired, since
+ * the binding cannot remove postings (`backends/wasm-sparse.ts`).
+ */
+export interface SparseIds {
+  /** Live sparse id of each point that has a sparse vector, by numeric point id. */
+  byPoint: Map<number, bigint>;
+  /** Point behind each live sparse id. */
+  byId: Map<bigint, number>;
+  /** Retired ids the binding still holds; a search over-fetches by this many. */
+  dead: number;
+  /** Next sparse id to hand out. */
+  next: bigint;
 }
 
 /** In-memory collection storage */
@@ -161,6 +188,7 @@ export interface CollectionData {
   config: CollectionConfig;
   store: WasmVectorStore;
   payloads: Map<string, Record<string, unknown>>;
+  sparseIds: SparseIds;
   createdAt: Date;
 }
 
