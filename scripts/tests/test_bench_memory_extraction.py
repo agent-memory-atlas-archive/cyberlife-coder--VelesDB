@@ -35,12 +35,14 @@ from __future__ import annotations
 import contextlib
 import copy
 import datetime
+import gc
 import hashlib
 import http.server
 import importlib.util
 import io
 import json
 import math
+import os
 import platform
 import re
 import socket
@@ -48,6 +50,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -754,15 +757,17 @@ class FakeOllama:
     A real server would make these tests depend on what the machine running them
     has installed. What they pin is what the bench does with an answer, and with
     the absence of one. `version=None` turns `/api/version` into a 404: a proxy
-    that serves generation and nothing else.
+    that serves generation and nothing else. `answers` replaces what a path
+    answers: any JSON value, or bytes sent as they are, which are not HTTP.
     """
 
     def __init__(self, test: unittest.TestCase, version: "str | None" = "0.34.0",
-                 models: "list[dict] | None" = None) -> None:
+                 models: "list[dict] | None" = None, answers: "dict | None" = None) -> None:
         self.bodies: "list[dict]" = []
         routes = {"/api/ps": {"models": []}, "/api/tags": {"models": models or []}}
         if version is not None:
             routes["/api/version"] = {"version": version}
+        routes.update(answers or {})
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._handler(routes))
         thread = threading.Thread(target=server.serve_forever,
                                   kwargs={"poll_interval": 0.05}, daemon=True)
@@ -786,7 +791,10 @@ class FakeOllama:
                 self._answer({"response": '{"relations": [], "attributes": []}',
                               "eval_count": 1, "done_reason": "stop"})
 
-            def _answer(self, payload: "dict | None") -> None:
+            def _answer(self, payload: object) -> None:
+                if isinstance(payload, bytes):
+                    self.wfile.write(payload)
+                    return
                 body = b"" if payload is None else json.dumps(payload).encode()
                 self.send_response(404 if payload is None else 200)
                 self.send_header("Content-Type", "application/json")
@@ -842,6 +850,17 @@ ENDTOEND_OUTCOME = {"phase": "endtoend", "write_p50_seconds": 0.1, "write_p95_se
 FAKE_BINARY_VERSION = "velesdb-memory 0.0.0-bench-test"
 FAKE_BINARY_SCRIPT = f"#!/bin/sh\necho '{FAKE_BINARY_VERSION}'\n"
 
+# How long a test lets a freshly written executable take to answer: far above its
+# first launch, which macOS delays while it assesses the new file (40.5 s measured
+# on a loaded machine), so no verdict rests on how fast a launch is. A binary that
+# hangs still fails its test, only later.
+LAUNCH_PATIENCE_S = 600
+
+
+def patient_launches():
+    """The bench waiting `LAUNCH_PATIENCE_S` for what it asks, instead of its own deadline."""
+    return mock.patch.object(bench, "ANSWER_TIMEOUT_S", LAUNCH_PATIENCE_S)
+
 
 def endtoend_via_main(out: Path, *extra: str, script: str = FAKE_BINARY_SCRIPT) -> dict:
     """`endtoend` through `main`, with no daemon spawned and no model run: the file it wrote.
@@ -849,9 +868,10 @@ def endtoend_via_main(out: Path, *extra: str, script: str = FAKE_BINARY_SCRIPT) 
     What is pinned is the record `endtoend` writes around the phase. The closed
     port would turn any request the bench made into a different reason. The
     binary it is given runs `script`, from outside the repository: `endtoend`
-    only asks it `--version`.
+    only asks it `--version`. It is written fresh, so it has `LAUNCH_PATIENCE_S`
+    to answer (`patient_launches`).
     """
-    with tempfile.TemporaryDirectory() as bin_dir, \
+    with tempfile.TemporaryDirectory() as bin_dir, patient_launches(), \
             mock.patch.object(bench, "DisposableDaemon"), \
             mock.patch.object(bench, "endtoend", return_value=copy.deepcopy(ENDTOEND_OUTCOME)), \
             contextlib.redirect_stdout(io.StringIO()):
@@ -862,6 +882,22 @@ def endtoend_via_main(out: Path, *extra: str, script: str = FAKE_BINARY_SCRIPT) 
                     "--config", "qwen3:14b", "--binary", str(binary),
                     "--out", str(out), *extra])
     return json.loads(out.read_text(encoding="utf-8"))
+
+
+@contextlib.contextmanager
+def input_holding(data: bytes):
+    """This process's standard input replaced by a pipe holding `data`, for what inherits it."""
+    read_end, write_end = os.pipe()
+    os.write(write_end, data)
+    os.close(write_end)
+    saved = os.dup(0)
+    os.dup2(read_end, 0)
+    try:
+        yield
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(read_end)
 
 
 def launched_fake_binary() -> dict:
@@ -877,24 +913,30 @@ def served_by(fake: "FakeOllama") -> dict:
             "missing": {"sha256": bench.SERVED_OVER_HTTP}}
 
 
+def git_answer(root: Path, *argv: str) -> str:
+    """What git prints about the checkout at `root`."""
+    return subprocess.run(["git", "-C", str(root), *argv],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
 def checkout_origin() -> dict:
     """Where these tests run from, asked the way a result file must record it."""
-    def git(*argv: str) -> str:
-        return subprocess.run(["git", "-C", str(SCRIPT_PATH.parents[1]), *argv],
-                              capture_output=True, text=True, check=True).stdout.strip()
+    root = SCRIPT_PATH.parents[1]
     return {"machine": platform.machine(), "os": platform.platform(terse=True),
-            "commit": git("rev-parse", "HEAD"),
-            "uncommitted_changes": bool(git("status", "--porcelain", "--untracked-files=no"))}
+            "commit": git_answer(root, "rev-parse", "HEAD"),
+            "uncommitted_changes": bool(git_answer(root, "status", "--porcelain",
+                                                   "--untracked-files=no"))}
 
 
 def origin_cell(origin: dict) -> str:
-    """The origin cell a row renders, restated: host, OS, the commit cut to 12, marked when
-    tracked files had changed, the cases file, then a recorded binary by the version it
-    reported and its sha256 cut to 12, or `unhashed`; `?` for what the run could not answer."""
-    commit = origin.get("commit")
-    mark = {True: " (modified)", None: " (modified ?)"}.get(origin.get("uncommitted_changes"), "")
+    """The origin cell a row renders, restated: host, OS, the commit cut to 12 and the cases
+    file, each marked when it differed from the commit, then a recorded binary by the version
+    it reported and its sha256 cut to 12, or `unhashed`; `?` for what the run could not answer."""
+    marks = {True: " (modified)", None: " (modified ?)"}
+    commit, cases = origin.get("commit"), origin.get("cases_file")
     parts = [origin.get("machine") or "?", origin.get("os") or "?",
-             f"{commit[:12]}{mark}" if commit else "?", origin.get("cases_file") or "?"]
+             f"{commit[:12]}{marks.get(origin.get('uncommitted_changes'), '')}" if commit else "?",
+             f"{cases}{marks.get(origin.get('cases_file_modified'), '')}" if cases else "?"]
     binary = origin.get("binary")
     if isinstance(binary, dict):
         digest = binary.get("sha256")
@@ -940,7 +982,66 @@ class RuntimeRecordTest(unittest.TestCase):
         fake = FakeOllama(self, models=[{"name": "qwen3:8b", "digest": DIGEST}])
         runtime = bench.ollama_runtime(fake.url, ["qwen3:14b"])
         self.assertEqual(runtime["model_digests"], {"qwen3:14b": None})
-        self.assertEqual(runtime["missing"]["qwen3:14b"], "not listed by GET /api/tags")
+        self.assertEqual(runtime["missing"]["qwen3:14b"], bench.UNLISTED)
+
+    def test_a_reply_that_is_not_http_is_recorded_as_no_answer(self):
+        """urllib lets a malformed reply escape as `http.client.HTTPException`, not `OSError`."""
+        junk = b"garbage\r\n\r\n"
+        fake = FakeOllama(self, answers={"/api/version": junk, "/api/tags": junk})
+        runtime = bench.ollama_runtime(fake.url, ["qwen3:14b"])
+        self.assertEqual((runtime["ollama_version"], runtime["model_digests"]),
+                         (None, {"qwen3:14b": None}))
+        self.assertIn("no answer from GET /api/version: garbage",
+                      runtime["missing"]["ollama_version"])
+        self.assertIn("no answer from GET /api/tags: garbage", runtime["missing"]["qwen3:14b"])
+
+    def test_an_answer_that_is_not_an_object_is_null_with_a_reason(self):
+        fake = FakeOllama(self, answers={"/api/version": [1], "/api/tags": []})
+        self.assertEqual(bench.ollama_runtime(fake.url, ["qwen3:14b"]), {
+            "ollama_version": None, "model_digests": {"qwen3:14b": None},
+            "missing": {"ollama_version": "GET /api/version answered list, not an object",
+                        "qwen3:14b": "GET /api/tags answered list, not an object"}})
+
+    def test_a_listing_of_another_shape_is_null_with_a_reason(self):
+        """Only a list `models` of objects whose `name` and `digest` are strings is read.
+
+        Each of these killed the run before it measured, or recorded a digest the report
+        could not print (#1949 review).
+        """
+        listings = {
+            "models is a number": ({"models": 5},
+                                   "GET /api/tags answered `models` as int, not a list"),
+            "a name that is a list": ({"models": [{"name": ["qwen3:14b"], "digest": DIGEST}]},
+                                      bench.UNLISTED),
+            "a digest that is a number": ({"models": [{"name": "qwen3:14b", "digest": 12345}]},
+                                          bench.UNLISTED),
+            "an entry that is a string": ({"models": ["qwen3:14b"]}, bench.UNLISTED),
+            "no models at all": ({}, bench.UNLISTED),
+        }
+        for label, (tags, reason) in listings.items():
+            with self.subTest(label):
+                fake = FakeOllama(self, answers={"/api/tags": tags})
+                runtime = bench.ollama_runtime(fake.url, ["qwen3:14b"])
+                self.assertEqual((runtime["model_digests"], runtime["missing"]),
+                                 ({"qwen3:14b": None}, {"qwen3:14b": reason}))
+
+    def test_a_version_that_is_not_a_string_is_null_with_a_reason(self):
+        for version in (5, ["0.34.0"], ""):
+            with self.subTest(version=version):
+                fake = FakeOllama(self, answers={"/api/version": {"version": version}})
+                runtime = bench.ollama_runtime(fake.url, [])
+                self.assertEqual((runtime["ollama_version"], runtime["missing"]),
+                                 (None, {"ollama_version": bench.VERSIONLESS}))
+
+    def test_a_refused_question_releases_its_connection(self):
+        """urllib's `HTTPError` holds its response open: left to the collector, it warns."""
+        fake = FakeOllama(self, version=None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            bench.ollama_runtime(fake.url, [])
+            gc.collect()
+        self.assertEqual([str(warning.message) for warning in caught
+                          if issubclass(warning.category, ResourceWarning)], [])
 
     def test_a_backend_the_bench_does_not_ask_says_so(self):
         """No request is made: a closed port would turn one into an error here."""
@@ -963,6 +1064,30 @@ class RuntimeRecordTest(unittest.TestCase):
                 for option in ("num_ctx", "num_predict", "temperature"):
                     self.assertEqual(recorded[option], sent["options"][option])
                 self.assertEqual(recorded["constrained"], "format" in sent)
+
+
+def recorded_entry(verified: bool) -> dict:
+    """A row's file as the bench writes it: every question answered, or the version not."""
+    missing = {} if verified else {
+        "ollama_version": "no answer from GET /api/version: HTTP Error 404: Not Found"}
+    return {"config": "m", "settings": dict(RECORDED_OPTIONS),
+            "runtime": {"ollama_version": "0.34.0" if verified else None,
+                        "model_digests": {"m": DIGEST}, "missing": missing},
+            "origin": {"machine": "arm64", "os": "macOS-26.0", "commit": "c" * 40,
+                       "uncommitted_changes": False, "cases_file": "cases.json",
+                       "cases_file_modified": False,
+                       "binary": {"path": None, "version": FAKE_BINARY_VERSION,
+                                  "sha256": DIGEST, "missing": {}},
+                       "missing": {}}}
+
+
+def with_value(entry: dict, place: "tuple[str, ...]", value: object) -> dict:
+    """`entry` with the field at `place`, a path of keys, holding `value`."""
+    holder = entry
+    for key in place[:-1]:
+        holder = holder[key]
+    holder[place[-1]] = value
+    return entry
 
 
 class ProvenanceReportTest(unittest.TestCase):
@@ -989,6 +1114,66 @@ class ProvenanceReportTest(unittest.TestCase):
         self.assertIn(f"| ollama 0.34.0 · {DIGEST[:12]} · ctx 2048 |", rendered)
         self.assertIn("`ollama_version`, `digest`", rendered)
         self.assertNotIn("`num_ctx`", rendered)
+
+    def test_an_unverified_row_prints_the_reason_its_file_gives_in_both_tables(self):
+        """A server down, or without an endpoint, leaves its reason under `runtime.missing`:
+        the row prints the first one beside `unverified` (#1949 review)."""
+        runtime = bench.ollama_runtime(closed_port_url(), ["qwen3:14b"])
+        entry = {"config": "qwen3:14b", "settings": dict(RECORDED_OPTIONS), "runtime": runtime}
+        rendered = bench.render_report({"configurations": {"down": entry},
+                                        "end_to_end": {"down": entry}})
+        first = next(iter(runtime["missing"].values()))
+        self.assertIn("no answer from GET /api/version", first)
+        for heading in ("## Configurations", "## End-to-end"):
+            with self.subTest(table=heading):
+                self.assertEqual(report_table(rendered, heading)["down"].get("provenance"),
+                                 f"unverified ({first})")
+
+    def test_a_reason_prints_on_one_line_bounded_and_escaped(self):
+        """A reason holds the server's own words: a line break would split the row, a pipe
+        its cells, and a junk reply can run to kilobytes. The file keeps the reason whole."""
+        printed = {"garbage\r\n": "garbage", "a | b": "a \\| b",
+                   "x" * 500: "x" * (bench.REASON_WIDTH - 1) + "…"}
+        for reason, cell in printed.items():
+            with self.subTest(reason=reason[:9]):
+                entry = {"config": "m", "runtime": {"ollama_version": None,
+                                                    "model_digests": {"m": None},
+                                                    "missing": {"ollama_version": reason}}}
+                rendered = bench.render_report({"configurations": {"m": entry}})
+                self.assertIn(f"| unverified ({cell}) |", rendered)
+
+    def test_the_report_renders_whatever_a_record_holds(self):
+        """A file is read as it is, not as the bench writes it: a digest that is a number
+        crashed the report (#1949 review). Whatever JSON a field of `runtime`, `settings`
+        or `origin` holds, both tables render, each with its one row."""
+        places = [("runtime",), ("runtime", "ollama_version"), ("runtime", "model_digests"),
+                  ("runtime", "model_digests", "m"), ("runtime", "missing"),
+                  ("runtime", "missing", "ollama_version"), ("settings",),
+                  ("origin",), ("origin", "machine"), ("origin", "os"), ("origin", "commit"),
+                  ("origin", "uncommitted_changes"), ("origin", "cases_file"),
+                  ("origin", "cases_file_modified"), ("origin", "binary"),
+                  ("origin", "binary", "version"), ("origin", "binary", "sha256")]
+        for verified in (True, False):
+            for place in places:
+                for junk in (None, True, 5, 1.5, "", "x", [], ["x"], {}, {"k": 1}):
+                    entry = with_value(recorded_entry(verified), place, junk)
+                    with self.subTest(verified=verified, place=place, junk=junk):
+                        rendered = bench.render_report({"configurations": {"m": entry},
+                                                        "end_to_end": {"m": entry}})
+                        for heading in ("## Configurations", "## End-to-end"):
+                            self.assertEqual(list(report_table(rendered, heading)), ["m"])
+
+    def test_only_a_string_counts_as_a_version_or_a_digest(self):
+        """A number where a digest belongs is no digest: the row reads unverified, not
+        verified under a version or weights nobody named."""
+        for place in (("runtime", "ollama_version"), ("runtime", "model_digests", "m")):
+            for junk in (True, 5, [], ["x"], {"k": 1}):
+                with self.subTest(place=place, junk=junk):
+                    entry = with_value(recorded_entry(verified=True), place, junk)
+                    rendered = bench.render_report({"configurations": {"m": entry}})
+                    self.assertEqual(
+                        report_table(rendered, "## Configurations")["m"].get("provenance"),
+                        "unverified")
 
 
 class ProvenanceWiringTest(unittest.TestCase):
@@ -1055,9 +1240,11 @@ class ProvenanceWiringTest(unittest.TestCase):
         fake = FakeOllama(self, models=[{"name": "qwen3:14b", "digest": DIGEST}])
         record, rendered = self.screen_then_report(fake)
         self.assertIsInstance(record.get("origin"), dict, "the result file records no origin")
-        self.assertEqual(record["origin"], {**checkout_origin(), "cases_file": None,
-                                            "binary": served_by(fake),
-                                            "missing": {"cases_file": bench.OUTSIDE_REPOSITORY}})
+        self.assertEqual(record["origin"], {
+            **checkout_origin(), "cases_file": None, "cases_file_modified": None,
+            "binary": served_by(fake),
+            "missing": {"cases_file": bench.OUTSIDE_REPOSITORY,
+                        "cases_file_modified": bench.OUTSIDE_REPOSITORY}})
         rows = report_table(rendered, "## Configurations")
         self.assertEqual(rows["qwen3:14b"].get("origin"), origin_cell(record["origin"]))
         self.assertNotIn("## Environment", rendered)
@@ -1107,6 +1294,18 @@ class ProvenanceWiringTest(unittest.TestCase):
                          record["runtime"]["missing"]["ollama_version"])
         self.assertIn("**Unverified: 1 of 1 rows**", rendered)
         self.assertIn("`ollama_version`", rendered)
+        self.assertEqual(report_table(rendered, "## Configurations")["qwen3:14b"].get("provenance"),
+                         f"unverified ({record['runtime']['missing']['ollama_version']})")
+
+    def test_a_listing_of_another_shape_does_not_stop_the_run(self):
+        """`/api/tags` answering `{"models": 5}` killed `screen` before it measured
+        (#1949 review)."""
+        fake = FakeOllama(self, answers={"/api/tags": {"models": 5}})
+        record, rendered = self.screen_then_report(fake)
+        self.assertEqual(record["totals"]["parse_rate"], 1.0)
+        self.assertEqual(record["runtime"]["model_digests"], {"qwen3:14b": None})
+        self.assertEqual(report_table(rendered, "## Configurations")["qwen3:14b"].get("provenance"),
+                         "unverified (GET /api/tags answered `models` as int, not a list)")
 
 
 # ------------------------------------------------------------------ run count --
@@ -1233,10 +1432,11 @@ class EndToEndRuntimeTest(unittest.TestCase):
         """The shipped cases file is recorded by its path in the repository, never a local one."""
         record, rendered = self.endtoend_then_report()
         self.assertIsInstance(record.get("origin"), dict, "the result file records no origin")
-        self.assertEqual(record["origin"], {**checkout_origin(),
-                                            "cases_file": "scripts/memory-extraction-cases.json",
-                                            "binary": launched_fake_binary(),
-                                            "missing": {}})
+        shipped = "scripts/memory-extraction-cases.json"
+        changed = git_answer(SCRIPT_PATH.parents[1], "status", "--porcelain", "--", shipped)
+        self.assertEqual(record["origin"], {
+            **checkout_origin(), "cases_file": shipped, "cases_file_modified": bool(changed),
+            "binary": launched_fake_binary(), "missing": {}})
         rows = report_table(rendered, "## End-to-end")
         self.assertEqual(rows["qwen3:14b"].get("origin"), origin_cell(record["origin"]))
 
@@ -1266,6 +1466,33 @@ class EndToEndRuntimeTest(unittest.TestCase):
             "missing": {"path": bench.OUTSIDE_REPOSITORY,
                         "version": "velesdb-memory --version exited 3"}})
 
+    def test_a_binary_records_the_first_line_of_its_version(self):
+        script = "#!/bin/sh\necho 'velesdb-memory 1.2.3'\necho 'built from a dirty tree'\n"
+        record, _rendered = self.endtoend_then_report(script=script)
+        self.assertEqual(record["origin"]["binary"]["version"], "velesdb-memory 1.2.3")
+
+    def test_a_binary_that_reads_its_input_is_given_none(self):
+        """A binary that ignores `--version` and reads its input, as a server on stdio would,
+        gets an end of file at once, never the input of the process running the bench."""
+        script = ("#!/bin/sh\nif read -r line; then echo \"velesdb-memory read: $line\"\n"
+                  "else echo 'velesdb-memory 1.0.0'; fi\n")
+        with input_holding(b"the bench's own input\n"):
+            record, _rendered = self.endtoend_then_report(script=script)
+        self.assertEqual(record["origin"]["binary"]["version"], "velesdb-memory 1.0.0")
+
+    def test_a_binary_named_bare_is_hashed_where_the_launch_finds_it_on_path(self):
+        """`--binary velesdb-memory` runs the first one on PATH: that file is the one hashed."""
+        with tempfile.TemporaryDirectory() as bin_dir:
+            binary = Path(bin_dir) / "velesdb-memory-bench-test"
+            binary.write_text(FAKE_BINARY_SCRIPT, encoding="utf-8")
+            binary.chmod(0o755)
+            path = os.pathsep.join([bin_dir, os.environ.get("PATH", "")])
+            with mock.patch.dict(os.environ, {"PATH": path}), patient_launches():
+                record = bench.launched_binary(Path(binary.name))
+        expected = launched_fake_binary()
+        self.assertEqual((record["version"], record["sha256"]),
+                         (expected["version"], expected["sha256"]))
+
     def test_an_endtoend_file_records_when_it_started(self):
         before = utc_millisecond()
         record, _rendered = self.endtoend_then_report()
@@ -1280,6 +1507,114 @@ class EndToEndRuntimeTest(unittest.TestCase):
         rows = report_table(bench.render_report({"end_to_end": runs}), "## End-to-end")
         self.assertEqual(set(rows), set(runs))
         self.assertEqual({row.get("provenance") for row in rows.values()}, {"unverified"})
+
+
+# ------------------------------------------------------------------ checkout --
+
+
+@contextlib.contextmanager
+def scratch_checkout():
+    """A git checkout of a committed `cases.json` and `notes.txt`, standing in for the repository.
+
+    What git answers about it depends on the test alone, not on the state of the checkout
+    running the suite. Hooks are off: a global one has no business in it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        (root / "cases.json").write_text("{}\n", encoding="utf-8")
+        (root / "notes.txt").write_text("notes\n", encoding="utf-8")
+        for argv in (["init", "--quiet"], ["add", "cases.json", "notes.txt"],
+                     ["-c", "user.name=bench", "-c", "user.email=bench@example.invalid",
+                      "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+                      "commit", "--quiet", "--message", "cases"]):
+            git_answer(root, *argv)
+        with mock.patch.object(bench, "ROOT", root):
+            yield root
+
+
+class CheckoutOriginTest(unittest.TestCase):
+    """What `origin` says of a checkout is git's answer about the bench's own (#1949 review).
+
+    A cases file inside the checkout but untracked was recorded by its path beside a clean
+    commit: a file that is at no commit.
+    """
+
+    def test_a_cases_file_git_does_not_track_is_not_named(self):
+        with scratch_checkout() as root:
+            (root / "draft.json").write_text("{}\n", encoding="utf-8")
+            origin = bench.run_origin(root / "draft.json", None)
+        self.assertEqual((origin["cases_file"], origin["missing"].get("cases_file")),
+                         (None, bench.UNTRACKED))
+
+    def test_a_name_git_would_read_as_a_pattern_is_taken_as_written(self):
+        """`case?.json`, read as a pattern, matches the tracked `cases.json`: it is not it."""
+        with scratch_checkout() as root:
+            (root / "case?.json").write_text("{}\n", encoding="utf-8")
+            origin = bench.run_origin(root / "case?.json", None)
+        self.assertEqual((origin["cases_file"], origin["missing"].get("cases_file")),
+                         (None, bench.UNTRACKED))
+
+    def test_a_tracked_cases_file_is_named_and_marked_when_it_differs_from_the_commit(self):
+        """Marked when it differs itself: another tracked file's edit marks the commit only."""
+        with scratch_checkout() as root:
+            clean = bench.run_origin(root / "cases.json", None)
+            (root / "notes.txt").write_text("edited\n", encoding="utf-8")
+            beside = bench.run_origin(root / "cases.json", None)
+            (root / "cases.json").write_text('{"cases": []}\n', encoding="utf-8")
+            edited = bench.run_origin(root / "cases.json", None)
+        states = [tuple(origin.get(key) for key in ("uncommitted_changes", "cases_file",
+                                                    "cases_file_modified"))
+                  for origin in (clean, beside, edited)]
+        self.assertEqual(states, [(False, "cases.json", False), (True, "cases.json", False),
+                                  (True, "cases.json", True)])
+        rendered = bench.render_report({"configurations": {"m": {"config": "m", "origin": edited}}})
+        cell = report_table(rendered, "## Configurations")["m"].get("origin")
+        self.assertEqual(cell, origin_cell(edited))
+        self.assertIn(" · cases.json (modified)", cell)
+
+    def test_an_untracked_file_is_no_change_to_the_commit(self):
+        """`uncommitted_changes` is about tracked files: a stray draft changes no committed code."""
+        with scratch_checkout() as root:
+            (root / "draft.json").write_text("{}\n", encoding="utf-8")
+            origin = bench.run_origin(root / "cases.json", None)
+        self.assertIs(origin["uncommitted_changes"], False)
+
+    def test_a_checkout_git_cannot_read_leaves_its_reasons(self):
+        """Outside any repository git answers nothing: each null says which command failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "cases.json").write_text("{}\n", encoding="utf-8")
+            with mock.patch.object(bench, "ROOT", root), \
+                    mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(root.parent)}):
+                origin = bench.run_origin(root / "cases.json", None)
+        asked = ("commit", "uncommitted_changes", "cases_file", "cases_file_modified")
+        self.assertEqual({key: origin[key] for key in asked}, dict.fromkeys(asked))
+        self.assertRegex(origin["missing"]["cases_file"],
+                         r"^git ls-files -- :\(literal\)cases\.json exited \d+$")
+        self.assertEqual(origin["missing"]["cases_file_modified"], origin["missing"]["cases_file"])
+        self.assertRegex(origin["missing"]["uncommitted_changes"], r"^git status .* exited \d+$")
+
+    def test_a_run_from_another_directory_names_the_checkout_of_its_bench(self):
+        with scratch_checkout() as root, tempfile.TemporaryDirectory() as elsewhere, \
+                contextlib.chdir(elsewhere):
+            origin = bench.run_origin(root / "cases.json", None)
+            head = git_answer(root, "rev-parse", "HEAD")
+        self.assertEqual((origin["commit"], origin["cases_file"]), (head, "cases.json"))
+
+    def test_a_cases_file_named_from_the_working_directory_is_found_in_the_repository(self):
+        """`--cases cases.json`, run from the checkout, names the file its absolute path names."""
+        with scratch_checkout() as root, contextlib.chdir(root):
+            origin = bench.run_origin(Path("cases.json"), None)
+        self.assertEqual(origin["cases_file"], "cases.json")
+
+    def test_a_change_git_left_unanswered_is_marked_unknown(self):
+        """`(modified ?)`: the run asked, and git did not answer; a clean checkout is unmarked."""
+        origin = {**recorded_entry(verified=True)["origin"],
+                  "uncommitted_changes": None, "cases_file_modified": None}
+        rendered = bench.render_report({"configurations": {"m": {"config": "m", "origin": origin}}})
+        self.assertEqual(report_table(rendered, "## Configurations")["m"].get("origin"),
+                         f"arm64 · macOS-26.0 · {'c' * 12} (modified ?) · "
+                         f"cases.json (modified ?) · {FAKE_BINARY_VERSION} ({DIGEST[:12]})")
 
 
 # -------------------------------------------------------------- row per file --
@@ -1405,25 +1740,33 @@ def ids_digest(*ids: str) -> str:
 
 def scored_digest(cases: "list[dict]", phase: str) -> str:
     """The suite identity's definition, restated: sha256 of what the phase's scorer reads
-    of each case, cases sorted by id, serialised with sorted keys and no whitespace.
+    of each case, serialised with sorted keys and no whitespace.
 
     Screening reads a case's id, family, language, cross-checks (none when absent)
-    and each passage's text and checks; phase B its id, and each passage's text
-    with the checks a stored entity can answer.
+    and each passage's text and checks, and none of its counts reads their order:
+    cases, passages, checks and cross-checks are each sorted by their serialisation.
+    Phase B reads a case's id, and each passage's text with the checks a stored
+    entity can answer, in the order it writes and asks them: the file's.
     """
+    def canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    def unordered(items: list) -> list:
+        return sorted(items, key=canonical)
+
     if phase == "screen":
-        scored = [{"id": case["id"], "family": case["family"], "lang": case["lang"],
-                   "passages": [{"text": passage["text"], "checks": passage["checks"]}
-                                for passage in case["passages"]],
-                   "cross_checks": case.get("cross_checks") or []} for case in cases]
+        scored = unordered([
+            {"id": case["id"], "family": case["family"], "lang": case["lang"],
+             "passages": unordered([{"text": passage["text"],
+                                     "checks": unordered(passage["checks"])}
+                                    for passage in case["passages"]]),
+             "cross_checks": unordered(case.get("cross_checks") or [])} for case in cases])
     else:
         scored = [{"id": case["id"],
                    "passages": [{"text": passage["text"],
                                  "checks": bench.graph_checks_for(passage)}
                                 for passage in case["passages"]]} for case in cases]
-    canonical = json.dumps(sorted(scored, key=lambda case: case["id"]), sort_keys=True,
-                           ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical(scored).encode("utf-8")).hexdigest()
 
 
 def suite_record(*ids: str) -> dict:
@@ -1441,13 +1784,14 @@ class SuiteTest(unittest.TestCase):
     """
 
     def test_the_identity_covers_what_each_case_checks(self):
-        """An edited check is another suite under the same ids; a reordered file is not."""
+        """An edited check is another suite under the same ids; a case whose keys are
+        reordered is not."""
         cases = bench.load_cases(CASES_PATH)
         edited = copy.deepcopy(cases)
         check = next(check for case in edited for passage in case["passages"]
                      for check in passage["checks"] if check["type"] == "attribute_number")
         check["value"] += 1
-        reordered = [dict(reversed(list(case.items()))) for case in reversed(cases)]
+        reordered = [dict(reversed(list(case.items()))) for case in cases]
         for phase in ("screen", "endtoend"):
             with self.subTest(phase=phase):
                 identity = bench.suite_identity(cases, phase)
@@ -1455,6 +1799,35 @@ class SuiteTest(unittest.TestCase):
                 self.assertEqual(identity, {"cases": len(cases),
                                             "definitions_sha256": scored_digest(cases, phase)})
                 self.assertEqual(bench.suite_identity(reordered, phase), identity)
+
+    def test_screening_ignores_an_order_no_count_reads_and_endtoend_keeps_its_own(self):
+        """Screening sends each passage alone, scores each check alone, and cross-checks a
+        pair either way round: its cases, a pair's passages, a passage's checks and a case's
+        cross-checks, reordered, leave its digest put. Phase B writes every passage into one
+        store, and reads each entity when a check first asks for it, in file order: the same
+        reorders are another suite to it (#1949 review)."""
+        cases = bench.load_cases(CASES_PATH)
+        paired = next(case for case in cases if case.get("cross_checks"))
+        # The shipped pairs carry one cross-check each: a second one gives them an order.
+        crossed = {**paired, "cross_checks": paired["cross_checks"] + [
+            {**paired["cross_checks"][0], "label": "a second cross-check"}]}
+        reorders = {
+            "cases": (cases, cases[::-1]),
+            "passages": (cases, [{**case, "passages": case["passages"][::-1]} for case in cases]),
+            "checks": (cases, [{**case, "passages": [{**passage, "checks": passage["checks"][::-1]}
+                                                     for passage in case["passages"]]}
+                               for case in cases]),
+            "cross-checks": ([crossed],
+                             [{**crossed, "cross_checks": crossed["cross_checks"][::-1]}]),
+        }
+        for reorder, (original, reordered) in reorders.items():
+            with self.subTest(reorder=reorder):
+                self.assertNotEqual(reordered, original)
+                self.assertEqual(bench.suite_identity(reordered, "screen"),
+                                 bench.suite_identity(original, "screen"))
+                if reorder != "cross-checks":
+                    self.assertNotEqual(bench.suite_identity(reordered, "endtoend"),
+                                        bench.suite_identity(original, "endtoend"))
 
     def test_rows_off_the_common_suite_are_marked_and_flagged(self):
         old = suite_record(*(f"c{index}" for index in range(19)))
@@ -1744,6 +2117,12 @@ class LocalPathTest(unittest.TestCase):
         self.assertEqual(folded["storage"], {"path": name, "device": "disk3s5", "reachable": True})
         self.assertEqual(folded["residency_before"]["models"],
                          [{"id": "qwen3-30b", "model_path": name, "digest": DIGEST}])
+
+    def test_a_path_under_the_home_shorthand_is_cut_too(self):
+        """`~/models/…` names a home directory as surely as `/Users/<someone>/models/…` does."""
+        self.assertEqual(bench.without_local_paths({"path": "~/models/qwen3-14b",
+                                                    "id": "org/qwen3-14b"}),
+                         {"path": "qwen3-14b", "id": "org/qwen3-14b"})
 
     def test_no_rendered_output_carries_a_local_path(self):
         evidence = [path.name for path in PUBLISHED_CAMPAIGN.rglob("*.json")

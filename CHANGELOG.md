@@ -116,12 +116,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the weights' digest (`/api/version`, `/api/tags`) beside the decode
   options; the daemon an end-to-end run launches, by its `--version` line and
   sha256; the host, the commit and whether tracked files differed from it; the
-  cases file by its path in the repository; when the run started; and the suite
-  it ran, as a case count and a digest of what that phase's scorer reads of each
-  case. A question left unanswered is written as null with the reason. The
-  report prints each row's provenance and origin, or `unverified` and
-  `unrecorded`, counts the runs behind each row, and flags rows that sum
-  different numbers of runs or cover different suites: the reference screened
+  cases file by its path in the repository, only when git tracks it, and
+  whether it differed from that commit; when the run started; and the suite it
+  ran, as a case count and a digest of what that phase's scorer reads of each
+  case, in the order that can move its counts: none for screening, the order an
+  end-to-end run writes and reads its passages in. A question left unanswered,
+  or answered in a shape Ollama does not give, is written as null with the
+  reason. The report prints each row's provenance and origin, or `unverified`
+  with the first reason its file records and `unrecorded`, counts the runs
+  behind each row, and flags rows that sum different numbers of runs or cover
+  different suites: the reference screened
   its Ollama models twice and its MLX ones once, and its two end-to-end rows
   covered 1 case and 4. Every result file is a row of its own: the order
   control's replay had replaced the reference row it shares a label with, so the

@@ -913,6 +913,22 @@ EXTRACTION_SCHEMA = {
 }
 
 
+def _text(value: object) -> "str | None":
+    """A value a server answered, or a result file holds, as text: itself if a non-empty
+    string, else None.
+
+    Both are read as they are, not as the bench would have written them: a number
+    where a digest belongs is no digest, and printed as one it crashed the report
+    (#1949).
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _mapping(value: object) -> dict:
+    """A record a server answered, or a result file holds: itself if an object, else empty."""
+    return value if isinstance(value, dict) else {}
+
+
 def _ollama_answer(base_url: str, path: str) -> "tuple[dict, str | None]":
     """One provenance question: the server's answer, or why there is none.
 
@@ -935,18 +951,37 @@ def _ollama_answer(base_url: str, path: str) -> "tuple[dict, str | None]":
     return answer, None
 
 
+# Why a run has no server version, or a model no digest, though the server answered.
+VERSIONLESS = "GET /api/version named no version string"
+UNLISTED = "not listed by GET /api/tags with a string digest"
+
+
+def _listed_digests(answer: dict) -> "tuple[dict[str, str], str | None]":
+    """The digest of each model an `/api/tags` answer lists, or why it lists none.
+
+    Only the shape Ollama documents is read: a list `models` of objects whose
+    `name` and `digest` are strings. An entry of another shape is passed over,
+    and a `models` that is not a list lists nothing: `{"models": 5}` killed the
+    run before it measured, and an integer digest, recorded, crashed the report.
+    """
+    listed = answer.get("models", [])
+    if not isinstance(listed, list):
+        return {}, f"GET /api/tags answered `models` as {type(listed).__name__}, not a list"
+    return {entry["name"]: entry["digest"] for entry in listed
+            if isinstance(entry, dict) and _text(entry.get("name"))
+            and _text(entry.get("digest"))}, None
+
+
 def _installed_digests(base_url: str, models: "list[str]", missing: dict) -> dict:
     """Each model's digest as `/api/tags` lists it; null, with the reason, if not."""
     answer, reason = _ollama_answer(base_url, "/api/tags")
-    installed = {entry.get("name"): entry.get("digest")
-                 for entry in answer.get("models") or [] if isinstance(entry, dict)}
+    installed, unread = _listed_digests(answer)
     digests = {}
     for model in models:
         # Ollama lists a model pulled without a tag under `<name>:latest`.
         digests[model] = installed.get(model) or installed.get(f"{model}:latest")
-        if not digests[model]:
-            digests[model] = None
-            missing[model] = reason or "not listed by GET /api/tags"
+        if digests[model] is None:
+            missing[model] = reason or unread or UNLISTED
     return digests
 
 
@@ -965,13 +1000,14 @@ def ollama_runtime(base_url: str, models: "list[str]") -> dict:
 
     Whatever the server does not answer stays null, with the reason under
     `missing`. Filled in from the CLI or from a default, it would read as a
-    record of something nobody observed.
+    record of something nobody observed. An answer of another shape answers
+    nothing: a version or a digest that is not a string stays null too.
     """
     missing: "dict[str, str]" = {}
     answer, reason = _ollama_answer(base_url, "/api/version")
-    version = answer.get("version") or None
+    version = _text(answer.get("version"))
     if version is None:
-        missing["ollama_version"] = reason or "GET /api/version named no version"
+        missing["ollama_version"] = reason or VERSIONLESS
     digests = _installed_digests(base_url, models, missing)
     return {"ollama_version": version, "model_digests": digests, "missing": missing}
 
@@ -1230,24 +1266,46 @@ def load_cases(path: Path = CASES_FILE, split: "str | None" = None) -> "list[dic
 SUITE_DIGEST = "definitions_sha256"
 
 
+def _canonical(value: object) -> str:
+    """`value` serialised one way whatever the order of its keys: sorted, no whitespace."""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _unordered(items: list) -> list:
+    """`items` in one order, whatever order the cases file gives them."""
+    return sorted(items, key=_canonical)
+
+
 def _screened_case(case: dict) -> dict:
     """What phase A reads of a case to score it (`screen_case`): see `suite_identity`."""
     return {"id": case["id"], "family": case["family"], "lang": case["lang"],
-            "passages": [{"text": passage["text"], "checks": passage["checks"]}
-                         for passage in case["passages"]],
-            "cross_checks": case.get("cross_checks") or []}
+            "passages": _unordered([{"text": passage["text"],
+                                     "checks": _unordered(passage["checks"])}
+                                    for passage in case["passages"]]),
+            "cross_checks": _unordered(case.get("cross_checks") or [])}
 
 
 def _stored_case(case: dict) -> dict:
-    """What phase B reads of a case to score it (`endtoend`): see `suite_identity`."""
+    """What phase B reads of a case to score it (`endtoend`), in its order: see
+    `suite_identity`."""
     return {"id": case["id"],
             "passages": [{"text": passage["text"], "checks": graph_checks_for(passage)}
                          for passage in case["passages"]]}
 
 
-# What each phase's scorer reads of a case, keyed by the phase a result file names:
+def _screened_suite(cases: "list[dict]") -> "list[dict]":
+    """Phase A's cases as it scores them, in one order: none of its counts reads theirs."""
+    return _unordered([_screened_case(case) for case in cases])
+
+
+def _stored_suite(cases: "list[dict]") -> "list[dict]":
+    """Phase B's cases as it scores them, in the order it writes them into one store."""
+    return [_stored_case(case) for case in cases]
+
+
+# What each phase's scorer reads of a suite, keyed by the phase a result file names:
 # all its suite digest covers.
-SCORED_PART = {"screen": _screened_case, "endtoend": _stored_case}
+SCORED_SUITE = {"screen": _screened_suite, "endtoend": _stored_suite}
 
 
 def suite_identity(cases: "list[dict]", phase: str) -> dict:
@@ -1274,12 +1332,19 @@ def suite_identity(cases: "list[dict]", phase: str) -> dict:
     cases run (`load_cases`), which the count and the digest already show. A
     digest of each case as the file holds it called two suites that score alike
     different whenever a note was reworded or a case changed sides (#1949).
-    Cases are sorted by id and serialised with sorted keys, so reordering the
-    file or a case's keys leaves the digest put.
+
+    Keys are serialised sorted, so reordering a case's keys leaves the digest
+    put. Order is digested where it can move a count, and only there. `screen`
+    sends each passage as a request of its own, scores each check alone, and
+    cross-checks a pair either way round: its cases, their passages, checks and
+    cross-checks are put in one order (`_unordered`) before they are digested.
+    `endtoend` writes every passage into one store in file order, where what a
+    passage adds can depend on what earlier ones wrote, and reads each entity
+    when a check first asks for it, while the graph may still be growing: its
+    digest keeps the file's order of cases, passages and checks.
     """
-    scored = sorted((SCORED_PART[phase](case) for case in cases), key=lambda case: case["id"])
-    canonical = json.dumps(scored, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    scored = SCORED_SUITE[phase](cases)
+    digest = hashlib.sha256(_canonical(scored).encode("utf-8")).hexdigest()
     return {"cases": len(scored), SUITE_DIGEST: digest}
 
 
@@ -1296,17 +1361,27 @@ def utc_now() -> str:
 # Why a result file names no cases file: a path outside the repository names a
 # directory on one machine, not a file anyone else can open.
 OUTSIDE_REPOSITORY = "not under the repository, and a local path is not recorded"
+# Why it names none inside the checkout: an untracked file is at no commit, so its
+# path beside the recorded commit would name a file nobody can check out.
+UNTRACKED = "not tracked by git: no commit holds it"
+
+
+# How long a command the bench asks, git or a binary's `--version`, has to answer
+# before its answer is recorded missing, with the reason: a command that hangs does
+# not hold up the run. Read at each call.
+ANSWER_TIMEOUT_S = 30
 
 
 def _answer(argv: "list[str]", command: str) -> "tuple[str | None, str | None]":
     """What a command prints, or why there is nothing: `command` names it in the reason.
 
     Its input is closed, so a binary that reads it instead of answering the flag
-    it is asked ends rather than waiting on the bench's terminal.
+    it is asked ends rather than waiting on the bench's terminal. It has
+    `ANSWER_TIMEOUT_S` to answer.
     """
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=30,
-                              stdin=subprocess.DEVNULL)
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=ANSWER_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, f"{command} did not run ({type(exc).__name__})"
     if done.returncode != 0:
@@ -1327,6 +1402,27 @@ def _in_repository(path: Path) -> "str | None":
         return None
 
 
+def _literal(path: str) -> str:
+    """`path` as a pathspec git takes as written: as a pattern, `case?.json` is `cases.json`."""
+    return f":(literal){path}"
+
+
+def _tracked_path(path: Path) -> "tuple[str | None, str | None]":
+    """`path` relative to the repository if git tracks it, or why it is not recorded."""
+    relative = _in_repository(path)
+    if relative is None:
+        return None, OUTSIDE_REPOSITORY
+    listed, gap = _git("ls-files", "--", _literal(relative))
+    return (relative, None) if listed else (None, gap or UNTRACKED)
+
+
+def _changed(*pathspec: str) -> "tuple[bool | None, str | None]":
+    """Whether tracked files, those `pathspec` names or all of them, differ from the
+    commit, or why git did not say. An untracked file changes no committed code."""
+    status, gap = _git("status", "--porcelain", "--untracked-files=no", "--", *pathspec)
+    return (None if status is None else bool(status)), gap
+
+
 def _sha256_of(path: Path) -> "tuple[str | None, str | None]":
     """The sha256 of a file's bytes, or why it could not be read."""
     try:
@@ -1343,9 +1439,9 @@ def launched_binary(binary: Path) -> dict:
     records what the executable says of itself, the first line it prints for
     `--version`, and the sha256 of its bytes. It is found as the launch finds
     it, on PATH when named bare, so the file hashed is the file run. Its path is
-    recorded relative to the repository; one outside it is null, as a cases
-    file outside it is. Whatever goes unanswered stays null, with the reason
-    under `missing`.
+    recorded relative to the repository, where a build leaves it untracked: its
+    sha256, not a commit, identifies it. One outside the repository is null.
+    Whatever goes unanswered stays null, with the reason under `missing`.
     """
     found = Path(shutil.which(str(binary)) or binary)
     printed, version_gap = _answer([str(found), "--version"], f"{found.name} --version")
@@ -1388,27 +1484,33 @@ def run_origin(cases_file: Path, binary: "dict | None") -> dict:
     renderer's machine and checkout as the campaign's, and a cases file under a
     local worktree path (#1949). A commit alone would claim that the code at it
     ran, so `uncommitted_changes` says whether tracked files differed from it.
-    The cases file is recorded by its path in the repository; one outside it is
-    null, with the reason, since its local path names nothing anyone else can
-    open. Whatever else goes unanswered stays null, with the reason under
-    `missing`. A commit does not identify the binary a run drove, which may
-    have been built elsewhere: `binary` records it (`launched_binary`,
-    `served_binary`), and is None for a phase that drives none.
+    The cases file is recorded by its path in the repository, and only if git
+    tracks it (`_tracked_path`), with `cases_file_modified` saying whether it
+    differed from the commit; otherwise both are null, with the reason.
+    Whatever else goes unanswered stays null, with the reason under `missing`.
+    A commit does not identify the binary a run drove, which may have been
+    built elsewhere: `binary` records it (`launched_binary`, `served_binary`),
+    and is None for a phase that drives none.
     """
     commit, commit_gap = _git("rev-parse", "HEAD")
-    status, status_gap = _git("status", "--porcelain", "--untracked-files=no")
+    changed, changed_gap = _changed()
+    cases_path, cases_gap = _tracked_path(cases_file)
+    cases_changed, cases_changed_gap = (_changed(_literal(cases_path)) if cases_path
+                                        else (None, cases_gap))
     origin = {
         "machine": platform.machine() or None,
         "os": platform.platform(terse=True) or None,
         "commit": commit or None,
-        "uncommitted_changes": None if status is None else bool(status),
-        "cases_file": _in_repository(cases_file),
+        "uncommitted_changes": changed,
+        "cases_file": cases_path,
+        "cases_file_modified": cases_changed,
     }
     reasons = {"machine": "the platform names no machine",
                "os": "the platform names no system",
                "commit": commit_gap or "git rev-parse HEAD named no commit",
-               "uncommitted_changes": status_gap,
-               "cases_file": OUTSIDE_REPOSITORY}
+               "uncommitted_changes": changed_gap,
+               "cases_file": cases_gap,
+               "cases_file_modified": cases_changed_gap}
     missing = {key: reasons[key] for key, value in origin.items() if value is None}
     return {**origin, "binary": binary, "missing": missing}
 
@@ -1905,6 +2007,10 @@ PROVENANCE_FIELDS = ("ollama_version", "digest") + PROVENANCE_OPTIONS
 # apart, short enough to read.
 SHORT_DIGEST = 12
 
+# How much of a reason a table prints: a refused connection or an HTTP status
+# whole, a server's junk bounded. The file keeps the reason whole.
+REASON_WIDTH = 120
+
 
 def missing_provenance(entry: dict) -> "list[str]":
     """The provenance fields a result does not record, in `PROVENANCE_FIELDS` order.
@@ -1912,26 +2018,46 @@ def missing_provenance(entry: dict) -> "list[str]":
     Empty means the file names what produced it. Anything else is unverified:
     not wrong, but not checkable, so the report says so instead of printing the
     counts as settled. Options are checked for presence, not truth: `0` and
-    `False` are values a run sends.
+    `False` are values a run sends. A version or a digest counts only as a
+    string (`_text`): a file is read as it is.
     """
-    runtime = entry.get("runtime") or {}
-    recorded = set(entry.get("settings") or {})
-    if runtime.get("ollama_version"):
+    runtime = _mapping(entry.get("runtime"))
+    recorded = set(_mapping(entry.get("settings")))
+    if _text(runtime.get("ollama_version")):
         recorded.add("ollama_version")
-    if (runtime.get("model_digests") or {}).get(entry.get("config")):
+    if _text(_mapping(runtime.get("model_digests")).get(entry.get("config"))):
         recorded.add("digest")
     return [field for field in PROVENANCE_FIELDS if field not in recorded]
+
+
+def _unverified_reason(entry: dict) -> str:
+    """Why a row is unverified, as its run recorded it, fit for a table cell.
+
+    The first reason under `runtime.missing`: a server down, or without an
+    endpoint, leaves one per question it did not answer, and the first says
+    why. They are the server's own words, so the reason is put on one line, cut
+    to `REASON_WIDTH`, and its pipes escaped: a junk reply would otherwise split
+    the row. Empty when the file records none, as no file written before the
+    record does.
+    """
+    missing = _mapping(_mapping(entry.get("runtime")).get("missing"))
+    reason = next((value for value in missing.values() if isinstance(value, str)), "")
+    line = " ".join(reason.split())
+    if len(line) > REASON_WIDTH:
+        line = line[:REASON_WIDTH - 1] + "…"
+    return line.replace("|", "\\|")
 
 
 def _provenance_cell(entry: dict) -> str:
     """The build, weights and context window the row came from, or `unverified`.
 
-    A run that recorded why it could not say (`runtime.missing.runtime`) has the
-    reason printed beside the verdict: an end-to-end run is unverified because
-    the daemon chose its server, not because its file predates the record.
+    An unverified row prints why beside the verdict when its run recorded a
+    reason (`_unverified_reason`): an end-to-end run is unverified because the
+    daemon chose its server, a screening run because its server was down or
+    would not say, and neither because its file predates the record.
     """
     if missing_provenance(entry):
-        why = ((entry.get("runtime") or {}).get("missing") or {}).get("runtime")
+        why = _unverified_reason(entry)
         return f"unverified ({why})" if why else "unverified"
     runtime = entry["runtime"]
     digest = runtime["model_digests"][entry["config"]]
@@ -1939,14 +2065,25 @@ def _provenance_cell(entry: dict) -> str:
             f"· ctx {entry['settings']['num_ctx']}")
 
 
-# How an origin cell marks a commit by whether tracked files had changed from it.
+# How an origin cell marks a commit, or the cases file, by whether it differed from
+# the commit; `(modified ?)` when git did not answer.
 CHANGES_MARK = {True: " (modified)", None: " (modified ?)"}
+
+
+def _marked(name: object, changed: object, width: "int | None" = None) -> str:
+    """A recorded name cut to `width` and marked by `changed` (`CHANGES_MARK`), or `?`
+    when the run recorded none."""
+    text = _text(name)
+    if text is None:
+        return "?"
+    mark = CHANGES_MARK.get(changed, "") if changed is None or isinstance(changed, bool) else ""
+    return text[:width] + mark
 
 
 def _binary_part(binary: dict) -> str:
     """A run's binary in its origin cell: the version it reported, and its sha256 cut to
     `SHORT_DIGEST`, or `unhashed` when the run had none to take (a server over HTTP)."""
-    digest = binary.get("sha256")
+    digest = _text(binary.get("sha256"))
     return f"{binary.get('version') or '?'} ({digest[:SHORT_DIGEST] if digest else 'unhashed'})"
 
 
@@ -1954,19 +2091,17 @@ def _origin_cell(entry: dict) -> str:
     """Where a row's run ran from, as its own file records it (`run_origin`), or `unrecorded`.
 
     Host, commit, cases file and binary are the run's: read when a report is
-    rendered, they would name the renderer's machine and checkout. A commit is
-    marked `(modified)` when tracked files had changed from it, `(modified ?)`
-    when that went unanswered; any other unanswered item prints `?`, and its
-    reason stays in the file.
+    rendered, they would name the renderer's machine and checkout. The commit,
+    and the cases file, are marked `(modified)` when they differed from the
+    commit, `(modified ?)` when git did not answer; any other unanswered item
+    prints `?`, and its reason stays in the file.
     """
     origin = entry.get("origin")
     if not isinstance(origin, dict):
         return "unrecorded"
-    commit = origin.get("commit")
-    mark = CHANGES_MARK.get(origin.get("uncommitted_changes"), "")
-    parts = [origin.get("machine") or "?", origin.get("os") or "?",
-             f"{commit[:SHORT_DIGEST]}{mark}" if commit else "?",
-             origin.get("cases_file") or "?"]
+    parts = [_text(origin.get("machine")) or "?", _text(origin.get("os")) or "?",
+             _marked(origin.get("commit"), origin.get("uncommitted_changes"), SHORT_DIGEST),
+             _marked(origin.get("cases_file"), origin.get("cases_file_modified"))]
     if isinstance(origin.get("binary"), dict):
         parts.append(_binary_part(origin["binary"]))
     return " · ".join(parts)
