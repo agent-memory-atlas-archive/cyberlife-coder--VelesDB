@@ -185,6 +185,14 @@ pub const MIN_EF_SEARCH: usize = 16;
 /// Maximum accepted `ef_search`, per `docs/VELESQL_SPEC.md`.
 pub const MAX_EF_SEARCH: usize = 4096;
 
+/// The message every `ef_search` rejection reports, `shown` being the value
+/// as the caller gave it (a `usize` for [`validate_ef_search`], the original
+/// `i64` for [`parse_with_ef_search`] so a negative value prints as itself
+/// rather than the `usize` it failed to become).
+fn ef_search_out_of_range(shown: impl std::fmt::Display) -> String {
+    format!("ef_search must be an integer between {MIN_EF_SEARCH} and {MAX_EF_SEARCH}, got {shown}")
+}
+
 /// Validates an `ef_search` value already known to be non-negative (REST, the
 /// CLI, the config file, bindings) against the documented range. `VelesQL`'s
 /// `WITH (ef_search = ...)`, whose grammar accepts a leading `-` that a plain
@@ -198,9 +206,7 @@ pub fn validate_ef_search(ef: usize) -> Result<(), String> {
     if (MIN_EF_SEARCH..=MAX_EF_SEARCH).contains(&ef) {
         Ok(())
     } else {
-        Err(format!(
-            "ef_search must be between {MIN_EF_SEARCH} and {MAX_EF_SEARCH}, got {ef}"
-        ))
+        Err(ef_search_out_of_range(ef))
     }
 }
 
@@ -220,7 +226,5 @@ pub fn parse_with_ef_search(ef: i64) -> Result<usize, String> {
     usize::try_from(ef)
         .ok()
         .filter(|v| (MIN_EF_SEARCH..=MAX_EF_SEARCH).contains(v))
-        .ok_or_else(|| {
-            format!("ef_search must be an integer between {MIN_EF_SEARCH} and {MAX_EF_SEARCH}, got {ef}")
-        })
+        .ok_or_else(|| ef_search_out_of_range(ef))
 }
