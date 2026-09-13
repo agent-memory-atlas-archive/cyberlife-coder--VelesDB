@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   web link's text (one holding `::`, `@`, `#` or `<`, naming a primitive
   rustdoc links from a sigil such as `&str` or `*const`, or ending in `()`,
   `!{}` or `!`), a reference-style link or definition, or an inline link to
-  anything but a URL or a fragment. (#2261)
+  anything but an `http`, `https` or `mailto` URL or a fragment. (#2261)
 
 ## [0.14.2] - 2026-09-03
 

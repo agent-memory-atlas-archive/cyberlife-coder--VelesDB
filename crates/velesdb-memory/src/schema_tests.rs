@@ -1050,6 +1050,43 @@ mod unlink {
         }
     }
 
+    /// A code span closes only on a run of as many backticks as opened it; a
+    /// longer or a shorter run inside it is code. What reads as a code link
+    /// across such a run is code, not a link: the text stays as written, and
+    /// the guard fails on it.
+    #[test]
+    fn a_code_span_closes_only_on_a_run_of_its_own_length() {
+        for text in ["` a `` [`x`] ` end", "`` a ` [`x`] `` end"] {
+            assert_eq!(unlink_rustdoc(text), None, "{text:?}");
+            assert!(holds_rustdoc_link(text), "the guard misses {text:?}");
+        }
+    }
+
+    /// rustdoc links ``[`!`]`` to the never type and shows `!`, which the
+    /// rewrite shows as code.
+    #[test]
+    fn a_code_link_to_the_never_type_shows_its_code() {
+        assert_eq!(
+            unlink_rustdoc("see [`!`] here").as_deref(),
+            Some("see `!` here")
+        );
+    }
+
+    /// An inline code link whose target is no Rust path, as one of its
+    /// segments starts with a digit or is empty, stays as written, and the
+    /// guard fails on it.
+    #[test]
+    fn an_inline_code_link_to_what_is_no_rust_path_stays_as_written() {
+        for text in [
+            "see [`x`](2261) here",
+            "see [`x`](a::2b) here",
+            "see [`x`](crate::) here",
+        ] {
+            assert_eq!(unlink_rustdoc(text), None, "{text:?}");
+            assert!(holds_rustdoc_link(text), "the guard misses {text:?}");
+        }
+    }
+
     /// The rewrite copies a code span verbatim, link syntax and all. The guard
     /// reads the raw text, so it fails on link syntax even inside a code span:
     /// a published description never shows it.
@@ -1065,15 +1102,17 @@ mod unlink {
     /// path (`[crate::Point]`, `[fn@f]`, `[a#b]`, `[Vec<T>]`, `[&str]`,
     /// `[*const]`, `[f()]`, `[m!{}]`, `[m!]`), a reference-style link
     /// (`[x][y]`, `[x][]`), a reference definition (any `]:`), or an inline
-    /// link to anything but a URL or a fragment. Every link the rewrite
-    /// recognizes is one of these.
+    /// link to anything but an `http`, `https` or `mailto` URL or a fragment.
+    /// Every link the rewrite recognizes is one of these.
     ///
     /// It reads the raw text, so no Markdown construct (a code span, a quote, a
     /// list item) can hide one of these forms from it. What that costs: a
     /// description cannot show one even as code (`` `[x](y)` ``,
     /// ``[`asc`, `desc`]``, `&[Vec<f32>]`), give a web link text holding code
-    /// or a path's mark (`[issue #2261](…)`, `[Try it!](…)`), or write a
-    /// reference-style link or definition, even to a URL; and prose that looks
+    /// or a path's mark (`[issue #2261](…)`, `[Try it!](…)`), link to a
+    /// relative URL or by another scheme (`[docs](../x.html)`,
+    /// `[spec](ftp://x.dev)`), or write a reference-style link or definition,
+    /// even to a URL; and prose that looks
     /// like one fails too (`[0, 1]: …`, `m[i][j]`, `[#2261]`, `[ops@x.dev]`,
     /// ``[see `x`]``). A bare `[Point]` passes: it reads the same as `[sic]`.
     fn holds_rustdoc_link(text: &str) -> bool {
@@ -1189,6 +1228,8 @@ mod unlink {
             "see [issue #2261](https://x.dev)",
             "see [Try it!](https://x.dev)",
             "write to [ops@x.dev](mailto:ops@x.dev)",
+            "see [docs](../x.html)",
+            "see [spec](ftp://x.dev)",
             "one of [`asc`, `desc`]",
             "a `&[Vec<f32>]` slice",
             "see [see `x`] here",
