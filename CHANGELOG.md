@@ -92,6 +92,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between releases, which the tool reads as a patch update, arming lints that
   only a release commit could satisfy.
 
+- **The MSRV is checked against its one source (#1987).**
+  `scripts/tests/test_msrv_single_source.py` fails `CI Success` when
+  `rust-toolchain.toml` or any workflow's `RUST_VERSION` stops matching the
+  workspace `rust-version`. Each copy said it matched; nothing checked.
+
+- **Four review signals that block nothing (#1987).** A weekly
+  `minimal-versions` job in `quality-deep.yml`, also run on pull requests that
+  change a `Cargo.toml`, checks `velesdb-core` and `velesdb-memory` with every
+  direct dependency at the lowest version their manifests allow. On a pull
+  request that changes `velesdb-core`, `core-review.yml` prints its
+  `cargo public-api` diff against the base and runs `cargo mutants --in-diff`
+  on the changed code, uploading the report. `codeql.yml` analyzes Rust,
+  Python and JavaScript/TypeScript on push, pull request and weekly. None of
+  them is read by `CI Success`.
+
 - **A deferred removal promised for a future major can no longer be skipped by
   that major.** `scripts/check-deferred-removals.py` carries each promise with
   every site that must be gone, and fails the release commit that raises the
