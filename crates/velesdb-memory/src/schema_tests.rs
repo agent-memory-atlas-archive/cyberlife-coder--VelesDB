@@ -1072,6 +1072,19 @@ mod unlink {
         );
     }
 
+    /// A digit reads as part of a path, as rustdoc reads it: in a shortcut
+    /// code link's path (``[`u8`]``, the primitive) and inside an inline
+    /// target's segment (`crate::a2`). Each is rewritten to its code.
+    #[test]
+    fn a_path_holding_a_digit_is_a_path() {
+        for (text, shown) in [
+            ("see [`u8`] here", "see `u8` here"),
+            ("see [`x`](crate::a2) here", "see `x` here"),
+        ] {
+            assert_eq!(unlink_rustdoc(text).as_deref(), Some(shown), "{text:?}");
+        }
+    }
+
     /// An inline code link whose target is no Rust path, as one of its
     /// segments starts with a digit or is empty, stays as written, and the
     /// guard fails on it.
@@ -1164,8 +1177,10 @@ mod unlink {
         target.strip_prefix('<').map_or(target, str::trim_start)
     }
 
-    /// Whether a link target is a URL or a fragment of the page. A `mailto:`
-    /// followed by a second `:` is a path (`mailto::X`), not an address.
+    /// Whether a link target is an `http`, `https` or `mailto` URL, or a
+    /// fragment of the page: the only targets the guard lets through. A
+    /// `mailto:` followed by a second `:` is a path (`mailto::X`), not an
+    /// address.
     fn is_url(target: &str) -> bool {
         ["http://", "https://", "#"]
             .iter()
