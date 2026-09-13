@@ -17,15 +17,17 @@ of results measured in one run is registered once, with that run's source,
 date, machine and version). A figure nobody measured is removed, or stated
 without a number.
 
-Scope: README.md, docs/ (except docs/archive/), every README under crates/ and
-sdks/, the doc comments (`///`, `//!`) under crates/*/src, and the Python and
-TypeScript bindings' docstrings and doc comments. A CHANGELOG records history,
-not promises, and benchmark result files are sources: both are out of scope.
+Scope: README.md, docs/ (except docs/archive/), every README under crates/,
+sdks/ and examples/, the doc comments (`///`, `//!`) under crates/*/src, and
+the Python and TypeScript bindings' docstrings and doc comments. A CHANGELOG
+records history, not promises, and benchmark result files are sources: both
+are out of scope. So is bench code: its figures are the bounds it asserts and
+the results it prints, the measurement itself rather than a promise about it.
 So are memory and compression ratios (f32 to u8 is 4x less memory by
 arithmetic, not by measurement), configured values such as timeouts, a scale
 applied to a parameter (0.5x `ef_construction`) and counts (a kernel called 3x,
-4x f32x8 registers). The word that makes a ratio one of these must stand beside
-it, and exempts that ratio alone. A number in a code span is exempt only as
+4x f32x8 registers). The word that makes a ratio or a time in a table row one
+of these must stand beside it, and exempts that value alone. A number in a code span is exempt only as
 code (`sleep(10us)`, `4 × dim`): a quantity standing alone in one (`29.5 us`)
 is a figure. A time in nanoseconds or microseconds is always in scope: nothing
 here is configured in those units.
@@ -34,7 +36,8 @@ What it cannot see: this is a heuristic. It recognizes a figure by its unit
 together with a keyword, a verb or a table context ("p50 450 µs", "answers in
 2 ms", a time in a results table; below the millisecond, the unit alone). A
 number written with no unit and no such word ("4,000 of them a second") is not
-seen, nor is a figure drawn in an image or a chart. What binds a figure to its
+seen, nor is a figure drawn in an image or a chart, nor a time whose table row
+is labelled by a config word ("| Budget pressure | ... | 1.07 ms |"). What binds a figure to its
 run is the register, not this guard: a figure it misses is a promise all the
 same, and belongs in the contract.
 """
@@ -97,8 +100,12 @@ KINDS: dict[str, re.Pattern[str]] = {
     "time": re.compile(rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|[µμ]s|us)|nanoseconds?|microseconds?)(?![\w-])", re.I),
 }
 # A time in a table row is a measurement whatever its column says: a benchmark
-# table names its keyword once, in the header.
-TABLE_TIME = re.compile(rf"^\s*\|.*?{_NUM}\s*(?-i:ns|µs|us|ms|s)\b(?!-)")
+# table names its keyword once, in the header. Each time of the row is judged
+# on its own (`qualified`): a config word exempts the value it qualifies, in its
+# cell, as its column header or as its row label ("| query timeout | 30 s |"),
+# and no other value of the row.
+MARKDOWN_ROW = re.compile(r"^\s*\|")
+TABLE_TIME = re.compile(rf"(?<![\w.]){_NUM}\s*(?-i:ns|µs|us|ms|s)\b(?!-)")
 
 
 def _segment(words: str) -> str:
@@ -161,6 +168,10 @@ CONFIG_WORDS = re.compile(
     _segment(r"time[sd]?[ -]?outs?|deadline|interval|ttl|budget|max_\w+|limit|default"), re.I
 )
 CONFIG_LOOKAHEAD = 20
+# What makes a figure no measurement when it stands beside it: a size, bound or
+# config word for a ratio; a config word alone for a time in a table row.
+RATIO_QUALIFIERS = (SIZE_WORDS, BOUND_WORDS, CONFIG_WORDS)
+TIME_QUALIFIERS = (CONFIG_WORDS,)
 
 
 HEADING = re.compile(r"^#{1,6}\s")
@@ -203,7 +214,7 @@ def documents(root: Path):
     for path in sorted((root / "docs").rglob("*.md")):
         if "archive" not in path.relative_to(root / "docs").parts:
             yield path, "text"
-    for top in ("crates", "sdks"):
+    for top in ("crates", "sdks", "examples"):
         for path in sorted((root / top).rglob("README.md")):
             if not {"node_modules", "target"} & set(path.parts):
                 yield path, "text"
@@ -228,15 +239,19 @@ def figures(line: str, header: str | None = None):
             if kind == "latency" and CONFIG_WORDS.search(line[start : end + CONFIG_LOOKAHEAD]):
                 continue
             if kind == "ratio" and (
-                is_code(line, start, end) or counted(line, start, end) or qualified(line, start, end, header)
+                is_code(line, start, end)
+                or counted(line, start, end)
+                or qualified(line, start, end, header, RATIO_QUALIFIERS)
             ):
                 continue
             if kind == "time" and is_code(line, start, end):
                 continue
             yield kind, start, end
-    table = TABLE_TIME.match(line)
-    if table and not CONFIG_WORDS.search(line):
-        yield "latency", table.end() - len(table.group(0).split("|")[-1]), table.end()
+    if MARKDOWN_ROW.match(line):
+        for match in TABLE_TIME.finditer(line):
+            start, end = match.span()
+            if not qualified(line, start, end, header, TIME_QUALIFIERS):
+                yield "latency", start, end
 
 
 def is_code(line: str, start: int, end: int) -> bool:
@@ -249,22 +264,22 @@ def is_code(line: str, start: int, end: int) -> bool:
     return False
 
 
-def qualified(line: str, start: int, end: int, header: str | None) -> bool:
-    """Whether a size, bound or config word qualifies the ratio at
-    line[start:end]: a near word of its clause, or a label of its table cell."""
+def qualified(line: str, start: int, end: int, header: str | None, words: tuple[re.Pattern[str], ...]) -> bool:
+    """Whether a word of `words` qualifies the figure at line[start:end]: a
+    near word of its clause, or a label of its table cell."""
     before = CLAUSE_END.split(line[:start])[-1].split()[-QUALIFIER_REACH:]
     after = CLAUSE_END.split(line[end:])[0].split()[:QUALIFIER_REACH]
     near = (*before, *after, *table_labels(line, start, header))
-    return any(words.search(text) for words in (SIZE_WORDS, BOUND_WORDS, CONFIG_WORDS) for text in near)
+    return any(pattern.search(text) for pattern in words for text in near)
 
 
 def table_labels(line: str, at: int, header: str | None) -> list[str]:
-    """The header of the table column holding position `at` and the label (first
-    cell) of its row; nothing outside a table."""
-    if header is None or not TABLE_ROW.match(line):
+    """The header of the table column holding position `at`, when the header is
+    known, and the label (first cell) of its row; nothing outside a table."""
+    if not TABLE_ROW.match(line):
         return []
     column = line.count("|", 0, at)
-    labels = header.split("|")[column : column + 1]
+    labels = header.split("|")[column : column + 1] if header else []
     if column > 1:
         labels.append(line.split("|")[1])
     return labels

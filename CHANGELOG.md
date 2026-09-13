@@ -109,8 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load call alone reports the cost as gone when it has only moved.
 
 ### Fixed
-- **Every performance figure in the guides, the reference docs, the rustdoc
-  and the bindings' docs names the run that measured it (#2266).** Only the
+- **Every performance figure in the guides, the reference docs, the rustdoc,
+  the bindings' docs and the examples' READMEs names the run that measured it
+  (#2266).** Only the
   README's figures were pinned in `docs/reference/promise-contract.json`; the
   review of #2250 found figures elsewhere that no run produced, and some that
   contradicted the benchmark meant to back them. Each now states what its run
@@ -122,18 +123,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   20 and 35; the fast-insert and turbo constructors are 2.8x and 4.9x faster
   than `new` (1K × 768D, 2026-03-23), not "~2-3x" and "~3-5x". Their recall
   figures go, like the pgvector insert ratio, the storage modes' recall and
-  training times at 768D and a 25-30 Kvec/s write rate: no run produced them.
-  The register grows from 30 claims to 270, each with its source, date,
-  machine and version: 21 cover a results table measured in one run, 38
-  record a target or configured value that no run measures, and the 192
-  measured on an earlier major carry a dated waiver scoped to 6.x.
+  training times at 768D, a 25-30 Kvec/s write rate and the demos' "typical"
+  timings: no run produced them. `pq_recall_multidist`'s assert messages
+  cited a recall "ceiling around 0.87-0.88" on clustered data that the
+  benchmark's own 2026-03-08 baseline contradicts (1.0 for every variant);
+  they cite that baseline now. The register grows from 30 claims to 280,
+  each with its source, date, machine and version: 21 cover a results table
+  measured in one run, 38 record a target or configured value that no run
+  measures, and the 202 measured on an earlier major carry a dated waiver
+  scoped to 6.x.
 
   `scripts/check-figure-sources.py`, a step of the required `lint` job,
   refuses a figure that no claim registers: a ratio, a change in percent, a
   recall, a throughput, a latency its keyword or verb introduces, a time
-  below the millisecond or in a table row. A size, bound or config word
-  exempts only the ratio beside it, and a number in a code span only as
-  code. It is a heuristic: a number with no unit and no such keyword, verb
+  below the millisecond or in a table row, in the docs, the rustdoc, the
+  bindings' docs and every README under `crates/`, `sdks/` and `examples/`.
+  A size, bound or config word exempts only the ratio beside it, a config
+  word only the table time it qualifies, and a number in a code span only
+  as code; bench code, whose figures are the bounds it asserts and the
+  results it prints, stays out. It is a heuristic: a number with no unit and no such keyword, verb
   or table context, or a figure drawn in an image, passes unseen. The
   register, not the guard, is what binds a figure to its run.
 

@@ -404,5 +404,35 @@ class FigureSourcesTest(unittest.TestCase):
             self.assertEqual([line[s:e] for _, s, e in guard.figures(line)], expected, line)
 
 
+    def test_a_config_word_elsewhere_in_a_table_row_exempts_no_time(self):
+        # A time's config word must be about that time: in its cell, as its
+        # column header or as its row label. In another cell of the row it
+        # says nothing about it.
+        doc = "| Operation | Time | Note |\n|---|---|---|\n| Bulk import | 3.2 ms | default mode |\n"
+        root = self.tree({"docs/G.md": doc})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:3"])
+
+    def test_every_time_of_a_table_row_is_judged_on_its_own(self):
+        # The configured 250 ms is exempt by the word in its cell; the 3.2 ms
+        # measured beside it is not. The row's first time no longer stands for
+        # the row, and a config word still exempts the value it qualifies.
+        header = "| Operation | Time | Note |"
+        cases = {
+            "| Export | 250 ms timeout | 3.2 ms |": ["3.2 ms"],
+            "| query timeout | 500 ms |": [],
+            "| Retry back-off | 100 ms by default |": [],
+        }
+        for line, expected in cases.items():
+            self.assertEqual([line[s:e] for _, s, e in guard.figures(line, header)], expected, line)
+
+
+    def test_readmes_under_examples_are_in_scope(self):
+        # A demo's README is read like any other README: a figure there is a
+        # promise. Its dependencies are not.
+        figure = "Search answers in 3 ms.\n"
+        root = self.tree({"examples/demo/README.md": figure, "examples/demo/node_modules/dep/README.md": figure})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["examples/demo/README.md:1"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -541,6 +541,23 @@
       "last_updated": "2026-09-13"
     },
     {
+      "id": "examples_ecommerce_e2e_p50_450us",
+      "file": "examples/ecommerce_recommendation/README.md",
+      "must_contain": "**~450µs** (10K/384D, WAL ON; measured 2026-03-27 on 1.7.2)",
+      "validation_command": "python benchmarks/velesdb_benchmark.py --recall",
+      "executable": false,
+      "source": "benchmarks/report_1.7.2_2026-03-27.json, written by benchmarks/velesdb_benchmark.py --recall (Python SDK, WAL ON, 10K x 384D, 200 searches after warm-up): search p50 447 us, p99 662 us; recall@10 mean 0.976 (min 0.8) on its clustered 10K x 384D recall set. CHANGELOG.md [1.8.0] (2026-03-27) publishes the run as '450us p50 search' with 'recall@10 >= 96%'. The collection default path ran HnswParams::auto and Balanced at ef_search 128 then (160 since 70b33d33, 2026-04-01).",
+      "measured_on": "2026-03-27",
+      "measured_machine": "Intel Core i9-14900KF, 64 GB, Windows (benchmarks/report_1.7.2_2026-03-27.json)",
+      "measured_version": "1.7.2",
+      "stale_accepted": {
+        "reason": "Published with its original date and version (2026-03-27, 1.7.2, Balanced then at ef 128). Re-measuring means re-running velesdb_benchmark.py on the idle i9-14900KF it was taken on; the 3.3.0 Apple Silicon run (benchmarks/results/report_3.3.0_apple-silicon_2026-06-24.json, p50 366 us) is another machine and does not replace it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
       "id": "server_tour_e2e_p50",
       "file": "docs/guides/SERVER_REST_TOUR.md",
       "must_contain": "~450 µs (10K/384D, WAL on, recall ≥ 96%), measured 2026-03-27 on 1.7.2",
@@ -1408,6 +1425,74 @@
       "last_updated": "2026-09-13"
     },
     {
+      "id": "examples_real_session_window_growth_1_7x",
+      "file": "examples/real-session-benchmark/README.md",
+      "must_contain": "(1.7× slower window consumption)",
+      "validation_command": "cd examples/real-session-benchmark && node long-session.mjs",
+      "executable": false,
+      "source": "This README's long-session reading, written by commit 5b4df82a (2026-07-18) from node long-session.mjs: the raw arm grows '~555 tokens/turn versus ~333 compiled (1.7× slower window consumption)'. Same run as readme_long_session_window_growth. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-18 (date of commit 5b4df82a, which records the run)",
+      "measured_machine": "platform-independent (deterministic token counts; every turn compiled twice, byte-identical)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Deterministic token counts published with their campaign in examples/real-session-benchmark; re-running long-session.mjs needs the Node binding built from the current tree, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "examples_real_session_tail_phase_6_6x",
+      "file": "examples/real-session-benchmark/README.md",
+      "must_contain": "the gap widens to ~234 vs ~35/turn (6.6×)",
+      "validation_command": "cd examples/real-session-benchmark && node long-session.mjs",
+      "executable": false,
+      "source": "This README's long-session reading, written by commit 5b4df82a (2026-07-18) from node long-session.mjs: in the verification/wrap-up phase 'the gap widens to ~234 vs ~35/turn (6.6×)', a phase-specific rate never used for projections. Same run as context_compiler_tail_phase_6_6x. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-18 (date of commit 5b4df82a, which records the run)",
+      "measured_machine": "platform-independent (deterministic token counts; every turn compiled twice, byte-identical)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Deterministic token counts published with their campaign in examples/real-session-benchmark; re-running long-session.mjs needs the Node binding built from the current tree, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "examples_real_session_no_media_saving_8pct",
+      "file": "examples/real-session-benchmark/README.md",
+      "must_contain": "saving drops to 8.0%",
+      "validation_command": "cd examples/real-session-benchmark && BENCH_MEDIA=0 node offline-vibe.mjs",
+      "executable": false,
+      "source": "The README's vibe-coding scenario, written by commit fca21a88 (2026-07-19, 'feat(bench): vibe-coding billed scenario — media variants + metadata headroom'), which records the run's output: 'session totals [vibe-coding no-screenshots (BENCH_MEDIA=0)]: raw 51589 (text 51589 + image 0) -> compiled 47477 (...) = 8.0% saved'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-19 (date of commit fca21a88, which records the run)",
+      "measured_machine": "platform-independent (deterministic token counts)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Deterministic counts published with their scenario in examples/real-session-benchmark; re-running offline-vibe.mjs needs the Node binding built from the current tree, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "examples_real_session_metadata_headroom_14x",
+      "file": "examples/real-session-benchmark/README.md",
+      "must_contain": "roughly 14x headroom over the heaviest fragment measured",
+      "validation_command": "cd examples/real-session-benchmark && node offline-vibe.mjs",
+      "executable": false,
+      "source": "The README's vibe-coding scenario, written by commit fca21a88 (2026-07-19): the heaviest fragment's metadata 'measures 4688 bytes — 7.15% of the 64 KiB cap', hence roughly 14x headroom. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-19 (date of commit fca21a88, which records the run)",
+      "measured_machine": "platform-independent (deterministic byte counts)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Deterministic counts published with their scenario in examples/real-session-benchmark; re-running offline-vibe.mjs needs the Node binding built from the current tree, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
       "id": "rustdoc_sparse_linear_scan_vs_maxscore",
       "file": "crates/velesdb-core/src/sparse_index/search/mod.rs",
       "must_contain": "measured 14–43× faster than `MaxScore` at the former 100k",
@@ -1883,6 +1968,23 @@
       "id": "core_perf_hnsw_index_only_55us",
       "file": "docs/guides/CORE_PERFORMANCE.md",
       "must_contain": "**55 µs** (k=10, Balanced mode; i9-14900KF, 2026-03-27",
+      "validation_command": "cargo bench -p velesdb-core --bench hnsw_benchmark -- hnsw_search_latency",
+      "executable": false,
+      "source": "commit df217860 (2026-03-27, 'docs: update README performance section with verified production metrics'): 'Core engine: Rust index-only for architecture reference (5K/768D: 55us HNSW search, 21.7ns dot product)' and 'Full production path: Python SDK, WAL ON, recall@10 >= 95% (10K/384D: 571us p50, 15K vec/s insert)'; 'Measured 2026-03-27, i9-14900KF, 64GB DDR5, Windows 11, Rust 1.92.' hnsw_benchmark's hnsw_search_latency group inserted 10,000 vectors at that commit, so the '5K' label was wrong; commit 45cb8021 relabeled it 10K and re-measured 53.2 us on an Apple M5 Pro (2026-07-20). measured_version is the workspace version of df217860.",
+      "measured_on": "2026-03-27",
+      "measured_machine": "Intel Core i9-14900KF, 64GB DDR5, Windows 11, Rust 1.92 (commit df217860)",
+      "measured_version": "1.7.2",
+      "stale_accepted": {
+        "reason": "Dated by commit df217860 (2026-03-27, 1.7.2, i9-14900KF). The same day commit 126d5a9a recorded 47.0 us for the same bench on the same machine, and a quiet Apple M5 Pro re-run on 2026-07-20 measured 53.2 us; re-measuring belongs on the idle i9-14900KF, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "examples_ecommerce_hnsw_index_only_55us",
+      "file": "examples/ecommerce_recommendation/README.md",
+      "must_contain": "**~55µs** for 10K/768D vectors (k=10, Balanced mode; i9-14900KF, 2026-03-27)",
       "validation_command": "cargo bench -p velesdb-core --bench hnsw_benchmark -- hnsw_search_latency",
       "executable": false,
       "source": "commit df217860 (2026-03-27, 'docs: update README performance section with verified production metrics'): 'Core engine: Rust index-only for architecture reference (5K/768D: 55us HNSW search, 21.7ns dot product)' and 'Full production path: Python SDK, WAL ON, recall@10 >= 95% (10K/384D: 571us p50, 15K vec/s insert)'; 'Measured 2026-03-27, i9-14900KF, 64GB DDR5, Windows 11, Rust 1.92.' hnsw_benchmark's hnsw_search_latency group inserted 10,000 vectors at that commit, so the '5K' label was wrong; commit 45cb8021 relabeled it 10K and re-measured 53.2 us on an Apple M5 Pro (2026-07-20). measured_version is the workspace version of df217860.",
@@ -3841,6 +3943,74 @@
       "validation_command": "cargo bench -p velesdb-memory --no-default-features --features context",
       "executable": false,
       "source": "commit 4fa4fde8 (2026-07-17, EPIC-P-070) committed benches/context_compiler_benchmark.rs with this table (1,000 fragments with 1/3 exact duplicates ~5.32 ms); the README section says 'release profile, Apple Silicon'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-17 (date of commit 4fa4fde8, which records the run)",
+      "measured_machine": "Apple Silicon (the README's words; commit 4fa4fde8 names no model)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Recorded by commit 4fa4fde8 (3.12.0); re-running the criterion bench needs a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "context_savings_compile_budget_tight",
+      "file": "crates/velesdb-memory/examples/context_savings/README.md",
+      "must_contain": "| Budget pressure | 200 fragments, budget 200 tok (tight) | ~1.07 ms |",
+      "validation_command": "cargo bench -p velesdb-memory --no-default-features --features context",
+      "executable": false,
+      "source": "commit 4fa4fde8 (2026-07-17, EPIC-P-070) committed benches/context_compiler_benchmark.rs with this table (200 fragments, budget 200 tok ~1.07 ms); the README section says 'release profile, Apple Silicon'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-17 (date of commit 4fa4fde8, which records the run)",
+      "measured_machine": "Apple Silicon (the README's words; commit 4fa4fde8 names no model)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Recorded by commit 4fa4fde8 (3.12.0); re-running the criterion bench needs a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "context_savings_compile_budget_generous",
+      "file": "crates/velesdb-memory/examples/context_savings/README.md",
+      "must_contain": "| 200 fragments, budget 1,000,000 tok (generous) | ~1.19 ms |",
+      "validation_command": "cargo bench -p velesdb-memory --no-default-features --features context",
+      "executable": false,
+      "source": "commit 4fa4fde8 (2026-07-17, EPIC-P-070) committed benches/context_compiler_benchmark.rs with this table (200 fragments, budget 1,000,000 tok ~1.19 ms); the README section says 'release profile, Apple Silicon'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-17 (date of commit 4fa4fde8, which records the run)",
+      "measured_machine": "Apple Silicon (the README's words; commit 4fa4fde8 names no model)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Recorded by commit 4fa4fde8 (3.12.0); re-running the criterion bench needs a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "context_savings_compile_oversized_tight_budget",
+      "file": "crates/velesdb-memory/examples/context_savings/README.md",
+      "must_contain": "| Oversized fragment | one ~100 KB fragment, budget 2,000 tok | ~4.65 ms |",
+      "validation_command": "cargo bench -p velesdb-memory --no-default-features --features context",
+      "executable": false,
+      "source": "commit 4fa4fde8 (2026-07-17, EPIC-P-070) committed benches/context_compiler_benchmark.rs with this table (one ~100 KB fragment, budget 2,000 tok ~4.65 ms); the README section says 'release profile, Apple Silicon'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-17 (date of commit 4fa4fde8, which records the run)",
+      "measured_machine": "Apple Silicon (the README's words; commit 4fa4fde8 names no model)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Recorded by commit 4fa4fde8 (3.12.0); re-running the criterion bench needs a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "context_savings_compile_oversized_generous_budget",
+      "file": "crates/velesdb-memory/examples/context_savings/README.md",
+      "must_contain": "| one ~100 KB fragment, budget 1,000,000 tok | ~5.80 ms |",
+      "validation_command": "cargo bench -p velesdb-memory --no-default-features --features context",
+      "executable": false,
+      "source": "commit 4fa4fde8 (2026-07-17, EPIC-P-070) committed benches/context_compiler_benchmark.rs with this table (one ~100 KB fragment, budget 1,000,000 tok ~5.80 ms); the README section says 'release profile, Apple Silicon'. measured_version is the workspace version of that commit.",
       "measured_on": "2026-07-17 (date of commit 4fa4fde8, which records the run)",
       "measured_machine": "Apple Silicon (the README's words; commit 4fa4fde8 names no model)",
       "measured_version": "3.12.0",
