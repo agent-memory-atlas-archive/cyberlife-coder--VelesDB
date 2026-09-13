@@ -144,7 +144,7 @@ println!("Memory: {} bytes (vs {} bytes f32)",
 
 ---
 
-## PQ: Product Quantization (8-32x smaller)
+## PQ: Product Quantization (`2 × dim / m` smaller, dim/4 at the default m = 8)
 
 ### How does it work?
 
@@ -338,7 +338,7 @@ quantizer training and code encoding, which `SQ8` pays with any backing.
 ### Why the arena is not configurable
 
 That 1.3% ceiling is the whole case. An opt-out would let a caller avoid at
-most ~1 s of build time and the cold-re-rank penalty, in exchange for
+most 1.3 s of build time and the cold-re-rank penalty, in exchange for
 234.6 MiB of un-evictable RAM, a new persisted setting, and another branch
 through the backend dispatch.
 
@@ -348,7 +348,7 @@ happens there; the mapping only costs latency once memory is tight, which is
 exactly when its 61% saving is worth having. The trade is self-regulating.
 
 Two costs *are* paid unconditionally and are the honest counterweight: the
-+11% total RSS, and the 0.24 s. Reopen this if either turns out to hurt a
++11% total RSS, and the arena fill time (1.3 s at worst). Reopen this if either turns out to hurt a
 real deployment — measurements first, per the note above.
 
 ### Cold-page re-rank cost

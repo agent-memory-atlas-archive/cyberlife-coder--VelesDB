@@ -118,7 +118,7 @@ pub enum StorageMode {
     Sq8,
     /// Binary: 1-bit quantization (1 bit/dimension). 32x compression, larger recall loss.
     Binary,
-    /// Product Quantization (PQ): aggressive lossy compression (8x-16x typical).
+    /// Product Quantization (PQ): lossy compression, `2 × dim / m` smaller than f32 for m subspaces (dim/4 at m = 8).
     ProductQuantization,
     /// `RaBitQ`: 1-bit with rotation + scalar correction. 32x compression, small recall loss.
     Rabitq,

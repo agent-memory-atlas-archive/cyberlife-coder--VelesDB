@@ -324,13 +324,15 @@ def workspace_version(root: pathlib.Path) -> str:
 
 
 def unsourced_claims(claims: list[dict]) -> list[str]:
-    """Claims whose provenance is recorded as ``unknown`` — visible debt."""
+    """Claims whose provenance is recorded as ``unknown`` — visible debt. A
+    reason may follow the word ("unknown (commit abc names none)"): the value
+    is still unknown, and the claim still counts."""
     return [
         f"[{claim.get('id', '<unknown>')}] measured_on={claim.get('measured_on')!r} "
         f"machine={claim.get('measured_machine')!r}"
         for claim in claims
-        if str(claim.get("measured_on")).lower() == "unknown"
-        or str(claim.get("measured_machine")).lower() == "unknown"
+        if str(claim.get("measured_on")).lower().startswith("unknown")
+        or str(claim.get("measured_machine")).lower().startswith("unknown")
     ]
 
 

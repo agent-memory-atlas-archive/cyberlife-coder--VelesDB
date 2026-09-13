@@ -23,23 +23,32 @@ the Python and TypeScript bindings' docstrings and doc comments. A CHANGELOG
 records history, not promises, and benchmark result files are sources: both
 are out of scope. So is bench code: its figures are the bounds it asserts and
 the results it prints, the measurement itself rather than a promise about it.
-So are memory and compression ratios (f32 to u8 is 4x less memory by
-arithmetic, not by measurement), configured values such as timeouts, a scale
-applied to a parameter (0.5x `ef_construction`) and counts (a kernel called 3x,
-4x f32x8 registers). The word that makes a ratio or a time in a table row one
-of these must stand beside it, and exempts that value alone. A number in a code span is exempt only as
-code (`sleep(10us)`, `4 × dim`): a quantity standing alone in one (`29.5 us`)
-is a figure. A time in nanoseconds or microseconds is always in scope: nothing
-here is configured in those units.
 
-What it cannot see: this is a heuristic. It recognizes a figure by its unit
-together with a keyword, a verb or a table context ("p50 450 µs", "answers in
-2 ms", a time in a results table; below the millisecond, the unit alone). A
-number written with no unit and no such word ("4,000 of them a second") is not
-seen, nor is a figure drawn in an image or a chart, nor a time whose table row
-is labelled by a config word ("| Budget pressure | ... | 1.07 ms |"). What binds a figure to its
-run is the register, not this guard: a figure it misses is a promise all the
-same, and belongs in the contract.
+A figure is a number with a unit, read with the words around it: a keyword or
+a verb before it ("p50 450 µs", "answers in 2 ms", "takes 42 s"), the end of
+the line above when a comment or a paragraph wraps ("recall@10 in" / "0.98 on
+SIFT1M"), or the column header of its table cell ("| Recall@10 |" over
+"| 97.4% |", "| Latency (ms) |" over "| 3.2 |"). Below the millisecond the
+unit alone is enough ("Cosine 32 ns"), and every time in a table row counts.
+Not a figure: a memory or compression ratio (f32 to u8 is 4x less memory by
+arithmetic, not by measurement), a configured value (a timeout, a poll
+interval, a retry count, a rate limit), a scale applied to a parameter (0.5x
+`ef_construction`) and a count (a kernel called 3x, 4x f32x8 registers). The
+word that makes a value one of these must stand beside it, in its clause or as
+its table cell's label, and exempts that value alone. A number in a code span
+is exempt only as code (`sleep(10us)`, `4 × dim`): a quantity standing alone
+in one (`29.5 us`) is a figure.
+
+What it cannot see: this is a heuristic. It does not read
+- a number written with no unit and no such word ("4,000 of them a second");
+- a duration whose keyword or verb is not next to it ("14.19 s cold against
+  0.22 s warm", "held every call for 46-52 s", "roughly 16 seconds"), or one
+  given in minutes ("1 min 59 s", "56 minutes");
+- a time in a table row whose label is a config word ("| Budget pressure |
+  ... | 1.07 ms |");
+- a figure drawn in an image or a chart.
+What binds a figure to its run is the register, not this guard: a figure it
+misses is a promise all the same, and belongs in the contract.
 """
 
 from __future__ import annotations
@@ -57,10 +66,16 @@ _NUM = r"\d+(?:[.,]\d+)?"
 _MARK = r"(?:\*\*|__|\*|_|`)?"
 # A footnote marker may follow the word: `faster²`.
 _SUP = "[" + "".join(chr(c) for c in (0xB9, 0xB2, 0xB3, *range(0x2070, 0x207A))) + "]*"
+# A time unit written out or abbreviated: "450 usec", "3 seconds", "2 msec".
+_LONG_TIME = r"(?:[nuµμm]?secs?|(?:nano|micro|milli)?seconds?)"
 KINDS: dict[str, re.Pattern[str]] = {
     "speed ratio": re.compile(
         rf"{_NUM}\s*(?:[-–]\s*{_NUM}\s*)?[x×]{_MARK}\s+{_MARK}(?:faster|slower|speed-?ups?|quicker){_SUP}\b"
-        rf"|{_NUM}\s*%{_MARK}\s+{_MARK}(?:faster|slower|speed-?ups?|quicker){_SUP}\b",
+        rf"|{_NUM}\s*%{_MARK}\s+{_MARK}(?:faster|slower|speed-?ups?|quicker){_SUP}\b"
+        # "3 times faster", "2.8-fold faster", "a ×3 speed-up" (the sign, not
+        # the letter: "x86 faster" names an architecture).
+        rf"|{_NUM}\s*(?:times|-?\s*fold){_MARK}\s+{_MARK}(?:faster|slower|speed-?ups?|quicker){_SUP}\b"
+        rf"|×\s*{_NUM}{_MARK}\s+{_MARK}(?:faster|slower|speed-?ups?|quicker){_SUP}\b",
         re.I,
     ),
     # A bare ratio (`~50–105x`) is a speed claim unless a size, bound or
@@ -71,17 +86,16 @@ KINDS: dict[str, re.Pattern[str]] = {
     "change": re.compile(
         rf"\b(?:rises?|rose|falls?|fell|drops?|grows?|grew|improves?|regress(?:es)?|increases?|decreases?"
         rf"|gains?|cuts?|reduces?|slows?|overhead)\b[^.\n]{{0,20}}?{_NUM}\s*%"
-        rf"|{_NUM}\s*%\s+(?:overhead|improvement|regression|speed-?up|reduction|slowdown)\b",
+        rf"|{_NUM}\s*%\s+(?:overhead|improvement|regression|speed-?up|reduction|slowdown|higher|lower)\b",
         re.I,
     ),
     "recall": re.compile(
-        rf"recall(?:@\d+)?[^.|\n]{{0,40}}?{_NUM}\s*%|{_NUM}\s*%\+?\s*recall|recall@\d+[^.|\n]{{0,20}}?\b0\.\d{{2,}}",
+        rf"recall(?:@\d+)?[^.|\n]{{0,40}}?{_NUM}\s*%|{_NUM}\s*%\+?\s*recall|recall(?:@\d+)?[^.|\n]{{0,40}}?\b0\.\d{{2,}}",
         re.I,
     ),
     "throughput": re.compile(
-        rf"{_NUM}\+?\s*[kKMG]?\s*(?:QPS|qps|queries per second"
-        rf"|(?:vecs?|vectors?|queries|ops|inserts|docs|points|rows|elem)\s*/\s*s(?:ec)?"
-        rf"|[KMG]elem/s|[KMG]B/s)\b"
+        # A rate: "12k QPS", "1.2K+ QPS", "50K+ vectors/sec", "12K req/s", "19M/s".
+        rf"{_NUM}\+?\s*[kKMG]?\+?\s*(?:QPS|qps|queries per second|[A-Za-z]+\s*/\s*s(?:ec)?|/\s*s(?:ec)?)\b"
     ),
     "latency": re.compile(
         rf"(?:\b(?:p50|p9\d|p99\.9|median|mean|latenc(?:y|ies)|search(?:es)?|quer(?:y|ies)|inserts?|round[- ]trip)\b"
@@ -90,22 +104,27 @@ KINDS: dict[str, re.Pattern[str]] = {
         rf"(?:about\s+|under\s+|~|<\s*)?)"
         # The unit is matched in lower case and never before a hyphen: a user
         # story tag such as "US-012" is not a microsecond.
-        rf"{_NUM}\s*(?-i:ns|µs|us|ms)\b(?!-)",
+        rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|µs|us|ms|s)|{_LONG_TIME})\b(?!-)",
         re.I,
     ),
-    # Nothing in these docs is configured in nanoseconds or microseconds, so a
-    # number in those units is a measurement with no keyword ("Cosine 32 ns").
-    # Milliseconds and seconds still need one: timeouts are set in them. A
-    # number glued to a name (`poll_10us`) is part of the name.
-    "time": re.compile(rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|[µμ]s|us)|nanoseconds?|microseconds?)(?![\w-])", re.I),
+    # Below the millisecond a number needs no keyword ("Cosine 32 ns"): it is a
+    # measurement unless a config word qualifies it ("the poll interval is 100
+    # µs"). Milliseconds and seconds need a keyword, a verb or a table: timeouts
+    # are set in them. A number glued to a name (`poll_10us`) is part of it.
+    "time": re.compile(
+        rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|[µμ]s|us)|[nuµμ]secs?|nanoseconds?|microseconds?)(?![\w-])", re.I
+    ),
 }
-# A time in a table row is a measurement whatever its column says: a benchmark
-# table names its keyword once, in the header. Each time of the row is judged
-# on its own (`qualified`): a config word exempts the value it qualifies, in its
-# cell, as its column header or as its row label ("| query timeout | 30 s |"),
-# and no other value of the row.
-MARKDOWN_ROW = re.compile(r"^\s*\|")
-TABLE_TIME = re.compile(rf"(?<![\w.]){_NUM}\s*(?-i:ns|µs|us|ms|s)\b(?!-)")
+# A time in a table row, in a Markdown file or a doc comment, is a measurement
+# whatever its column says: a benchmark table names its keyword once, in the
+# header. Each time of the row is judged on its own (`qualified`): a config
+# word exempts the value it qualifies, in its cell, as its column header or as
+# its row label ("| query timeout | 30 s |"), and no other value of the row.
+TABLE_TIME = re.compile(rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|µs|us|ms|s)|{_LONG_TIME})\b(?!-)")
+# A column header may carry the unit of its cells: "| Latency (ms) |".
+HEADER_UNIT = re.compile(r"^(.*?)\s*\(([^()]{1,12})\)\s*$")
+# What leads a doc comment's text, so two wrapped lines join on their words.
+LEAD = re.compile(r"^\s*(?:(?:///|//!|\*)\s*)?")
 
 
 def _segment(words: str) -> str:
@@ -165,13 +184,14 @@ TABLE_RULE = re.compile(r"^\s*(?:(?:///|//!|\*)\s*)?\|[\s:|-]*-[\s:|-]*$")
 # answers in 2 ms") does not exempt it. Beside a ratio, such a word exempts
 # that ratio (`qualified`).
 CONFIG_WORDS = re.compile(
-    _segment(r"time[sd]?[ -]?outs?|deadline|interval|ttl|budget|max_\w+|limit|default"), re.I
+    _segment(r"time[sd]?[ -]?outs?|deadline|interval|poll\w*|retr(?:y|ies)|ttl|budget|max_\w+|limit|default"), re.I
 )
 CONFIG_LOOKAHEAD = 20
 # What makes a figure no measurement when it stands beside it: a size, bound or
-# config word for a ratio; a config word alone for a time in a table row.
+# config word for a ratio; a config word alone for a time or a rate.
 RATIO_QUALIFIERS = (SIZE_WORDS, BOUND_WORDS, CONFIG_WORDS)
-TIME_QUALIFIERS = (CONFIG_WORDS,)
+CONFIG_QUALIFIERS = (CONFIG_WORDS,)
+QUALIFIERS = {"ratio": RATIO_QUALIFIERS, "time": CONFIG_QUALIFIERS, "latency": CONFIG_QUALIFIERS, "throughput": CONFIG_QUALIFIERS}
 
 
 HEADING = re.compile(r"^#{1,6}\s")
@@ -233,6 +253,13 @@ def documents(root: Path):
 def figures(line: str, header: str | None = None):
     """Each (kind, start, end) of a performance figure the line states.
     `header` is the header row of the table the line belongs to, if any."""
+    yield from line_figures(line, header)
+    yield from table_times(line, header)
+    yield from header_figures(line, header)
+
+
+def line_figures(line: str, header: str | None = None):
+    """The figures the line's own words state, by the rules of KINDS."""
     for kind, pattern in KINDS.items():
         for match in pattern.finditer(line):
             start, end = match.span()
@@ -244,14 +271,61 @@ def figures(line: str, header: str | None = None):
                 or qualified(line, start, end, header, RATIO_QUALIFIERS)
             ):
                 continue
-            if kind == "time" and is_code(line, start, end):
+            if kind == "time" and (is_code(line, start, end) or qualified(line, start, end, header, CONFIG_QUALIFIERS)):
+                continue
+            if kind == "throughput" and qualified(line, start, end, header, CONFIG_QUALIFIERS):
                 continue
             yield kind, start, end
-    if MARKDOWN_ROW.match(line):
+
+
+def table_times(line: str, header: str | None):
+    """Every time of a table row, each judged on its own."""
+    if TABLE_ROW.match(line):
         for match in TABLE_TIME.finditer(line):
             start, end = match.span()
-            if not qualified(line, start, end, header, TIME_QUALIFIERS):
+            if not qualified(line, start, end, header, CONFIG_QUALIFIERS):
                 yield "latency", start, end
+
+
+def cells(row: str) -> list[tuple[int, int]]:
+    """(start, end) of the text of each cell of a table row."""
+    bars = [match.start() for match in re.finditer(r"\|", row)]
+    return [(left + 1, right) for left, right in zip(bars, bars[1:])]
+
+
+def header_figures(line: str, header: str | None):
+    """A results table names its keyword, and often its unit, once, in its
+    header: each cell is read with its column's header ("Recall@10" over
+    "97.4%", "Latency (ms)" over "3.2"), and yields the cell when that reads
+    as a figure."""
+    if header is None or not TABLE_ROW.match(line):
+        return
+    names = [header[start:end].strip() for start, end in cells(header)]
+    for column, (start, end) in enumerate(cells(line)):
+        text, name = line[start:end].strip(), names[column] if column < len(names) else ""
+        if not text or not name:
+            continue
+        probes = [f"{name} {text}", f"{text} {name}"]
+        unit = HEADER_UNIT.match(name)
+        if unit:
+            probes.append(f"{unit.group(1)} {text} {unit.group(2)}")
+        kind = next((kind for probe in probes for kind, _, _ in line_figures(probe)), None)
+        # The cell's own labels still qualify it: its row label and column
+        # header, as for any figure of the row ("| query timeout | 30 s |").
+        if kind and not qualified(line, start, end, header, QUALIFIERS.get(kind, ())):
+            yield kind, start, end
+
+
+def wrapped_figures(previous: str, line: str):
+    """A comment or a paragraph wraps: a figure whose keyword ends the previous
+    line and whose number begins this one ("recall@10 in" / "0.98 on SIFT1M"),
+    as (kind, start, end) in this line."""
+    head, body = LEAD.match(previous).end(), LEAD.match(line).end()
+    joined = previous[head:].rstrip() + " "
+    seam = len(joined)
+    for kind, start, end in line_figures(joined + line[body:]):
+        if start < seam < end:
+            yield kind, body, body + end - seam
 
 
 def is_code(line: str, start: int, end: int) -> bool:
@@ -283,6 +357,12 @@ def table_labels(line: str, at: int, header: str | None) -> list[str]:
     if column > 1:
         labels.append(line.split("|")[1])
     return labels
+
+
+def is_prose(line: str) -> bool:
+    """A line of running text: not blank, not a table row, a heading or a fence."""
+    text = line[LEAD.match(line).end() :]
+    return bool(text.strip()) and not (TABLE_ROW.match(line) or HEADING.match(text) or FENCE.match(text))
 
 
 def counted(line: str, start: int, end: int) -> bool:
@@ -336,6 +416,7 @@ def violations(root: Path) -> list[str]:
         heading = None
         in_fence = False
         header = previous = None
+        prose = None  # (number, line) of the previous line, when it is prose
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         if kind == "text":
             found.extend(ambiguous_sections(rel, lines, sections_claimed))
@@ -349,9 +430,13 @@ def violations(root: Path) -> list[str]:
             elif not TABLE_ROW.match(line):
                 header = None
             previous = line
+            wrapped = ()
+            if prose and prose[0] == number - 1 and is_prose(line):
+                wrapped = wrapped_figures(prose[1], line)
+            prose = (number, line) if is_prose(line) else None
             if heading in sections_claimed:
                 continue
-            for figure, start, end in figures(line, header):
+            for figure, start, end in (*figures(line, header), *wrapped):
                 if not covered(line, start, end, lines_claimed):
                     found.append(
                         f"{rel}:{number}: {figure} with no registered measurement: {line.strip()[:140]}"

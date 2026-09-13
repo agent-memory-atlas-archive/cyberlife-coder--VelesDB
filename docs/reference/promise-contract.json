@@ -36,10 +36,12 @@
       "must_contain": "cargo test --workspace",
       "validation_command": "cargo test --workspace",
       "executable": false,
+      "source": "The README names the command CI's test job runs (`cargo test --workspace`): a gate, not a measured figure.",
       "notes": "Documentary: running the full workspace test suite from inside this fast contract-check script would duplicate the dedicated CI test job and be far too slow/costly to run on every doc/registry change.",
       "measured_on": "n/a",
       "measured_machine": "n/a",
-      "measured_version": "n/a"
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
     },
     {
       "id": "core_readme_hnsw_latency",
@@ -4426,6 +4428,1279 @@
       "executable": false,
       "source": "A design target stated under '# Performance Targets' in the trigram module's rustdoc since commit cfaccf21 (2026-01-10, EPIC-CORE-003); no run records it.",
       "notes": "A target, not a measurement: the figure is the goal named in source.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_recall_profile_fast",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| Fast | 96 | 97.4% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_recall_profile_balanced",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| Balanced | 160 | 99.8% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_recall_profile_accurate",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| Accurate | 512 | 100.0% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_recall_profile_perfect",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| Perfect | exhaustive | 100.0% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'. The same report runs Perfect (the exhaustive scan: SearchQuality::Perfect in benches/recall_benchmark.rs), recorded at 100% in this row's table.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_benchmarks_fast",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| Fast | 96 | 97.4% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_benchmarks_balanced",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| Balanced | 160 | 99.8% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_benchmarks_accurate",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| Accurate | 512 | 100.0% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_benchmarks_perfect",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| Perfect | exhaustive | 100.0% |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'. The same report runs Perfect (the exhaustive scan: SearchQuality::Perfect in benches/recall_benchmark.rs), recorded at 100% in this row's table.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "core_perf_recall_balanced_row",
+      "file": "docs/guides/CORE_PERFORMANCE.md",
+      "must_contain": "| 10K/128D | Balanced | 160 | **99.8%** |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "core_perf_recall_accurate_row",
+      "file": "docs/guides/CORE_PERFORMANCE.md",
+      "must_contain": "| 10K/128D | Accurate | 512 | **100.0%** |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "core_perf_recall_perfect_row",
+      "file": "docs/guides/CORE_PERFORMANCE.md",
+      "must_contain": "| 10K/128D | Perfect | exhaustive | **100%** |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'. The same report runs Perfect (the exhaustive scan: SearchQuality::Perfect in benches/recall_benchmark.rs), recorded at 100% in this row's table.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "tuning_recall_fast_row",
+      "file": "docs/guides/TUNING_GUIDE.md",
+      "must_contain": "| `Fast` | 96 | max(96, k*3) | 97.4%* |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "tuning_recall_balanced_row",
+      "file": "docs/guides/TUNING_GUIDE.md",
+      "must_contain": "| `Balanced` (default) | 160 | max(160, k*5) | 99.8%* |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "tuning_recall_accurate_row",
+      "file": "docs/guides/TUNING_GUIDE.md",
+      "must_contain": "| max(512, k*16) | 100%*;",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "python_perf_recall_fast_row",
+      "file": "docs/guides/PYTHON_PERFORMANCE.md",
+      "must_contain": "| `\"fast\"` | 96 | 97.4%* |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "python_perf_recall_balanced_row",
+      "file": "docs/guides/PYTHON_PERFORMANCE.md",
+      "must_contain": "| `\"balanced\"` | 160 | 99.8%* |",
+      "validation_command": "cargo bench -p velesdb-core --bench recall_benchmark",
+      "executable": false,
+      "source": "cargo bench -p velesdb-core --bench recall_benchmark: its recall report (10K random 128-D vectors, HnswParams::max_recall index, 100 queries, k=10) at the current presets, 2026-09-10 on 6.0.0 (Fast ef=96: 97.4%, Balanced ef=160: 99.8%, Accurate ef=512: 100.0%) - the run behind readme_recall_fast_mode, readme_recall_balanced_mode, readme_recall_accurate_mode and docs/BENCHMARKS.md section 5 'HNSW Recall Profiles (10K/128D)'.",
+      "measured_on": "2026-09-10",
+      "measured_machine": "Apple M5 Pro",
+      "measured_version": "6.0.0",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "tuning_accurate_sift1m",
+      "file": "docs/guides/TUNING_GUIDE.md",
+      "must_contain": "0.98 on SIFT1M's 1M |",
+      "validation_command": "cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m",
+      "executable": false,
+      "source": "docs/BENCHMARKS.md section 11.3, production path: Accurate recall@10 0.9803 on SIFT1M (1M base x 10K queries, M=16, ef_construction=200, L2), 'First reproducible run, VelesDB v3.3.0' on Apple Silicon, otherwise idle. Recorded by #1225, squashed as 4b62338f (2026-06-24), whose message reads 'Adds report_recall_quality() printing RECALL_REPORT_QUALITY lines for Accurate (ef~1024 -> 0.9803)'; the PR commit that added that report, b33d7ebd, is dated 2026-06-24 too. Section 11.3 names the version and host but not the day, so measured_on is the day of the commit that records the run.",
+      "measured_on": "2026-06-24 (date of commit 4b62338f, which records the run)",
+      "measured_machine": "Apple Silicon (M-series, ARM64/NEON), otherwise idle - docs/BENCHMARKS.md section 11.3",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Published with its version (3.3.0) and host in docs/BENCHMARKS.md section 11.3. No full 1M SIFT1M re-run has been recorded since: the nightly SIFT1M job gates recall@10 >= 0.90 at ef=128 but commits no figures, so the figure stays pinned to the run that produced it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_config_accurate_sift1m",
+      "file": "crates/velesdb-core/src/config.rs",
+      "must_contain": "0.98 on SIFT1M's 1M (`docs/BENCHMARKS.md`)",
+      "validation_command": "cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m",
+      "executable": false,
+      "source": "docs/BENCHMARKS.md section 11.3, production path: Accurate recall@10 0.9803 on SIFT1M (1M base x 10K queries, M=16, ef_construction=200, L2), 'First reproducible run, VelesDB v3.3.0' on Apple Silicon, otherwise idle. Recorded by #1225, squashed as 4b62338f (2026-06-24), whose message reads 'Adds report_recall_quality() printing RECALL_REPORT_QUALITY lines for Accurate (ef~1024 -> 0.9803)'; the PR commit that added that report, b33d7ebd, is dated 2026-06-24 too. Section 11.3 names the version and host but not the day, so measured_on is the day of the commit that records the run.",
+      "measured_on": "2026-06-24 (date of commit 4b62338f, which records the run)",
+      "measured_machine": "Apple Silicon (M-series, ARM64/NEON), otherwise idle - docs/BENCHMARKS.md section 11.3",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Published with its version (3.3.0) and host in docs/BENCHMARKS.md section 11.3. No full 1M SIFT1M re-run has been recorded since: the nightly SIFT1M job gates recall@10 >= 0.90 at ef=128 but commits no figures, so the figure stays pinned to the run that produced it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_params_accurate_sift1m",
+      "file": "crates/velesdb-core/src/index/hnsw/params.rs",
+      "must_contain": "0.98 on SIFT1M's 1M (`docs/BENCHMARKS.md`)",
+      "validation_command": "cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m",
+      "executable": false,
+      "source": "docs/BENCHMARKS.md section 11.3, production path: Accurate recall@10 0.9803 on SIFT1M (1M base x 10K queries, M=16, ef_construction=200, L2), 'First reproducible run, VelesDB v3.3.0' on Apple Silicon, otherwise idle. Recorded by #1225, squashed as 4b62338f (2026-06-24), whose message reads 'Adds report_recall_quality() printing RECALL_REPORT_QUALITY lines for Accurate (ef~1024 -> 0.9803)'; the PR commit that added that report, b33d7ebd, is dated 2026-06-24 too. Section 11.3 names the version and host but not the day, so measured_on is the day of the commit that records the run.",
+      "measured_on": "2026-06-24 (date of commit 4b62338f, which records the run)",
+      "measured_machine": "Apple Silicon (M-series, ARM64/NEON), otherwise idle - docs/BENCHMARKS.md section 11.3",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Published with its version (3.3.0) and host in docs/BENCHMARKS.md section 11.3. No full 1M SIFT1M re-run has been recorded since: the nightly SIFT1M job gates recall@10 >= 0.90 at ef=128 but commits no figures, so the figure stays pinned to the run that produced it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_mobile_accurate_sift1m",
+      "file": "crates/velesdb-mobile/src/types.rs",
+      "must_contain": "`recall_benchmark`, 0.98 on SIFT1M's 1M.",
+      "validation_command": "cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m",
+      "executable": false,
+      "source": "docs/BENCHMARKS.md section 11.3, production path: Accurate recall@10 0.9803 on SIFT1M (1M base x 10K queries, M=16, ef_construction=200, L2), 'First reproducible run, VelesDB v3.3.0' on Apple Silicon, otherwise idle. Recorded by #1225, squashed as 4b62338f (2026-06-24), whose message reads 'Adds report_recall_quality() printing RECALL_REPORT_QUALITY lines for Accurate (ef~1024 -> 0.9803)'; the PR commit that added that report, b33d7ebd, is dated 2026-06-24 too. Section 11.3 names the version and host but not the day, so measured_on is the day of the commit that records the run.",
+      "measured_on": "2026-06-24 (date of commit 4b62338f, which records the run)",
+      "measured_machine": "Apple Silicon (M-series, ARM64/NEON), otherwise idle - docs/BENCHMARKS.md section 11.3",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Published with its version (3.3.0) and host in docs/BENCHMARKS.md section 11.3. No full 1M SIFT1M re-run has been recorded since: the nightly SIFT1M job gates recall@10 >= 0.90 at ef=128 but commits no figures, so the figure stays pinned to the run that produced it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_pq_full_precision_row",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| **Full Precision** | 98.4% |",
+      "validation_command": "cargo bench -p velesdb-core --bench pq_recall_benchmark -- full_precision_baseline",
+      "executable": false,
+      "source": "commit e35d9612 (2026-03-08, 'restore 0.92 recall thresholds with uniform random dataset'): moved pq_recall_benchmark from clustered to uniform-random data, restored the full-precision assert to recall >= 0.95, and recorded 'All 6 benchmark variants pass: PQ=0.994, Full=0.984, ...'. The 87.6% docs/BENCHMARKS.md showed before came from the clustered data of 7f05d0f0 (2026-03-07). measured_version is the workspace version of commit e35d9612.",
+      "measured_on": "2026-03-08 (date of commit e35d9612, which records the run)",
+      "measured_machine": "unknown (commit e35d9612 does not name it)",
+      "measured_version": "1.5.0",
+      "stale_accepted": {
+        "reason": "A recall figure published with the commit and date of its run (e35d9612, 2026-03-08); re-running pq_recall_benchmark takes a cargo bench run on a quiet machine, not made in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_recall_scale_exact",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| **100%** | All true neighbors found (exact search) |",
+      "validation_command": "none: a scale, not a measurement",
+      "executable": false,
+      "source": "Written by commit 5ca54a75 (2026-06-12): a scale for reading recall values under '### What is Recall?', not a figure VelesDB measured.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_recall_scale_95_99",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| **95-99%** | Excellent",
+      "validation_command": "none: a scale, not a measurement",
+      "executable": false,
+      "source": "Written by commit 32bfd2df (2026-03-07): a scale for reading recall values under '### What is Recall?', not a figure VelesDB measured.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_recall_scale_90_95",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| **90-95%** | Acceptable for exploration/prototyping |",
+      "validation_command": "none: a scale, not a measurement",
+      "executable": false,
+      "source": "Written by commit 5ca54a75 (2026-06-12): a scale for reading recall values under '### What is Recall?', not a figure VelesDB measured.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "search_modes_recall_scale_below_90",
+      "file": "docs/guides/SEARCH_MODES.md",
+      "must_contain": "| **< 90%** | Risk of missing important results |",
+      "validation_command": "none: a scale, not a measurement",
+      "executable": false,
+      "source": "Written by commit 5ca54a75 (2026-06-12): a scale for reading recall values under '### What is Recall?', not a figure VelesDB measured.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_params_scale_target_10k",
+      "file": "crates/velesdb-core/src/index/hnsw/params.rs",
+      "must_contain": "| ≤10K | 32 | 200 | ≥98% |",
+      "validation_command": "none: no benchmark or test in the repository measures these targets",
+      "executable": false,
+      "source": "Written by commit f7c9dcdc (2026-01-08): the 'Target Recall' column of HnswParams's '# Parameters by Scale' table: a target per dataset size, which no run in the tree records.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_params_scale_target_100k",
+      "file": "crates/velesdb-core/src/index/hnsw/params.rs",
+      "must_contain": "| ≤100K | 64 | 800 | ≥95% |",
+      "validation_command": "none: no benchmark or test in the repository measures these targets",
+      "executable": false,
+      "source": "Written by commit f7c9dcdc (2026-01-08): the 'Target Recall' column of HnswParams's '# Parameters by Scale' table: a target per dataset size, which no run in the tree records.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_params_scale_target_500k",
+      "file": "crates/velesdb-core/src/index/hnsw/params.rs",
+      "must_contain": "| ≤500K | 96 | 1200 | ≥95% |",
+      "validation_command": "none: no benchmark or test in the repository measures these targets",
+      "executable": false,
+      "source": "Written by commit f7c9dcdc (2026-01-08): the 'Target Recall' column of HnswParams's '# Parameters by Scale' table: a target per dataset size, which no run in the tree records.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_params_scale_target_1m",
+      "file": "crates/velesdb-core/src/index/hnsw/params.rs",
+      "must_contain": "| ≤1M | 128 | 1600 | ≥95% |",
+      "validation_command": "none: no benchmark or test in the repository measures these targets",
+      "executable": false,
+      "source": "Written by commit f7c9dcdc (2026-01-08): the 'Target Recall' column of HnswParams's '# Parameters by Scale' table: a target per dataset size, which no run in the tree records.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "architecture_diagrams_recall_gate",
+      "file": "docs/reference/ARCHITECTURE_DIAGRAMS.md",
+      "must_contain": "| Recall ≥ 0.95 |",
+      "validation_command": "cargo test -p velesdb-core --lib precision_contract_tests",
+      "executable": false,
+      "source": "Written by commit 1564f57a (2026-04-04): a quality-gate row: the floor the precision contract tests assert, not a measured value.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_sq8_recall_contract_floor",
+      "file": "crates/velesdb-core/src/index/hnsw/native/sq8_precision.rs",
+      "must_contain": "0.95 contract is pinned on the default configuration",
+      "validation_command": "cargo test -p velesdb-core --lib precision_contract_tests",
+      "executable": false,
+      "source": "Written by commit d5ce370e (2026-08-22): the recall@10 floor the precision contract tests assert on the default configuration, not a measured value.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_precision_contract_recall_floor_line148",
+      "file": "crates/velesdb-core/src/index/hnsw/native/precision_contract_tests.rs",
+      "must_contain": "recall@k vs brute-force is >= 0.95.",
+      "validation_command": "cargo test -p velesdb-core --lib precision_contract_tests",
+      "executable": false,
+      "source": "Written by commit c1d12b25 (2026-08-22): the floor this test module asserts, not a measured value.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_rabitq_precision_recall_floor",
+      "file": "crates/velesdb-core/src/index/hnsw/native/rabitq_precision_tests.rs",
+      "must_contain": "recall@k >= 0.95.",
+      "validation_command": "cargo test -p velesdb-core --lib rabitq_precision_tests",
+      "executable": false,
+      "source": "Written by commit 1ede859e (2026-06-10): the floor this test module asserts, not a measured value.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_graduated_ef_recall_floor",
+      "file": "crates/velesdb-core/src/index/hnsw/native/backend_adapter_tests.rs",
+      "must_contain": "maintains recall >= 0.90",
+      "validation_command": "cargo test -p velesdb-core --lib test_graduated_ef_construction_recall",
+      "executable": false,
+      "source": "Written by commit d6c6a575 (2026-04-02): the floor test_graduated_ef_construction_recall asserts, not a measured value.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_gpu_search_auto_recall_floor",
+      "file": "crates/velesdb-core/src/index/hnsw/gpu_search_auto_tests.rs",
+      "must_contain": "recall against brute force is above 0.80",
+      "validation_command": "cargo test -p velesdb-core --lib search_auto_wiring_preserves_recall_small_dataset",
+      "executable": false,
+      "source": "Written by commit dec8264f (2026-04-23): the floor search_auto_wiring_preserves_recall_small_dataset asserts (recall >= 0.80), not a measured value.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_neighbors_recall_floors",
+      "file": "crates/velesdb-core/src/index/hnsw/native/graph/neighbors.rs",
+      "must_contain": "Recall quality is enforced by tests: >= 0.80 in unit tests",
+      "validation_command": "none: the comment names no test",
+      "executable": false,
+      "source": "Written by commit d123c589 (2026-04-02): floors the HNSW tests assert (>= 0.80 at 1K vectors, >= 0.90 at 100K), not measured values; the comment names no test.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "tuning_new_recall_target",
+      "file": "docs/guides/TUNING_GUIDE.md",
+      "must_contain": "| ≥95% target¹ |",
+      "validation_command": "python benchmarks/velesdb_benchmark.py --recall",
+      "executable": false,
+      "source": "Written by commit d498c4c1 (2026-09-13): the design target of the auto() default. Footnote ¹ gives what a run measured on that path: 97.6% recall@10 (benchmarks/report_1.7.2_2026-03-27.json).",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "native_hnsw_new_recall_target",
+      "file": "docs/reference/NATIVE_HNSW.md",
+      "must_contain": "| ≥95% target¹ |",
+      "validation_command": "python benchmarks/velesdb_benchmark.py --recall",
+      "executable": false,
+      "source": "Written by commit d498c4c1 (2026-09-13): the design target of the auto() default. Footnote ¹ gives what a run measured on that path: 97.6% recall@10 (benchmarks/report_1.7.2_2026-03-27.json).",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_pq07_floor_cell",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "PQ-07 contract asserts recall>=0.92)",
+      "validation_command": "cargo bench -p velesdb-core --bench pq_recall_benchmark",
+      "executable": false,
+      "source": "Written by commit c4d8acbe (2026-06-21): the floor pq_recall_benchmark asserts for PQ m=8 k=256 with rescore ('PQ-07 contract: recall@10 >= 0.92'); the cell says no run re-measures the recall.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_pq07_floor_note",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "the PQ-07 contract asserts recall>=0.92, so the prior 30.6% figure",
+      "validation_command": "cargo bench -p velesdb-core --bench pq_recall_benchmark",
+      "executable": false,
+      "source": "Written by commit c4d8acbe (2026-06-21): the floor pq_recall_benchmark asserts (recall@10 >= 0.92), and 30.6%, the figure this note retires as an obsolete artifact rather than a result.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "server_examples_quickstart_goal",
+      "file": "crates/velesdb-server/examples/README.md",
+      "must_contain": "The README \"first success in 60 seconds\"",
+      "validation_command": "none: a goal, not a measurement",
+      "executable": false,
+      "source": "Written by commit 5afeee5f (2026-07-25): the name of the README's quickstart: a goal no run times.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "wasm_examples_quickstart_goal",
+      "file": "crates/velesdb-wasm/examples/README.md",
+      "must_contain": "The README's \"first success in 60 seconds\"",
+      "validation_command": "none: a goal, not a measurement",
+      "executable": false,
+      "source": "Written by commit 5afeee5f (2026-07-25): the name of the README's quickstart: a goal no run times.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "memory_readme_multihop_hash",
+      "file": "crates/velesdb-memory/README.md",
+      "must_contain": "| `hash` (deterministic) | 100% | 0% | **100%** |",
+      "validation_command": "cargo run --release -p velesdb-memory --example bench_multihop",
+      "executable": false,
+      "source": "commit 422848f4 (2026-06-26) wrote this table from the bench_multihop example: 'Graph contribution to multi-hop answer recall: +100pp (deterministic) and +67pp (vector 33%→graph 100%, real all-minilm), direct recall 100%.' measured_version is the workspace version of that commit.",
+      "measured_on": "2026-06-26 (date of commit 422848f4, which records the run)",
+      "measured_machine": "platform-independent (the deterministic hash embedder)",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the change that introduced the multi-hop benchmark (422848f4, 3.3.0); re-running bench_multihop is not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "memory_readme_multihop_minilm",
+      "file": "crates/velesdb-memory/README.md",
+      "must_contain": "| real model (Ollama `all-minilm`) | 100% | 33% | **100%** |",
+      "validation_command": "VELESDB_MEMORY_EMBEDDER=ollama cargo run --release -p velesdb-memory --features embedder-http --example bench_multihop",
+      "executable": false,
+      "source": "commit 422848f4 (2026-06-26) wrote this row from the bench_multihop example run on a local Ollama all-minilm: '+67pp (vector 33%→graph 100%, real all-minilm), direct recall 100%.' measured_version is the workspace version of that commit.",
+      "measured_on": "2026-06-26 (date of commit 422848f4, which records the run)",
+      "measured_machine": "unknown (commit 422848f4 names none)",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the change that introduced the multi-hop benchmark (422848f4, 3.3.0); re-running it needs Ollama serving all-minilm, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "migrate_readme_expected_output",
+      "file": "crates/velesdb-migrate/README.md",
+      "must_contain": "0 failed in 0.12s (24 pts/sec)",
+      "validation_command": "velesdb-migrate run --config migration.yaml",
+      "executable": false,
+      "source": "commit 871d21af (2026-07-25) pasted this log as the README's expected output (timestamps 2026-07-25T16:30:04); its message is silent on it, and the README says the timings vary with the machine. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-25 (date of commit 871d21af, which records the run)",
+      "measured_machine": "unknown (neither commit 871d21af nor the README names it)",
+      "measured_version": "4.0.0",
+      "stale_accepted": {
+        "reason": "An example run's log, recorded with the README rewrite (871d21af, 4.0.0); by the README's own words its timings vary with the machine.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_hnsw_concurrent_latency_66pct",
+      "file": "crates/velesdb-core/src/index/hnsw/native/graph/mod.rs",
+      "must_contain": "with per-batch latency 66% higher than single-threaded.",
+      "validation_command": "cargo bench -p velesdb-core --bench scalability_benchmark -- concurrent_queries",
+      "executable": false,
+      "source": "commit 185660d3 (2026-06-01) wrote this line with the ~5× beside it, from scalability_benchmark::concurrent_queries on an M5 Pro; its message states the ~5× ('~5× throughput at 8 threads instead of the ideal 8×') and not the 66%. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-06-01 (date of commit 185660d3, which records the run; the rustdoc dates the closed investigation 2026-06-03)",
+      "measured_machine": "Apple M5 Pro (as commit 185660d3 and the rustdoc name it)",
+      "measured_version": "1.16.0",
+      "stale_accepted": {
+        "reason": "Recorded by commit 185660d3 (1.16.0) as the closing measurement of #967; re-running it needs the same M5 Pro at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_write_attribution_row219",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| full (content+project)      |  3457.8 |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored the_per_point_write_cost_is_attributed_to_payload_or_vector",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of the_per_point_write_cost_is_attributed_to_payload_or_vector ('Measured 2026-08-03 (macOS, --release, n = 2 000, batch = 1 024)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS, --release (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 2 000 facts three times on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_write_attribution_row220",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| no content key (still text) |  3418.7 |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored the_per_point_write_cost_is_attributed_to_payload_or_vector",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of the_per_point_write_cost_is_attributed_to_payload_or_vector ('Measured 2026-08-03 (macOS, --release, n = 2 000, batch = 1 024)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS, --release (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 2 000 facts three times on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_write_attribution_row221",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| numeric only (no text)      |    15.1 |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored the_per_point_write_cost_is_attributed_to_payload_or_vector",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of the_per_point_write_cost_is_attributed_to_payload_or_vector ('Measured 2026-08-03 (macOS, --release, n = 2 000, batch = 1 024)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS, --release (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 2 000 facts three times on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_write_attribution_row222",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| no payload at all           |    10.2 |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored the_per_point_write_cost_is_attributed_to_payload_or_vector",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of the_per_point_write_cost_is_attributed_to_payload_or_vector ('Measured 2026-08-03 (macOS, --release, n = 2 000, batch = 1 024)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS, --release (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 2 000 facts three times on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_batched_write_row296",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 2 000  | 3 408.8      | 20.5        | 48 794        |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored batched_write_cost_stays_flat_as_the_volume_doubles",
+      "executable": false,
+      "source": "commit a4950038 (2026-08-03) recorded this table in the doc comment of batched_write_cost_stays_flat_as_the_volume_doubles, 're-measured with the same code on the same machine, --release, batch 1 024'; 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit a4950038, which records the run)",
+      "measured_machine": "unknown (the doc comment says 'an idle machine'; commit a4950038 names none)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (a4950038, 4.2.0); re-running it writes 31 000 facts on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_batched_write_row297",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 4 000  | 3 341.6      | 17.7        | 56 518        |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored batched_write_cost_stays_flat_as_the_volume_doubles",
+      "executable": false,
+      "source": "commit a4950038 (2026-08-03) recorded this table in the doc comment of batched_write_cost_stays_flat_as_the_volume_doubles, 're-measured with the same code on the same machine, --release, batch 1 024'; 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit a4950038, which records the run)",
+      "measured_machine": "unknown (the doc comment says 'an idle machine'; commit a4950038 names none)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (a4950038, 4.2.0); re-running it writes 31 000 facts on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_batched_write_row298",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 8 000  | 3 374.0      | 16.7        | 59 720        |",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored batched_write_cost_stays_flat_as_the_volume_doubles",
+      "executable": false,
+      "source": "commit a4950038 (2026-08-03) recorded this table in the doc comment of batched_write_cost_stays_flat_as_the_volume_doubles, 're-measured with the same code on the same machine, --release, batch 1 024'; 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit a4950038, which records the run)",
+      "measured_machine": "unknown (the doc comment says 'an idle machine'; commit a4950038 names none)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (a4950038, 4.2.0); re-running it writes 31 000 facts on a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_paging_cost_row412",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 250   | 10.3 ms  | 41.1    | —                 |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored paging_cost_grows_faster_than_the_store",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of paging_cost_grows_faster_than_the_store ('Measured 2026-08-03 (macOS, page size 100)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_paging_cost_row413",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 500   | 24.4 ms  | 48.8    | ×2.37             |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored paging_cost_grows_faster_than_the_store",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of paging_cost_grows_faster_than_the_store ('Measured 2026-08-03 (macOS, page size 100)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_paging_cost_row414",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 1 000 | 69.7 ms  | 69.7    | ×2.86             |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored paging_cost_grows_faster_than_the_store",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of paging_cost_grows_faster_than_the_store ('Measured 2026-08-03 (macOS, page size 100)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_paging_cost_row415",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 2 000 | 252.9 ms | 126.4   | ×3.63             |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored paging_cost_grows_faster_than_the_store",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded this table in the doc comment of paging_cost_grows_faster_than_the_store ('Measured 2026-08-03 (macOS, page size 100)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_cursor_vs_offset_row473",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 250   | 2.55 ms  | 10.2    | 9.87 ms     | 39.5    |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored the_cursor_cost_per_fact_does_not_grow_like_the_offset_walk",
+      "executable": false,
+      "source": "commit 8ef88b6a (2026-08-05, #1816) recorded this table: 'Measured on aarch64-apple-darwin, debug, machine at rest, sequentially', with 'offset=242.21ms (121.1 us/fact)' among its rows. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-05 (date of commit 8ef88b6a, which records the run)",
+      "measured_machine": "aarch64-apple-darwin, debug build, machine at rest (commit 8ef88b6a names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "One configuration recorded with the change it informed (8ef88b6a, 4.2.0); re-running it needs bge-m3 served locally and a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_cursor_vs_offset_row474",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 500   | 4.20 ms  | 8.4     | 24.12 ms    | 48.2    |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored the_cursor_cost_per_fact_does_not_grow_like_the_offset_walk",
+      "executable": false,
+      "source": "commit 8ef88b6a (2026-08-05, #1816) recorded this table: 'Measured on aarch64-apple-darwin, debug, machine at rest, sequentially', with 'offset=242.21ms (121.1 us/fact)' among its rows. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-05 (date of commit 8ef88b6a, which records the run)",
+      "measured_machine": "aarch64-apple-darwin, debug build, machine at rest (commit 8ef88b6a names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "One configuration recorded with the change it informed (8ef88b6a, 4.2.0); re-running it needs bge-m3 served locally and a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_cursor_vs_offset_row475",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 1 000 | 10.04 ms | 10.0    | 66.52 ms    | 66.5    |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored the_cursor_cost_per_fact_does_not_grow_like_the_offset_walk",
+      "executable": false,
+      "source": "commit 8ef88b6a (2026-08-05, #1816) recorded this table: 'Measured on aarch64-apple-darwin, debug, machine at rest, sequentially', with 'offset=242.21ms (121.1 us/fact)' among its rows. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-05 (date of commit 8ef88b6a, which records the run)",
+      "measured_machine": "aarch64-apple-darwin, debug build, machine at rest (commit 8ef88b6a names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "One configuration recorded with the change it informed (8ef88b6a, 4.2.0); re-running it needs bge-m3 served locally and a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_cursor_vs_offset_row476",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "| 2 000 | 30.89 ms | 15.4    | 242.21 ms   | 121.1   |",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored the_cursor_cost_per_fact_does_not_grow_like_the_offset_walk",
+      "executable": false,
+      "source": "commit 8ef88b6a (2026-08-05, #1816) recorded this table: 'Measured on aarch64-apple-darwin, debug, machine at rest, sequentially', with 'offset=242.21ms (121.1 us/fact)' among its rows. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-05 (date of commit 8ef88b6a, which records the run)",
+      "measured_machine": "aarch64-apple-darwin, debug build, machine at rest (commit 8ef88b6a names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "One configuration recorded with the change it informed (8ef88b6a, 4.2.0); re-running it needs bge-m3 served locally and a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_reinsert_decomposition",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "µs/fact, vector width from 4 to 1024 ≈ 445, the bare write ≈ 15.",
+      "validation_command": "cargo test -p velesdb-memory -- --ignored the_embedder_dominates_only_when_the_model_changes",
+      "executable": false,
+      "source": "commit 8ef88b6a (2026-08-05): 'Decomposed: text indexing ~3440 us/fact, vector width from 4 to 1024 ~445, the bare write ~15', from three measurements (88 462 / 3 900 µs, the 460 µs probe with no text, and 83784a92's attribution table). measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-05 (date of commit 8ef88b6a, which records the run)",
+      "measured_machine": "aarch64-apple-darwin, debug build, machine at rest (commit 8ef88b6a names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "One configuration recorded with the change it informed (8ef88b6a, 4.2.0); re-running it needs bge-m3 served locally and a machine at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_seeding_1242s",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "seeding took 1242 s for 100 001",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored past_the_ceiling_the_offset_walk_truncates_and_the_cursor_does_not",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded it in the doc comment of past_the_ceiling_the_offset_walk_truncates_and_the_cursor_does_not ('Measured 2026-08-03 (macOS, 100 001 facts seeded in 1242 s)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "timing_results_node_median",
+      "file": "docs/quickstart/timing-results.md",
+      "must_contain": "The Node scenario median (0.48 s)",
+      "validation_command": "bash scripts/dx-timing/run_all.sh",
+      "executable": false,
+      "source": "commit f06468bd (2026-04-29) recorded the first reference run: 'benchmarks/dx-timing/results-2026-04-29T07-06-34Z.json — first reference run (Python 4.95 s / Rust 25.40 s / TS 0.48 s / Server 45.84 s, all under SLO)'; the doc names the host (MINGW64_NT-10.0-26200, Windows / Docker Desktop, x86_64).",
+      "measured_on": "2026-04-29",
+      "measured_machine": "MINGW64_NT-10.0-26200 (Windows / Docker Desktop), x86_64 (the JSON's host field)",
+      "measured_version": "1.13.7",
+      "stale_accepted": {
+        "reason": "A frozen onboarding measurement kept with the release it installed (1.13.7), as the page says; re-running the harness installs a current release and would be a new measurement, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_sift1m_accurate_row",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| Accurate | ~1024 | 0.9803 |",
+      "validation_command": "cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m",
+      "executable": false,
+      "source": "commit 4b62338f (2026-06-24, #1225) added report_recall_quality() printing RECALL_REPORT_QUALITY lines: 'Accurate (ef~1024 -> 0.9803) and Perfect (ef~8192 -> 0.9994) at 1M'; the doc names Apple Silicon (M-series, ARM64/NEON), rustc release build. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-06-24 (date of commit 4b62338f, which records the run)",
+      "measured_machine": "Apple Silicon (M-series, ARM64/NEON), otherwise idle - docs/BENCHMARKS.md section 11.3",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Published with its version (3.3.0) and host in docs/BENCHMARKS.md section 11.3. No full 1M SIFT1M re-run has been recorded since: the nightly SIFT1M job gates recall@10 >= 0.90 at ef=128 but commits no figures, so the figure stays pinned to the run that produced it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "benchmarks_sift1m_perfect_row",
+      "file": "docs/BENCHMARKS.md",
+      "must_contain": "| Perfect (exhaustive scan) ¹ | — | 0.9994 |",
+      "validation_command": "cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m",
+      "executable": false,
+      "source": "commit 4b62338f (2026-06-24, #1225) added report_recall_quality() printing RECALL_REPORT_QUALITY lines: 'Accurate (ef~1024 -> 0.9803) and Perfect (ef~8192 -> 0.9994) at 1M'; the doc names Apple Silicon (M-series, ARM64/NEON), rustc release build. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-06-24 (date of commit 4b62338f, which records the run)",
+      "measured_machine": "Apple Silicon (M-series, ARM64/NEON), otherwise idle - docs/BENCHMARKS.md section 11.3",
+      "measured_version": "3.3.0",
+      "stale_accepted": {
+        "reason": "Published with its version (3.3.0) and host in docs/BENCHMARKS.md section 11.3. No full 1M SIFT1M re-run has been recorded since: the nightly SIFT1M job gates recall@10 >= 0.90 at ef=128 but commits no figures, so the figure stays pinned to the run that produced it.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_perf_optimizations_import_target",
+      "file": "crates/velesdb-core/src/perf_optimizations.rs",
+      "must_contain": "Bulk import: 50K+ vectors/sec at 768D",
+      "validation_command": "none: no benchmark or test in the repository measures this target",
+      "executable": false,
+      "source": "Written by the root commit 9a8ff23a (2026-01-04) under '# Performance Targets': a target, which no run in the tree records.",
+      "notes": "Not a measurement: nothing here records a run.",
+      "measured_on": "n/a",
+      "measured_machine": "n/a",
+      "measured_version": "n/a",
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "examples_real_session_caching_savings",
+      "file": "examples/real-session-benchmark/README.md",
+      "must_contain": "does NOT mean 20.3%/17.2% lower $ cost",
+      "validation_command": "cd examples/real-session-benchmark && node offline.mjs",
+      "executable": false,
+      "source": "This README's two token savings, 17.2% (lossless) and 20.3% (window-enforcement), recorded by commit e34dd2cb (2026-07-18) from node offline.mjs, which also wrote this caching note. The note said '21%/17%' until #2266: no figure in the README reads 21% (an earlier run's '21.4% saved'). measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-18 (date of commit e34dd2cb, which records the run)",
+      "measured_machine": "platform-independent (deterministic token counts)",
+      "measured_version": "3.12.0",
+      "stale_accepted": {
+        "reason": "Deterministic token counts published with their campaign in examples/real-session-benchmark; re-running offline.mjs needs the Node binding built from the current tree, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_seeding_1242s_header",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "Measured 2026-08-03 (macOS, 100 001 facts seeded in 1242 s):",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored past_the_ceiling_the_offset_walk_truncates_and_the_cursor_does_not",
+      "executable": false,
+      "source": "commit 83784a92 (2026-08-03) recorded it in the doc comment of past_the_ceiling_the_offset_walk_truncates_and_the_cursor_does_not ('Measured 2026-08-03 (macOS, 100 001 facts seeded in 1242 s)'); 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "migrate_readme_expected_output_duration",
+      "file": "crates/velesdb-migrate/README.md",
+      "must_contain": "Duration:  0.12s",
+      "validation_command": "velesdb-migrate run --config migration.yaml",
+      "executable": false,
+      "source": "commit 871d21af (2026-07-25) pasted this log as the README's expected output (timestamps 2026-07-25T16:30:04); its message is silent on it, and the README says the timings vary with the machine. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-25 (date of commit 871d21af, which records the run)",
+      "measured_machine": "unknown (neither commit 871d21af nor the README names it)",
+      "measured_version": "4.0.0",
+      "stale_accepted": {
+        "reason": "An example run's log, recorded with the README rewrite (871d21af, 4.0.0); by the README's own words its timings vary with the machine.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_contiguous_reorder_range",
+      "file": "crates/velesdb-core/src/contiguous_ops.rs",
+      "must_contain": "0.044–0.060 s in place against 0.158–0.209 s",
+      "validation_command": "cargo run --release -p velesdb-core --example resident_set --features persistence -- reorder",
+      "executable": false,
+      "source": "commit 34cda293 (2026-08-24): 'the reorder cost is published as a range over eight runs (0.044-0.060 s in place, 0.158-0.209 s for the copying shape)'; the doc comment names a 4-vCPU Linux container. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-24 (date of commit 34cda293, which records the runs)",
+      "measured_machine": "4-vCPU Linux container (the doc comment's words; commit 34cda293 says 'a shared host')",
+      "measured_version": "5.2.0",
+      "stale_accepted": {
+        "reason": "Recorded with the change it informed (34cda293, 5.2.0); re-running the resident_set example needs the same container at rest, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_embedder_cold_load",
+      "file": "crates/velesdb-memory/src/embedder.rs",
+      "must_contain": "measured on this repo's extraction model, 14.19 s cold",
+      "validation_command": "none: commit d89af64d names no command",
+      "executable": false,
+      "source": "commit d89af64d (2026-07-26, #1598): 'Measured against this repo's documented example extraction model (qwen3.6:35b-mlx, 21.9 GB) on an idle daemon: cold 14.19 s warm 0.22 s'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-26 (date of commit d89af64d, which records the run)",
+      "measured_machine": "unknown (commit d89af64d names the model, not the machine)",
+      "measured_version": "4.0.0",
+      "stale_accepted": {
+        "reason": "Recorded with the change it informed (d89af64d, 4.0.0); re-running it needs the 21.9 GB model served locally, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_embedder_warm_call",
+      "file": "crates/velesdb-memory/src/embedder.rs",
+      "must_contain": "against 0.22 s warm",
+      "validation_command": "none: commit d89af64d names no command",
+      "executable": false,
+      "source": "commit d89af64d (2026-07-26, #1598): 'Measured against this repo's documented example extraction model (qwen3.6:35b-mlx, 21.9 GB) on an idle daemon: cold 14.19 s warm 0.22 s'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-07-26 (date of commit d89af64d, which records the run)",
+      "measured_machine": "unknown (commit d89af64d names the model, not the machine)",
+      "measured_version": "4.0.0",
+      "stale_accepted": {
+        "reason": "Recorded with the change it informed (d89af64d, 4.0.0); re-running it needs the 21.9 GB model served locally, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_extract_runaway_generation",
+      "file": "crates/velesdb-memory/src/extract.rs",
+      "must_contain": "1 min 59 s spent generating JSON",
+      "validation_command": "none: commit 380fd655 names no command",
+      "executable": false,
+      "source": "commit 380fd655 (2026-08-09, #1846): 'measured 3 933 completion tokens for a twelve-word sentence — 1 min 59 s … Capped at 600 tokens, the same call measured 14.9 s.' measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit 380fd655, which records the run)",
+      "measured_machine": "unknown (commit 380fd655 names none)",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (380fd655, 4.3.0); re-running it needs the production extractor served locally, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_extract_capped_generation",
+      "file": "crates/velesdb-memory/src/extract.rs",
+      "must_contain": "14.9 s. 512 sits just under that",
+      "validation_command": "none: commit 380fd655 names no command",
+      "executable": false,
+      "source": "commit 380fd655 (2026-08-09, #1846): 'measured 3 933 completion tokens for a twelve-word sentence — 1 min 59 s … Capped at 600 tokens, the same call measured 14.9 s.' measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit 380fd655, which records the run)",
+      "measured_machine": "unknown (commit 380fd655 names none)",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (380fd655, 4.3.0); re-running it needs the production extractor served locally, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_service_autograph_46s",
+      "file": "crates/velesdb-memory/src/service.rs",
+      "must_contain": "46 s measured for a 12-word fact on the production",
+      "validation_command": "none: commit ef8e33ef names no command; tests/autograph_async_bdd.rs tests the decoupling, not the timing",
+      "executable": false,
+      "source": "commit ef8e33ef (2026-08-09, #1846) wrote these figures with the bounded autograph queue; its message is silent on them, and the text names the production daemon (the #1839 investigation). 64 × 46 s is arithmetic on the measured 46 s. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit ef8e33ef, which records the figures)",
+      "measured_machine": "unknown (the text says only 'the production daemon')",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (ef8e33ef, 4.3.0); re-running it needs the production extractor, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_service_embedding_012s",
+      "file": "crates/velesdb-memory/src/service.rs",
+      "must_contain": "versus a 0.12 s embedding",
+      "validation_command": "none: commit ef8e33ef names no command; tests/autograph_async_bdd.rs tests the decoupling, not the timing",
+      "executable": false,
+      "source": "commit ef8e33ef (2026-08-09, #1846) wrote these figures with the bounded autograph queue; its message is silent on them, and the text names the production daemon (the #1839 investigation). 64 × 46 s is arithmetic on the measured 46 s. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit ef8e33ef, which records the figures)",
+      "measured_machine": "unknown (the text says only 'the production daemon')",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (ef8e33ef, 4.3.0); re-running it needs the production extractor, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_service_queue_64x46s",
+      "file": "crates/velesdb-memory/src/service.rs",
+      "must_contain": "64 of them at 46 s each would hold",
+      "validation_command": "none: commit ef8e33ef names no command; tests/autograph_async_bdd.rs tests the decoupling, not the timing",
+      "executable": false,
+      "source": "commit ef8e33ef (2026-08-09, #1846) wrote these figures with the bounded autograph queue; its message is silent on them, and the text names the production daemon (the #1839 investigation). 64 × 46 s is arithmetic on the measured 46 s. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit ef8e33ef, which records the figures)",
+      "measured_machine": "unknown (the text says only 'the production daemon')",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (ef8e33ef, 4.3.0); re-running it needs the production extractor, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_graph_wiring_autograph_46_52s",
+      "file": "crates/velesdb-memory/src/service_graph_wiring.rs",
+      "must_contain": "held every `remember` for 46-52 s",
+      "validation_command": "none: commit ef8e33ef names no command; tests/autograph_async_bdd.rs tests the decoupling, not the timing",
+      "executable": false,
+      "source": "commit ef8e33ef (2026-08-09, #1846) wrote these figures with the bounded autograph queue; its message is silent on them, and the text names the production daemon (the #1839 investigation). 64 × 46 s is arithmetic on the measured 46 s. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit ef8e33ef, which records the figures)",
+      "measured_machine": "unknown (the text says only 'the production daemon')",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (ef8e33ef, 4.3.0); re-running it needs the production extractor, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_graph_wiring_embedding_012s",
+      "file": "crates/velesdb-memory/src/service_graph_wiring.rs",
+      "must_contain": "0.12 s — and the MCP client timed out mid-generation",
+      "validation_command": "none: commit ef8e33ef names no command; tests/autograph_async_bdd.rs tests the decoupling, not the timing",
+      "executable": false,
+      "source": "commit ef8e33ef (2026-08-09, #1846) wrote these figures with the bounded autograph queue; its message is silent on them, and the text names the production daemon (the #1839 investigation). 64 × 46 s is arithmetic on the measured 46 s. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-09 (date of commit ef8e33ef, which records the figures)",
+      "measured_machine": "unknown (the text says only 'the production daemon')",
+      "measured_version": "4.3.0",
+      "stale_accepted": {
+        "reason": "Recorded with the fix it informed (ef8e33ef, 4.3.0); re-running it needs the production extractor, not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "perf_slo_insert_ci_variance",
+      "file": "docs/reference/PERFORMANCE_SLO.md",
+      "must_contain": "(7.86–10.42s across 5 runs)",
+      "validation_command": "cargo bench -p velesdb-core --bench smoke_test -- --noplot",
+      "executable": false,
+      "source": "commit 39a06f8e (2026-03-19, #333): 'IO-bound, 7.86-10.42s variance on shared CI runners'; the same diff's benchmarks/baseline.json lists '7.86/9.87/9.47/8.80/10.42 across 5 CI runs' on ubuntu-latest GitHub Actions runners (2-core AMD). measured_version is the workspace version of that commit.",
+      "measured_on": "2026-03-19 (date of commit 39a06f8e, which records the runs)",
+      "measured_machine": "GitHub Actions ubuntu-latest (2-core AMD), per the baseline.json note of the same diff",
+      "measured_version": "1.5.1",
+      "stale_accepted": {
+        "reason": "CI-runner figures recorded with the threshold change (39a06f8e, 1.5.1); the smoke bench runs in CI's perf-smoke job, which keeps its own baseline.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "perf_slo_insert_local_836",
+      "file": "docs/reference/PERFORMANCE_SLO.md",
+      "must_contain": "`smoke_insert/10k_128d`: 8.36s",
+      "validation_command": "cargo bench -p velesdb-core --bench smoke_test -- --noplot",
+      "executable": false,
+      "source": "commit 399fc2fc (2026-03-25, release v1.7.2) wrote it; its message is silent, and the line then read 'Local validation (i9-14900KF)'. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-03-25 (date of commit 399fc2fc, which records the run)",
+      "measured_machine": "Intel Core i9-14900KF (the line's original words)",
+      "measured_version": "1.7.2",
+      "stale_accepted": {
+        "reason": "A local run recorded with the 1.7.2 release (399fc2fc); re-measuring it belongs on the idle i9-14900KF reference machine.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "quantization_arena_optout_build_time",
+      "file": "docs/guides/QUANTIZATION.md",
+      "must_contain": "most 1.3 s of build time",
+      "validation_command": "cargo run --release --example resident_set --features persistence -- write",
+      "executable": false,
+      "source": "commit adc85f5b (#2128, 2026-08-24, 'decide the arena is not configurable, and say why') added the `write` mode of examples/resident_set.rs and this table: filling 100 000 x 768-d into each backing, no graph and no quantizer - heap 58-62 ms, stable across runs; file-mapped 0.30-1.35 s, rising with each consecutive run (five runs). The commit names no machine. measured_version is the workspace version of that commit. This line restates the worst of those runs.",
+      "measured_on": "2026-08-24 (date of commit adc85f5b, which records the run)",
+      "measured_machine": "unknown (commit adc85f5b names none)",
+      "measured_version": "5.2.0",
+      "stale_accepted": {
+        "reason": "Recorded with the decision it informed (adc85f5b, 5.2.0); re-running the `write` mode five times was not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "quantization_arena_fill_counterweight",
+      "file": "docs/guides/QUANTIZATION.md",
+      "must_contain": "the arena fill time (1.3 s at worst)",
+      "validation_command": "cargo run --release --example resident_set --features persistence -- write",
+      "executable": false,
+      "source": "commit adc85f5b (#2128, 2026-08-24, 'decide the arena is not configurable, and say why') added the `write` mode of examples/resident_set.rs and this table: filling 100 000 x 768-d into each backing, no graph and no quantizer - heap 58-62 ms, stable across runs; file-mapped 0.30-1.35 s, rising with each consecutive run (five runs). The commit names no machine. measured_version is the workspace version of that commit. This line restates the worst of those runs.",
+      "measured_on": "2026-08-24 (date of commit adc85f5b, which records the run)",
+      "measured_machine": "unknown (commit adc85f5b names none)",
+      "measured_version": "5.2.0",
+      "stale_accepted": {
+        "reason": "Recorded with the decision it informed (adc85f5b, 5.2.0); re-running the `write` mode five times was not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_million_fact_rebuild",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "rebuild moves from roughly 56 minutes to roughly 16 seconds",
+      "validation_command": "none: arithmetic, no run",
+      "executable": false,
+      "source": "Written by commit a4950038 (2026-08-03): arithmetic on the per-fact costs it measured (3345.8 → 16.3 µs/fact) times 10⁶ facts; no million-fact run exists (the test writes 31 000 facts in total).",
+      "notes": "Not a measurement: an extrapolation the line now says is one.",
       "measured_on": "n/a",
       "measured_machine": "n/a",
       "measured_version": "n/a",

@@ -106,7 +106,7 @@ pub struct AutoReindexConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Threshold ratio for triggering reindex (`optimal_m` / `current_m`)
-    /// Default: 1.5 (trigger if optimal M is 50% higher than current)
+    /// Default: 1.5 (trigger when the optimal M reaches 1.5 times the current one)
     #[serde(default = "default_param_divergence_threshold")]
     pub param_divergence_threshold: f64,
     /// Minimum dataset size before considering reindex

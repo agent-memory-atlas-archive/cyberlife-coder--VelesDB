@@ -253,8 +253,8 @@ impl Database {
     ///                     small recall loss.
     ///                   - "binary" ("bit"): 1-bit binary quantization — 32x compression,
     ///                     best for edge/IoT devices.
-    ///                   - "pq" ("product_quantization"): Product Quantization — 8x-16x compression
-    ///                     via trained codebooks (requires a training step before upserts).
+    ///                   - "pq" ("product_quantization"): Product Quantization — `2 × dim / m` compression
+    ///                     via trained codebooks (dim/4 at the default m = 8; requires a training step before upserts).
     ///                   - "rabitq": RaBitQ — 1-bit with rotation + scalar correction,
     ///                     32x compression with a small recall loss.
     ///     hnsw: Optional :class:`HnswOptions` dataclass with typed HNSW

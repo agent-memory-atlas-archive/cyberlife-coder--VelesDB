@@ -193,7 +193,7 @@ No figure here is an estimate from a slide; each links to the log or script in t
 
 **Memory retrieval quality**, public test sets, no AI grader in the loop: **+7.2 pts** multi-hop (HotpotQA), **+9.7 pts** time-scoped recall (TimeQA), **+29 pts** on a controlled task needing both engines at once — [BENCHMARK.md](crates/velesdb-memory/BENCHMARK.md).
 
-**End-to-end search** (canonical): search p50 **450 us** (10K, 384D, WAL ON; measured 2026-03-27 on 1.7.2, Balanced then at ef 128 — [harness](benchmarks/velesdb_benchmark.py), [report](benchmarks/report_1.7.2_2026-03-27.json)) · quantization PQ (8–32x smaller), RaBitQ (32x smaller), SQ8 (4x smaller), Binary (32x smaller) — [scope & caveats](docs/guides/QUANTIZATION.md).
+**End-to-end search** (canonical): search p50 **450 us** (10K, 384D, WAL ON; measured 2026-03-27 on 1.7.2, Balanced then at ef 128 — [harness](benchmarks/velesdb_benchmark.py), [report](benchmarks/report_1.7.2_2026-03-27.json)) · quantization PQ (`2 × dim / m` smaller: dim/4 at the default m = 8), RaBitQ (32x smaller), SQ8 (4x smaller), Binary (32x smaller) — [scope & caveats](docs/guides/QUANTIZATION.md).
 
 **Index-only micro-benchmarks** (no WAL, no payload, hot cache — *not* comparable to the end-to-end figure above), each reproducible with `cargo bench -p velesdb-core --bench <name>`: HNSW Search index-only (10K/768D, k=10) **55 us** (`hnsw_benchmark -- hnsw_search_latency`) · SIMD Dot Product (768D, AVX2) **21.7 ns** (`simd_benchmark`) · Recall@10 balanced 99.8% and accurate mode **100%** (10K/128D, `recall_benchmark`) · BM25 Sparse Search index-only (10K docs, top-10) 57.6 us (`sparse_benchmark -- top10_10k_corpus`).
 

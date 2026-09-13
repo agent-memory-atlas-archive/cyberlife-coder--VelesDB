@@ -163,8 +163,8 @@ pub enum StorageMode {
     ///
     /// [`Full`]: StorageMode::Full
     Binary,
-    /// Product Quantization (PQ) for aggressive lossy compression (8x-16x
-    /// typical). Search-path mode: wired into the query hot path for ADC
+    /// Product Quantization (PQ): lossy compression, `2 × dim / m` smaller
+    /// than f32 (dim/4 at the default m = 8). Search-path mode: wired into the query hot path for ADC
     /// (Asymmetric Distance Computation) rescoring.
     ProductQuantization,
     /// `RaBitQ` binary quantization for 32x compression with scalar correction.

@@ -51,7 +51,7 @@ bash scripts/dx-timing/run_all.sh
 
 Prerequisites: Docker (≥ 20), ~5 GB free disk for the three base images, an outbound network connection to crates.io / PyPI / npm.
 
-The orchestrator emits a JSON report at `benchmarks/dx-timing/results-<timestamp>.json` and exits non-zero if any median exceeds the 300 s SLO.
+The orchestrator emits a JSON report at `benchmarks/dx-timing/results-<timestamp>.json` and exits non-zero if any median exceeds the SLO's 300 s limit.
 
 ## Honesty notes (DX friction observed during measurement)
 

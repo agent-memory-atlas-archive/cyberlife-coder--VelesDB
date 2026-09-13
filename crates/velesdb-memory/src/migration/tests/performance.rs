@@ -304,8 +304,9 @@ fn the_per_point_write_cost_is_attributed_to_payload_or_vector() {
 /// (ratios 0.85, 0.86, 0.95, 0.97) because the fixed costs amortise — better
 /// than the linear behaviour this test was written to demand.
 ///
-/// What that changes for the migration: a million-fact rebuild moves from
-/// roughly 56 minutes to roughly 16 seconds, so throughput is no longer what
+/// What that changes for the migration: at those per-fact costs, a million-fact
+/// rebuild moves from roughly 56 minutes to roughly 16 seconds (arithmetic, no
+/// million-fact run), so throughput is no longer what
 /// decides whether an offline rebuild is acceptable.
 ///
 /// `#[ignore]`d: writes 31 000 facts in total.

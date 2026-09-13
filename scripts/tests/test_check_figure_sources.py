@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -432,6 +433,92 @@ class FigureSourcesTest(unittest.TestCase):
         figure = "Search answers in 3 ms.\n"
         root = self.tree({"examples/demo/README.md": figure, "examples/demo/node_modules/dep/README.md": figure})
         self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["examples/demo/README.md:1"])
+
+
+    def numbers_flagged(self, line: str, header: str | None = None) -> list[str]:
+        spans = [(s, e) for _, s, e in guard.figures(line, header)]
+        return sorted({m.group() for m in re.finditer(r"\d+(?:[.,]\d+)?", line) if any(s <= m.start() < e for s, e in spans)})
+
+    def test_a_table_cell_is_read_with_its_column_header(self):
+        # A results table names its keyword once, in its header, and a unit in
+        # parentheses there: every cell is read with it, whatever the kind.
+        header = "| Profile | ef_search | Recall@10 | Throughput (QPS) | Latency (ms) | Compression |"
+        line = "| Fast | 96 | 97.4% | 12,000 | 3.2 | 4x |"
+        self.assertEqual(self.numbers_flagged(line, header), ["12,000", "3.2", "97.4"])
+        root = self.tree({"docs/G.md": header + "\n|---|---|---|---|---|---|\n" + line + "\n"})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["docs/G.md:3"])
+
+    def test_a_keyword_on_the_line_above_reaches_the_figure(self):
+        # A comment or a paragraph wraps: the keyword may end one line and the
+        # figure begin the next.
+        rust = "/// Accurate: 100% recall@10 in\n/// `recall_benchmark`, 0.98 on SIFT1M's 1M.\n"
+        doc = "Search reaches a recall@10 of\n0.95 on SIFT1M.\n"
+        root = self.tree(
+            {"crates/c/src/lib.rs": rust, "docs/G.md": doc},
+            claims=(("crates/c/src/lib.rs", "100% recall@10"),),
+        )
+        self.assertEqual(sorted(v.split(": ")[0] for v in self.flagged(root)), ["crates/c/src/lib.rs:2", "docs/G.md:2"])
+
+    def test_a_time_in_a_doc_comment_table_is_read(self):
+        rust = "/// | facts | elapsed |\n/// |---|---|\n/// | 250 | 10.3 ms |\n"
+        root = self.tree({"crates/c/src/lib.rs": rust})
+        self.assertEqual([v.split(": ")[0] for v in self.flagged(root)], ["crates/c/src/lib.rs:3"])
+
+    def test_each_form_the_review_found_is_read(self):
+        lines = [
+            "It takes 42 s to rebuild.",
+            "The server handles 12K req/s.",
+            "It sustains 1.2K+ QPS.",
+            "It is 3 times faster.",
+            "It is 2.8-fold faster.",
+            "It gives a \u00d73 speed-up.",
+            "It has 40% lower latency.",
+            "It has 35% higher throughput.",
+            "It reaches a recall of 0.976.",
+            "A probe costs 450 usec.",
+            "- Bulk import: 50K+ vectors/sec at 768D",
+            "- Maintain 50M+ items/sec filter throughput (vs 19M/s with JSON)",
+            "with per-batch latency 66% higher than single-threaded.",
+        ]
+        root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
+        self.assertEqual(len(self.flagged(root)), len(lines))
+
+    def test_a_config_word_exempts_the_time_or_ratio_beside_it(self):
+        # A poll interval, a retry count or a setting is configured; a measured
+        # time or ratio beside it is still a figure.
+        cases = {
+            "The poll interval is 100 \u00b5s.": [],
+            "Retry up to 3x before giving up.": [],
+            "The poll interval is 100 \u00b5s; a search takes 57.6 \u00b5s.": ["57.6"],
+            "Retries back off 2x; batching gives ~3x the throughput.": ["3"],
+        }
+        for line, expected in cases.items():
+            self.assertEqual(self.numbers_flagged(line), expected, line)
+        header = "| Setting | Value |"
+        self.assertEqual(self.numbers_flagged("| `flush_interval_us` | 100 \u00b5s |", header), [])
+        self.assertEqual(self.numbers_flagged("| Search | 57.6 \u00b5s |", header), ["57.6"])
+
+
+    def test_a_unit_glued_to_a_name_is_no_time(self):
+        # "f32s" is the plural of a type, not 32 seconds.
+        for line in ("/// * `query` \u2014 query vector (dim f32s)", "Each query holds four f32s."):
+            self.assertEqual(self.numbers_flagged(line), [], line)
+
+    def test_a_config_word_exempts_the_rate_beside_it(self):
+        # A rate limit is configured; a measured rate beside it is a figure.
+        cases = {
+            "The per-IP limiter (100 req/s by default) is saturated.": [],
+            "Production: a 200 req/s limit per IP.": [],
+            "The limiter allows 100 req/s by default; the server serves 12K req/s.": ["12"],
+        }
+        for line, expected in cases.items():
+            self.assertEqual(self.numbers_flagged(line), expected, line)
+
+
+    def test_an_architecture_name_is_no_speed_ratio(self):
+        # "a \u00d73 speed-up" is a figure; "x86 FASTER" names an architecture.
+        self.assertEqual(self.numbers_flagged("| \U0001F534 x86 FASTER | Investigate NEON codegen |"), [])
+        self.assertEqual(self.numbers_flagged("It gives a \u00d73 speed-up."), ["3"])
 
 
 if __name__ == "__main__":
