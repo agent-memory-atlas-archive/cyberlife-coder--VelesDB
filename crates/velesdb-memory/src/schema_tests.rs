@@ -600,6 +600,7 @@ mod unlink {
             "`decisions[fragment_index]` is unambiguous",
             "``a [`b`] c`` in a double-backtick span",
             "see [`a;b`] here",
+            "see [`<T>`] here",
         ] {
             assert_eq!(unlink_rustdoc(text), None, "{text}");
         }
@@ -1015,6 +1016,8 @@ mod unlink {
             "a bare [Recollection] reads like [sic]",
             "a [Q&A] and [R&D] section, a [*note*] in emphasis",
             "`MATCH (a)-[*1..5]->(b)` and `$.items[*]`",
+            "in [0, 1) see `x`",
+            "see [docs](\u{b}https://x.dev) and [spec](\u{a0}https://x.dev)",
         ] {
             assert_eq!(unlink_rustdoc(text), None, "{text}");
             assert!(!holds_rustdoc_link(text), "the guard flags {text:?}");
@@ -1085,15 +1088,60 @@ mod unlink {
         }
     }
 
+    /// A code link's target may be padded with any whitespace `str::trim`
+    /// removes, as rustdoc 1.90 resolves such a target: a vertical tab, a form
+    /// feed, a no-break space, a next-line mark or an em space before it, or
+    /// one of the first three after it. The link shows its code.
+    #[test]
+    fn a_code_link_whose_target_is_padded_with_whitespace_shows_its_code() {
+        for pad in ["\u{b}", "\u{c}", "\u{a0}", "\u{85}", "\u{2003}"] {
+            let text = format!("see [`x`]({pad}crate::y) here");
+            assert_eq!(
+                unlink_rustdoc(&text).as_deref(),
+                Some("see `x` here"),
+                "{text:?}"
+            );
+        }
+        for pad in ["\u{b}", "\u{c}", "\u{a0}"] {
+            let text = format!("see [`x`](crate::y{pad}) here");
+            assert_eq!(
+                unlink_rustdoc(&text).as_deref(),
+                Some("see `x` here"),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A run of three spaces is not the four that could indent a code block,
+    /// and a `~~` strikethrough is no `~~~` fence: neither makes the scan leave
+    /// the text, and the link shows its code.
+    #[test]
+    fn three_spaces_and_a_strikethrough_open_no_code_block() {
+        for (text, shown) in [("a   [`X`] b", "a   `X` b"), ("~~a~~ [`X`]", "~~a~~ `X`")] {
+            assert_eq!(unlink_rustdoc(text).as_deref(), Some(shown), "{text:?}");
+        }
+    }
+
+    /// A bracket pair after a code link balances on its own, so the `]` past
+    /// it still closes the `[` before the link: the link is enclosed, and
+    /// stays as written.
+    #[test]
+    fn a_code_link_enclosed_past_a_later_pair_stays_as_written() {
+        let text = "[see [`x`] and [y] ]";
+        assert_eq!(unlink_rustdoc(text), None, "{text:?}");
+        assert!(holds_rustdoc_link(text), "the guard misses {text:?}");
+    }
+
     /// An inline code link whose target is no Rust path, as one of its
-    /// segments starts with a digit or is empty, stays as written, and the
-    /// guard fails on it.
+    /// segments starts with a digit, is empty, or holds a letter outside ASCII,
+    /// stays as written, and the guard fails on it.
     #[test]
     fn an_inline_code_link_to_what_is_no_rust_path_stays_as_written() {
         for text in [
             "see [`x`](2261) here",
             "see [`x`](a::2b) here",
             "see [`x`](crate::) here",
+            "see [`x`](crate::a\u{e9}) here",
         ] {
             assert_eq!(unlink_rustdoc(text), None, "{text:?}");
             assert!(holds_rustdoc_link(text), "the guard misses {text:?}");
@@ -1153,8 +1201,10 @@ mod unlink {
     /// Whether the label `after` starts, up to its `]`, names a path: it holds
     /// `::`, `@`, `#` or `<`, is one of the primitives rustdoc links from a
     /// sigil (`&`, `&mut`, `&str`, `*const`, `*mut`), or ends in `()`, `!{}` or
-    /// `!`, once it is trimmed of whitespace and a quote's `>`, as rustdoc
-    /// reads it. A label holding a backtick never gets here:
+    /// `!`, once it is trimmed of any whitespace `char::is_whitespace` names
+    /// and a quote's `>`: a no-break space included, which may be more than
+    /// rustdoc trims, so the guard errs on flagging. A label holding a backtick
+    /// never gets here:
     /// `label_holds_a_backtick` flags it first. The label is read even as a web
     /// link's text: an inline link whose target Markdown rejects falls back to
     /// the shortcut link rustdoc resolves. Any other `&` or `*` (`[Q&A]`,
@@ -1253,12 +1303,22 @@ mod unlink {
         }
     }
 
+    /// The guard trims a label of any whitespace before it reads it as a
+    /// primitive or a call, a no-break space included: it errs on flagging.
+    #[test]
+    fn the_guard_trims_a_label_of_any_whitespace() {
+        for text in ["see [\u{a0}&str\u{a0}] here", "see [f()\u{2003}] here"] {
+            assert!(holds_rustdoc_link(text), "the guard misses {text:?}");
+        }
+    }
+
     #[test]
     fn the_guard_flags_an_inline_link_the_rewrite_leaves() {
         for text in [
             "odd [x](crate::y \"t\") link",
             "odd [x](Foo \"t\") link",
             "odd [x](< crate::y > \"t\") link",
+            "odd [x](http:crate) link",
         ] {
             assert_eq!(unlink_rustdoc(text), None, "{text}");
             let mut linked = Vec::new();

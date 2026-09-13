@@ -96,10 +96,11 @@ const DISAMBIGUATORS: [&str; 20] = [
 ///
 /// It also leaves as written every link in a text it cannot read exactly
 /// ([`scan_is_exact`]), such as one holding a reference-style link
-/// (`[text][label]`) or an image, or that holds an inline link it does not
-/// render (a web link, one whose text is no code span), whose target and title
-/// it cannot read as prose; and a code link a bracket pair would enclose once
-/// its own brackets go ([`would_pair_around`]). The guard then fails on the
+/// (`[text][label]`) or an image; every link in a text that holds an inline
+/// link it does not render (a web link, or one whose text is no code span),
+/// whose target and title it cannot read as prose ([`unlink_once`]); and a
+/// code link a bracket pair would enclose once its own brackets go
+/// ([`would_pair_around`]). The guard then fails on the
 /// rustdoc link syntax left, except a bare `[Name]`, which it cannot tell from
 /// prose.
 ///
@@ -360,7 +361,8 @@ fn rustdoc_link(after: &str) -> Option<(Cow<'_, str>, &str)> {
 
 /// An inline code link, `inline` being the text after its `(`: shown as its
 /// label, a code span, when the target is a Rust path. The target may be
-/// padded with spaces, as Markdown allows; one wrapped in `<…>` never gets
+/// padded with any whitespace `str::trim` removes, a no-break space or a form
+/// feed included, as rustdoc 1.90 resolves such a target; one wrapped in `<…>` never gets
 /// here, since a `<` outside code leaves the whole text as written
 /// ([`scan_is_exact`]). A target that spans a line is left as written (see
 /// [`spans_a_line`]).
