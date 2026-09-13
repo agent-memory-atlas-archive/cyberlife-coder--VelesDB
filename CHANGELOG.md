@@ -149,30 +149,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped a `filter` too: it now sends it on, so velesdb-server's refusal
   reaches the caller. The SDK's CI job now also runs its lint script.
 
-  **Behaviour change.** On the WASM backend, calls that used to succeed
-  with the argument ignored now throw `NOT_SUPPORTED`, naming the backend
-  and the capability: a `filter` on `textSearch`, `hybridSearch`,
-  `multiQuerySearch` or a sparse `search`; `sparseIndexName`;
-  `includeVectors: true`; under `relative_score`, `fusionParams.denseWeight`
-  or `sparseWeight`; under `weighted`, a triple given in part;
-  `createCollection` with `storageMode` `pq` or `rabitq` (velesdb-wasm
-  stores both as SQ8), a `collectionType` other than `vector`, or `hnsw`,
-  `pqRescoreOversampling`, `deferredIndexing` or `asyncIndexBuilder`;
-  `query` with `timeoutMs` or `stream: true`. A `fusionParams` field the
-  chosen strategy never reads is ignored, as core ignores it. Under
-  `weighted`, a triple core would reject (a negative or non-finite weight,
-  or a sum more than 0.001 from 1.0, computed in f32 as core computes it)
-  now throws `BAD_REQUEST` instead of the binding's bare string. Every
-  search checks its inputs first, as core does: a query vector of the
-  wrong dimension throws `DIMENSION_MISMATCH` whatever `k` is, and
-  `multiQuerySearch` refuses a short or long vector instead of padding or
-  overflowing it; a non-integer `k` throws `BAD_REQUEST`, core's `k` being
-  an integer; a `k` of 0 or less returns nothing without calling the
-  binding (a sparse search used to return live hits). `query` no longer
-  reads `params.k`, which REST ignores: a statement without `LIMIT`
-  returns core's default of 10 rows. On REST, `multiQuerySearchIds` with a
-  `filter` now fails with the server's `400` instead of returning
-  unfiltered ids.
+  Its behaviour changes are listed under Changed.
 
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
@@ -515,6 +492,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NotFound`, matching every sibling accessor.
 
 ### Changed
+- **BREAKING (TypeScript SDK, WASM backend) — an argument the WASM backend
+  cannot apply is refused, and a search's inputs are checked as core checks
+  them (#2095).** Calls that used to succeed with the argument ignored now
+  throw `NOT_SUPPORTED`, naming the backend and the capability: a `filter`
+  on `textSearch`, `hybridSearch`, `multiQuerySearch` or a sparse
+  `search`; `sparseIndexName`; `includeVectors: true`; under
+  `relative_score`, `fusionParams.denseWeight` or `sparseWeight`; under
+  `weighted`, a triple given in part; `createCollection` with
+  `storageMode` `pq` or `rabitq` (velesdb-wasm stores both as SQ8), a
+  `collectionType` other than `vector`, or `hnsw`,
+  `pqRescoreOversampling`, `deferredIndexing` or `asyncIndexBuilder`;
+  `query` with `timeoutMs` or `stream: true`. A `fusionParams` field the
+  chosen strategy never reads is ignored, as core ignores it. Under
+  `weighted`, a triple core would reject (a negative or non-finite weight,
+  or a sum more than 0.001 from 1.0, computed in f32 as core computes it)
+  throws `BAD_REQUEST` instead of the binding's bare string.
+
+  Every search checks its inputs first, as core does. A query vector of
+  the wrong dimension throws `DIMENSION_MISMATCH` whatever `k` is, and
+  `multiQuerySearch` refuses a short or long vector instead of padding or
+  overflowing it. `multiQuerySearch` takes 1 to 10 vectors, as core's does:
+  an empty list, which used to return `[]`, and more than 10 now throw
+  `BAD_REQUEST`. A non-integer or negative `k` throws `BAD_REQUEST`, core's
+  `k` being unsigned, and a `k` of 0 returns nothing without calling the
+  binding (a sparse search used to return live hits). A fusion strategy
+  name is read as core reads it, in any case and with the aliases `avg`,
+  `max` and `rsf`, and an unknown one throws `BAD_REQUEST`: `'rsf'` used to
+  let `denseWeight` through, and `'WEIGHTED'` dropped the caller's triple.
+  `query` no longer reads `params.k`, which REST ignores: a statement
+  without `LIMIT` returns core's default of 10 rows, and `LIMIT` is capped
+  at core's 100,000. On REST, `multiQuerySearchIds` with a `filter` now
+  fails with the server's `400` instead of returning unfiltered ids.
+
 - **BREAKING (REST, VelesQL, bindings) — an unparseable search `mode` now
   fails instead of running silently at the default quality (#2267).**
   `WITH (mode = '...')` in VelesQL and

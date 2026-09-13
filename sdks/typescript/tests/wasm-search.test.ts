@@ -329,13 +329,14 @@ describe('wasmMultiQuerySearch', () => {
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 
-  it('returns [] immediately when vectors list is empty', async () => {
+  it('refuses an empty vectors list, as core does', async () => {
     const multi = vi.fn(() => []);
     const store = buildStore({ multi_query_search: multi });
     const ctx = buildCtx('docs', store);
 
-    const result = await wasmMultiQuerySearch(ctx, 'docs', []);
-    expect(result).toEqual([]);
+    const outcome = await settle(wasmMultiQuerySearch(ctx, 'docs', []));
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
     expect(multi).not.toHaveBeenCalled();
   });
 
@@ -410,6 +411,9 @@ describe('wasmQuery', () => {
     const query = vi.fn(() => []);
     const store = buildStore({ query });
     const ctx = buildCtx('docs', store);
+
+    await wasmQuery(ctx, 'docs', PURE_NEAR, { q: [0.1, 0.2], k: 3 });
+    expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 10);
 
     await wasmQuery(ctx, 'docs', PURE_NEAR, { q: [0.1, 0.2], k: -5 });
     expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 10);
@@ -836,7 +840,7 @@ describe('wasmMultiQuerySearch — the weighted triple matters only under `weigh
   );
 });
 
-describe('WASM search — k <= 0 returns nothing, before any binding call (#2095)', () => {
+describe('WASM search — k = 0 returns nothing, before any binding call (#2095)', () => {
   beforeEach(() => vi.clearAllMocks());
 
   /** A collection whose binding would return a hit on every path, with one retired sparse id. */
@@ -864,7 +868,7 @@ describe('WASM search — k <= 0 returns nothing, before any binding call (#2095
     return { ctx, bindingCalls };
   }
 
-  it.each([0, -1])('every search path returns [] for k = %i and never calls the binding', async (k) => {
+  it.each([0])('every search path returns [] for k = %i and never calls the binding', async (k) => {
     const dense = collectionWithHits(2);
     const sparseOnly = collectionWithHits(0);
 
@@ -970,8 +974,8 @@ describe("WASM search — a search's inputs are validated before any early retur
     expect(bindingCallCount(store)).toBe(0);
   });
 
-  it.each([0.5, 1.5, Number.NaN])(
-    "every search path refuses k = %s: core's k is an integer",
+  it.each([0.5, 1.5, Number.NaN, -1])(
+    "every search path refuses k = %s: core's k is an unsigned integer",
     async (k) => {
       const denseStore = buildStore({ search: vi.fn(() => [[1n, 0.9]]) });
       const dense = buildCtx('docs', denseStore, { dimension: 2 });
@@ -1031,4 +1035,107 @@ describe('wasmMultiQuerySearch — denseWeight and sparseWeight matter only unde
       expect(multi).toHaveBeenCalledTimes(1);
     }
   );
+});
+
+// ---------------------------------------------------------------------------
+// #2095 — the rest of core's input rules: strategy names, vector count, LIMIT.
+// ---------------------------------------------------------------------------
+
+describe('wasmMultiQuerySearch — a strategy name is read as core reads it (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each(['rsf', 'RELATIVE_SCORE', 'Relative_Score'])(
+    '%s is relative_score, so its denseWeight is refused',
+    async (fusion) => {
+      const multi = vi.fn(() => []);
+      const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+      const outcome = await settle(
+        wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+          fusion: fusion as never,
+          fusionParams: { denseWeight: 0.7 },
+        })
+      );
+
+      expectRefusal(outcome, 'multiQueryFusionParams');
+      expect(multi).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['WEIGHTED', 'Weighted'])("%s is weighted, so the caller's triple reaches the binding", async (fusion) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+      fusion: fusion as never,
+      fusionParams: { avgWeight: 0.5, maxWeight: 0.375, hitWeight: 0.125 },
+    });
+
+    const call = multi.mock.calls[0] as unknown[];
+    expect(call[3]).toBe('weighted');
+    expect(Array.from(call[5] as Float32Array)).toEqual([0.5, 0.375, 0.125]);
+  });
+
+  it.each([
+    ['avg', 'average'],
+    ['MAX', 'maximum'],
+    ['RRF', 'rrf'],
+  ])('%s reaches the binding as %s', async (fusion, canonical) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: fusion as never });
+
+    expect((multi.mock.calls[0] as unknown[])[3]).toBe(canonical);
+  });
+
+  it.each(['mean', 'constructor'])('refuses %s, a strategy core does not know', async (fusion) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: fusion as never })
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect(multi).not.toHaveBeenCalled();
+  });
+});
+
+describe('WASM search — the rest of core input rules (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('multiQuerySearch refuses more than 10 vectors, as core does', async () => {
+    const store = buildStore();
+    const ctx = buildCtx('docs', store, { dimension: 2 });
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', Array.from({ length: 11 }, () => [0.1, 0.2]))
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect(bindingCallCount(store)).toBe(0);
+  });
+
+  it('multiQuerySearch takes 10 vectors', async () => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }), { dimension: 2 });
+
+    await wasmMultiQuerySearch(ctx, 'docs', Array.from({ length: 10 }, () => [0.1, 0.2]));
+
+    expect(multi).toHaveBeenCalledTimes(1);
+  });
+
+  it("query caps LIMIT at core's MAX_LIMIT of 100,000", async () => {
+    const query = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ query }), { dimension: 2 });
+
+    await wasmQuery(ctx, 'docs', 'SELECT * FROM docs WHERE vector NEAR $v LIMIT 250000', {
+      v: [0.1, 0.2],
+    });
+
+    expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 100_000);
+  });
 });

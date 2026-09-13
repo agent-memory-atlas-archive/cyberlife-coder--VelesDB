@@ -137,18 +137,32 @@ function refuseUnhonouredSearchOptions(options: SearchOptions | undefined): void
 }
 
 /**
+ * How many query vectors core's multi-query search takes
+ * (`validate_multi_query_inputs`, `crates/velesdb-core/src/collection/search/batch.rs`).
+ */
+const MULTI_QUERY_VECTORS = { min: 1, max: 10 } as const;
+
+/**
  * Validate a search's inputs before anything else, as core does
- * (`validated_hybrid_params`, `validate_multi_query_inputs`): every query
- * vector must have the collection's dimension, and `k` must be an integer,
- * as core's `usize` is. Returns `k`; at 0 or below, the caller answers with
- * no results and never calls the binding. Every search runs it first, so no
- * early return can skip it.
+ * (`validated_hybrid_params`, `validate_multi_query_inputs`): the number of
+ * query vectors, when the search bounds it; every vector's dimension; and
+ * `k`, a non-negative integer as core's `usize` is. Returns `k`; at 0 the
+ * caller answers with no results and never calls the binding. Every search
+ * runs it first, so no early return can skip it.
  */
 function validateSearchInputs(
   collection: CollectionData,
   vectors: ReadonlyArray<ArrayLike<number>>,
-  k: number
+  k: number,
+  vectorCount?: { readonly min: number; readonly max: number }
 ): number {
+  if (vectorCount && (vectors.length < vectorCount.min || vectors.length > vectorCount.max)) {
+    throw new VelesDBError(
+      `a multi-query search takes ${vectorCount.min} to ${vectorCount.max} vectors, as core's ` +
+        `does; got ${vectors.length}`,
+      'BAD_REQUEST'
+    );
+  }
   const dimension = collection.config.dimension ?? 0;
   for (const vector of vectors) {
     if (vector.length !== dimension) {
@@ -158,8 +172,11 @@ function validateSearchInputs(
       );
     }
   }
-  if (!Number.isInteger(k)) {
-    throw new VelesDBError(`k must be an integer, as core's is; got ${k}`, 'BAD_REQUEST');
+  if (!Number.isInteger(k) || k < 0) {
+    throw new VelesDBError(
+      `k must be a non-negative integer, as core's usize is; got ${k}`,
+      'BAD_REQUEST'
+    );
   }
   return k;
 }
@@ -328,6 +345,35 @@ const FUSION_PARAMS_READ: Readonly<Record<FusionStrategy, readonly FusionParamNa
 };
 
 /**
+ * The strategy names core accepts, as velesdb-wasm's `fuse_results` and
+ * velesdb-server's `build_fusion_strategy` read them: lowercased first, with
+ * these aliases.
+ */
+const FUSION_STRATEGY_NAMES: ReadonlyMap<string, FusionStrategy> = new Map([
+  ['rrf', 'rrf'],
+  ['average', 'average'],
+  ['avg', 'average'],
+  ['maximum', 'maximum'],
+  ['max', 'maximum'],
+  ['weighted', 'weighted'],
+  ['relative_score', 'relative_score'],
+  ['rsf', 'relative_score'],
+]);
+
+/** The canonical strategy `name` stands for, as core reads it; an unknown name is refused. */
+function canonicalStrategy(name: string): FusionStrategy {
+  const strategy = FUSION_STRATEGY_NAMES.get(name.toLowerCase());
+  if (strategy === undefined) {
+    throw new VelesDBError(
+      `Unknown fusion strategy '${name}': core accepts average (avg), maximum (max), rrf, ` +
+        'weighted and relative_score (rsf), in any case',
+      'BAD_REQUEST'
+    );
+  }
+  return strategy;
+}
+
+/**
  * How far from 1.0 a weighted triple may sum: core's `validate_weight_sum`
  * (`crates/velesdb-core/src/fusion/strategy.rs`), an f32 `0.001`. The
  * binding checks it again, but reports a failure as a bare string.
@@ -378,7 +424,7 @@ function wasmFusionArgs(
   weights: Float32Array | null;
 } {
   const read: FusionParams = {};
-  for (const name of FUSION_PARAMS_READ[strategy] ?? []) {
+  for (const name of FUSION_PARAMS_READ[strategy]) {
     read[name] = params?.[name];
   }
   requireWasmFieldsListed('multiQueryFusionParams', 'multiQuerySearch fusionParams', read);
@@ -408,11 +454,11 @@ export async function wasmMultiQuerySearch(
   if (!collection) {
     throw new NotFoundError(`Collection '${collectionName}'`);
   }
-  const k = validateSearchInputs(collection, vectors, options?.k ?? 10);
+  const k = validateSearchInputs(collection, vectors, options?.k ?? 10, MULTI_QUERY_VECTORS);
   requireWasmFilterSupport('multiQuerySearch', options?.filter);
-  const strategy = options?.fusion ?? 'rrf';
+  const strategy = canonicalStrategy(options?.fusion ?? 'rrf');
   const { rrfK, weights } = wasmFusionArgs(strategy, options?.fusionParams);
-  if (vectors.length === 0 || k <= 0) {
+  if (k <= 0) {
     return [];
   }
 
@@ -496,6 +542,13 @@ function parsePureNearQuery(queryString: string): PureNearQuery {
  */
 const DEFAULT_SELECT_LIMIT = 10;
 
+/**
+ * The most rows a statement returns: core's `MAX_LIMIT`, which caps `LIMIT`
+ * in `compute_fetch_limit`
+ * (`crates/velesdb-core/src/collection/search/query/query_pipeline.rs`).
+ */
+const MAX_LIMIT = 100_000;
+
 export async function wasmQuery(
   ctx: WasmContext,
   collectionName: string,
@@ -524,7 +577,11 @@ export async function wasmQuery(
   }
   const queryVector =
     paramsVector instanceof Float32Array ? paramsVector : new Float32Array(paramsVector);
-  const k = validateSearchInputs(collection, [queryVector], parsed.limit ?? DEFAULT_SELECT_LIMIT);
+  const k = validateSearchInputs(
+    collection,
+    [queryVector],
+    Math.min(parsed.limit ?? DEFAULT_SELECT_LIMIT, MAX_LIMIT)
+  );
   // `LIMIT 0` asks for no rows: there is nothing to ask the binding.
   const raw: Record<string, unknown>[] = k <= 0 ? [] : collection.store.query(queryVector, k);
 
