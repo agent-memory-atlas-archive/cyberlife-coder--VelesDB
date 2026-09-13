@@ -1,6 +1,6 @@
 # Choosing a graph-extraction model for velesdb-memory
 
-Last updated: 2026-09-03 · Applies to: velesdb-memory 0.14.2
+Last updated: 2026-09-13 · Applies to: velesdb-memory 0.14.2
 
 `velesdb-memory` turns a remembered fact into graph edges by asking a local
 model for JSON. Which model you point it at — `VELESDB_MEMORY_EXTRACTOR_MODEL`
@@ -118,9 +118,19 @@ for your own language.
 
 Latency. The campaign replays its first configuration last, and rejects itself
 if the two passes disagree by more than 15%; ours disagreed by 26% and then by
-55%, because background load on the machine moved between passes. Quality
-verdicts reproduced to the digit across both campaigns — greedy decoding makes
-them deterministic — so those are published and the timings are not.
+55%, because background load on the machine moved between passes. The quality
+counts did not move: run for run, the two campaigns — one machine, half an hour
+apart — produced the same numbers, so those are published and the timings are
+not.
+
+That is a repeat on one machine, not a reproduction, and it is all the evidence
+supports. A re-run on another machine, CPU-only with `num_ctx` 4096, produced
+different counts, and no result file of either campaign records the Ollama
+version, the model digests or the decode options it ran with, so nothing says
+which of them moved (#1949). Until a campaign that records them is run again,
+the tiers above are **unverified** beyond the machine that measured them. That
+re-run, with a declared `num_ctx`, is pending: it waits on #1956, and on the
+models being present on a machine that can run them.
 
 If you need timings, run the bench on your own quiet machine. Numbers from
 someone else's hardware would not transfer anyway: what Metal does on unified

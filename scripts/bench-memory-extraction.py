@@ -32,9 +32,12 @@ applied to the stored graph instead of the raw JSON, so the two levels cannot
 disagree about what a passage means.
 
 **A number is unreadable without its conditions.** Every scored run carries the
-cold-load time, the warm-up trace and the residency proof that surround it. A
-p95 with no idea whether it was taken cold, warm, or under the memory guard is
-not a measurement.
+cold-load time, the warm-up trace and the residency proof that surround it, and
+the server build, weights digest and decode options that produced it, and the
+host, commit and cases file it ran from. A p95 with no idea whether it was taken
+cold, warm, or under the memory guard is not a measurement, and a count that
+cannot name its weights cannot be replayed: the report prints such a run as
+unverified.
 
 Usage:
 
@@ -47,9 +50,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
+import datetime
+import hashlib
+import http.client
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import ssl
@@ -655,6 +663,10 @@ class OpenAiBackend:
             "max_tokens": self.cap,
         }
 
+    def runtime(self) -> dict:
+        """Same contract as `OllamaBackend.runtime`, answered without a request."""
+        return unasked_runtime([self.model], NOT_ASKED_REASON.format("openai"))
+
     def residency(self) -> dict:
         return http_json(f"{self.base_url}/v1/models/status", token=self.token, timeout=30)
 
@@ -841,6 +853,10 @@ class GitHubModelsBackend:
             "rate_limit_hits": self.rate_limit_hits,
         }
 
+    def runtime(self) -> dict:
+        """Same contract as `OllamaBackend.runtime`, answered without a request."""
+        return unasked_runtime([self.model], NOT_ASKED_REASON.format("github-models"))
+
     def residency(self) -> dict:
         return {"hosted": "github-models", "models": []}
 
@@ -895,6 +911,86 @@ EXTRACTION_SCHEMA = {
     },
     "required": ["relations", "attributes"],
 }
+
+
+def _ollama_answer(base_url: str, path: str) -> "tuple[dict, str | None]":
+    """One provenance question: the server's answer, or why there is none.
+
+    Never raises. A server that serves generation but not this endpoint is
+    still measured, and the gap goes on the record instead of killing the run.
+    `http.client.HTTPException` is caught beside `OSError` because urllib lets a
+    malformed reply (`BadStatusLine`, `IncompleteRead`) escape as neither. An
+    `HTTPError` holds its response open, so it is closed once its message is
+    taken rather than left for the collector to warn about.
+    """
+    try:
+        answer = http_json(f"{base_url}{path}", timeout=30)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        reason = f"no answer from GET {path}: {exc}"
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        return {}, reason
+    if not isinstance(answer, dict):
+        return {}, f"GET {path} answered {type(answer).__name__}, not an object"
+    return answer, None
+
+
+def _installed_digests(base_url: str, models: "list[str]", missing: dict) -> dict:
+    """Each model's digest as `/api/tags` lists it; null, with the reason, if not."""
+    answer, reason = _ollama_answer(base_url, "/api/tags")
+    installed = {entry.get("name"): entry.get("digest")
+                 for entry in answer.get("models") or [] if isinstance(entry, dict)}
+    digests = {}
+    for model in models:
+        # Ollama lists a model pulled without a tag under `<name>:latest`.
+        digests[model] = installed.get(model) or installed.get(f"{model}:latest")
+        if not digests[model]:
+            digests[model] = None
+            missing[model] = reason or "not listed by GET /api/tags"
+    return digests
+
+
+def ollama_runtime(base_url: str, models: "list[str]") -> dict:
+    """Which Ollama build, and which weights, a run measured, asked of the server.
+
+    A tag is not an identity: `qwen3:4b-instruct` pulled a month apart can be
+    two sets of weights, and the llama.cpp behind the server changes with its
+    version. Neither can be recovered from a result file afterwards, which is
+    how the 2026-08-16 campaign became impossible to replay or compare (#1949).
+
+    The digest comes from `/api/tags`, what is INSTALLED, and not from `/api/ps`:
+    this is asked before the cold load, when the model under test is usually
+    not resident yet. That is why `residency_before` held the measured model's
+    digest in 2 of that campaign's 26 screening files, and only by accident.
+
+    Whatever the server does not answer stays null, with the reason under
+    `missing`. Filled in from the CLI or from a default, it would read as a
+    record of something nobody observed.
+    """
+    missing: "dict[str, str]" = {}
+    answer, reason = _ollama_answer(base_url, "/api/version")
+    version = answer.get("version") or None
+    if version is None:
+        missing["ollama_version"] = reason or "GET /api/version named no version"
+    digests = _installed_digests(base_url, models, missing)
+    return {"ollama_version": version, "model_digests": digests, "missing": missing}
+
+
+# Why a screening file of a backend other than Ollama names no build or digest.
+NOT_ASKED_REASON = "the {} backend is not asked for a build or a digest"
+
+
+def unasked_runtime(models: "list[str | None]", reason: str) -> dict:
+    """The `runtime` record of a run whose server the bench does not ask: nulls, and why.
+
+    Only an Ollama the bench talks to itself is asked for a build and a digest.
+    Saying why the others are not keeps such a file distinguishable from one
+    written before the bench recorded a runtime at all, and the report prints
+    the reason beside `unverified`.
+    """
+    return {"ollama_version": None,
+            "model_digests": {model: None for model in models if model},
+            "missing": {"runtime": reason}}
 
 
 class OllamaBackend:
@@ -953,6 +1049,10 @@ class OllamaBackend:
             "completion_tokens": response.get("eval_count"),
             "truncated": response.get("done_reason") == "length",
         }
+
+    def runtime(self) -> dict:
+        """The server build and weights digest this run measured: see `ollama_runtime`."""
+        return ollama_runtime(self.base_url, [self.model])
 
     def residency(self) -> dict:
         # `/api/ps` is what is LOADED. `/api/tags` is what is INSTALLED, and
@@ -1106,7 +1206,7 @@ def load_cases(path: Path = CASES_FILE, split: "str | None" = None) -> "list[dic
 
     The split exists for prompt tuning, and only for that. Anything that edits
     the prompt to raise a score must be tuned on `train` and reported on
-    `holdout`, because a suite of nineteen scenarios is small enough that a loop
+    `holdout`, because a suite of a few dozen scenarios is small enough that a loop
     iterating against it learns the scenarios rather than the task — and a score
     that improves on the cases it was optimised against is not evidence of
     anything.
@@ -1124,6 +1224,193 @@ def load_cases(path: Path = CASES_FILE, split: "str | None" = None) -> "list[dic
             f"no case carries split={split!r} in {path}; the suite must declare "
             f"one per case before a split run means anything")
     return chosen
+
+
+# The key under which a result file records the digest of its suite's definitions.
+SUITE_DIGEST = "definitions_sha256"
+
+
+def _screened_case(case: dict) -> dict:
+    """What phase A reads of a case to score it (`screen_case`): see `suite_identity`."""
+    return {"id": case["id"], "family": case["family"], "lang": case["lang"],
+            "passages": [{"text": passage["text"], "checks": passage["checks"]}
+                         for passage in case["passages"]],
+            "cross_checks": case.get("cross_checks") or []}
+
+
+def _stored_case(case: dict) -> dict:
+    """What phase B reads of a case to score it (`endtoend`): see `suite_identity`."""
+    return {"id": case["id"],
+            "passages": [{"text": passage["text"], "checks": graph_checks_for(passage)}
+                         for passage in case["passages"]]}
+
+
+# What each phase's scorer reads of a case, keyed by the phase a result file names:
+# all its suite digest covers.
+SCORED_PART = {"screen": _screened_case, "endtoend": _stored_case}
+
+
+def suite_identity(cases: "list[dict]", phase: str) -> dict:
+    """Which scenarios a run scored, as its phase reads them: how many, and a digest.
+
+    #1955 grew the suite from 19 scenarios to 29, so two campaigns can differ in
+    what they ran and still print side by side. A count alone misses a suite
+    that swapped one case for another, and a digest of the ids alone misses a
+    case whose checks were edited under the same id, when counts graded against
+    different checks do not compare. So the digest covers what the phase's
+    scorer reads of each case, and nothing else:
+
+    - `screen` (`screen_case`): the case's `id`, which names its rows, its
+      `family` and `lang`, which bucket its counts (`mirror_gap` goes by
+      family), each passage's `text` and `checks`, and its `cross_checks`,
+      absent read as none;
+    - `endtoend` (`endtoend`, `score_stored_case`): the case's `id`, every
+      passage's `text`, since every passage is written, and of each passage's
+      `checks` those `graph_checks_for` keeps, the only ones asked of the graph.
+
+    A check counts whole: `score_passage` reads its `type`, `severity` and
+    `label`, and hands it to the function its type names, which reads its
+    operands. Nothing that scores reads `note`, and `split` only chooses which
+    cases run (`load_cases`), which the count and the digest already show. A
+    digest of each case as the file holds it called two suites that score alike
+    different whenever a note was reworded or a case changed sides (#1949).
+    Cases are sorted by id and serialised with sorted keys, so reordering the
+    file or a case's keys leaves the digest put.
+    """
+    scored = sorted((SCORED_PART[phase](case) for case in cases), key=lambda case: case["id"])
+    canonical = json.dumps(scored, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {"cases": len(scored), SUITE_DIGEST: digest}
+
+
+def utc_now() -> str:
+    """This instant as a result file records it: ISO 8601 in UTC, to the millisecond.
+
+    A report orders a configuration's runs by it (`merge_configurations`), so it
+    carries its offset: a local time without one orders nothing across a clock
+    change or a second machine.
+    """
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+
+
+# Why a result file names no cases file: a path outside the repository names a
+# directory on one machine, not a file anyone else can open.
+OUTSIDE_REPOSITORY = "not under the repository, and a local path is not recorded"
+
+
+def _answer(argv: "list[str]", command: str) -> "tuple[str | None, str | None]":
+    """What a command prints, or why there is nothing: `command` names it in the reason.
+
+    Its input is closed, so a binary that reads it instead of answering the flag
+    it is asked ends rather than waiting on the bench's terminal.
+    """
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"{command} did not run ({type(exc).__name__})"
+    if done.returncode != 0:
+        return None, f"{command} exited {done.returncode}"
+    return done.stdout.strip(), None
+
+
+def _git(*argv: str) -> "tuple[str | None, str | None]":
+    """One answer from git about the checkout this script runs from, or why there is none."""
+    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}")
+
+
+def _in_repository(path: Path) -> "str | None":
+    """`path` relative to the repository, or None when it lies outside it."""
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return None
+
+
+def _sha256_of(path: Path) -> "tuple[str | None, str | None]":
+    """The sha256 of a file's bytes, or why it could not be read."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest(), None
+    except OSError as exc:
+        return None, f"{path.name} could not be read ({type(exc).__name__})"
+
+
+def launched_binary(binary: Path) -> dict:
+    """The executable a run launches, identified as a commit cannot identify it.
+
+    The commit under `origin` is the bench's, and the binary may have been built
+    from another tree, or from this one before an edit (#1949). So the run
+    records what the executable says of itself, the first line it prints for
+    `--version`, and the sha256 of its bytes. It is found as the launch finds
+    it, on PATH when named bare, so the file hashed is the file run. Its path is
+    recorded relative to the repository; one outside it is null, as a cases
+    file outside it is. Whatever goes unanswered stays null, with the reason
+    under `missing`.
+    """
+    found = Path(shutil.which(str(binary)) or binary)
+    printed, version_gap = _answer([str(found), "--version"], f"{found.name} --version")
+    digest, digest_gap = _sha256_of(found)
+    record = {"path": _in_repository(found),
+              "version": printed.splitlines()[0] if printed else None,
+              "sha256": digest}
+    reasons = {"path": OUTSIDE_REPOSITORY,
+               "version": version_gap or f"{found.name} --version printed nothing",
+               "sha256": digest_gap}
+    record["missing"] = {key: reasons[key] for key, value in record.items() if value is None}
+    return record
+
+
+# Why a server reached over HTTP has no sha256 on record.
+SERVED_OVER_HTTP = "reached over HTTP: its executable is on the server's side, out of reach"
+
+
+def served_binary(url: str, runtime: dict) -> dict:
+    """The server a run reaches over HTTP: its URL, and the version it answered.
+
+    Screening launches no binary: it sends its requests to the model server at
+    `url`, whose executable the bench cannot hash. What that server says of its
+    build is what `runtime` asked it (`/api/version`, on Ollama), recorded here
+    rather than asked twice; a backend the bench does not ask has it null, with
+    `runtime`'s reason.
+    """
+    gaps = runtime.get("missing") or {}
+    version = runtime.get("ollama_version")
+    missing = {} if version else {"version": gaps.get("ollama_version") or gaps.get("runtime")}
+    return {"url": url, "version": version, "sha256": None,
+            "missing": {**missing, "sha256": SERVED_OVER_HTTP}}
+
+
+def run_origin(cases_file: Path, binary: "dict | None") -> dict:
+    """Where a run ran from: its host, the commit its bench ran from, its cases file, its binary.
+
+    Only the run can say it. The 2026-08-16 report printed all three under an
+    Environment section read when the report was rendered, so it named the
+    renderer's machine and checkout as the campaign's, and a cases file under a
+    local worktree path (#1949). A commit alone would claim that the code at it
+    ran, so `uncommitted_changes` says whether tracked files differed from it.
+    The cases file is recorded by its path in the repository; one outside it is
+    null, with the reason, since its local path names nothing anyone else can
+    open. Whatever else goes unanswered stays null, with the reason under
+    `missing`. A commit does not identify the binary a run drove, which may
+    have been built elsewhere: `binary` records it (`launched_binary`,
+    `served_binary`), and is None for a phase that drives none.
+    """
+    commit, commit_gap = _git("rev-parse", "HEAD")
+    status, status_gap = _git("status", "--porcelain", "--untracked-files=no")
+    origin = {
+        "machine": platform.machine() or None,
+        "os": platform.platform(terse=True) or None,
+        "commit": commit or None,
+        "uncommitted_changes": None if status is None else bool(status),
+        "cases_file": _in_repository(cases_file),
+    }
+    reasons = {"machine": "the platform names no machine",
+               "os": "the platform names no system",
+               "commit": commit_gap or "git rev-parse HEAD named no commit",
+               "uncommitted_changes": status_gap,
+               "cases_file": OUTSIDE_REPOSITORY}
+    missing = {key: reasons[key] for key, value in origin.items() if value is None}
+    return {**origin, "binary": binary, "missing": missing}
 
 
 def parse_payload(content: str) -> "dict | None":
@@ -1608,6 +1895,243 @@ def endtoend(daemon: DisposableDaemon, cases: "list[dict]") -> dict:
 # ------------------------------------------------------------------ report ----
 
 
+# What a screening result must carry to be replayed, or compared with a run that
+# disagrees with it (#1949): the server build, the weights, and the options the
+# requests carried. `constrained` is whether `format` was sent.
+PROVENANCE_OPTIONS = ("num_ctx", "num_predict", "temperature", "constrained")
+PROVENANCE_FIELDS = ("ollama_version", "digest") + PROVENANCE_OPTIONS
+
+# How much of a hash (weights, suite, commit) a table prints: enough to tell two
+# apart, short enough to read.
+SHORT_DIGEST = 12
+
+
+def missing_provenance(entry: dict) -> "list[str]":
+    """The provenance fields a result does not record, in `PROVENANCE_FIELDS` order.
+
+    Empty means the file names what produced it. Anything else is unverified:
+    not wrong, but not checkable, so the report says so instead of printing the
+    counts as settled. Options are checked for presence, not truth: `0` and
+    `False` are values a run sends.
+    """
+    runtime = entry.get("runtime") or {}
+    recorded = set(entry.get("settings") or {})
+    if runtime.get("ollama_version"):
+        recorded.add("ollama_version")
+    if (runtime.get("model_digests") or {}).get(entry.get("config")):
+        recorded.add("digest")
+    return [field for field in PROVENANCE_FIELDS if field not in recorded]
+
+
+def _provenance_cell(entry: dict) -> str:
+    """The build, weights and context window the row came from, or `unverified`.
+
+    A run that recorded why it could not say (`runtime.missing.runtime`) has the
+    reason printed beside the verdict: an end-to-end run is unverified because
+    the daemon chose its server, not because its file predates the record.
+    """
+    if missing_provenance(entry):
+        why = ((entry.get("runtime") or {}).get("missing") or {}).get("runtime")
+        return f"unverified ({why})" if why else "unverified"
+    runtime = entry["runtime"]
+    digest = runtime["model_digests"][entry["config"]]
+    return (f"ollama {runtime['ollama_version']} · {digest[:SHORT_DIGEST]} "
+            f"· ctx {entry['settings']['num_ctx']}")
+
+
+# How an origin cell marks a commit by whether tracked files had changed from it.
+CHANGES_MARK = {True: " (modified)", None: " (modified ?)"}
+
+
+def _binary_part(binary: dict) -> str:
+    """A run's binary in its origin cell: the version it reported, and its sha256 cut to
+    `SHORT_DIGEST`, or `unhashed` when the run had none to take (a server over HTTP)."""
+    digest = binary.get("sha256")
+    return f"{binary.get('version') or '?'} ({digest[:SHORT_DIGEST] if digest else 'unhashed'})"
+
+
+def _origin_cell(entry: dict) -> str:
+    """Where a row's run ran from, as its own file records it (`run_origin`), or `unrecorded`.
+
+    Host, commit, cases file and binary are the run's: read when a report is
+    rendered, they would name the renderer's machine and checkout. A commit is
+    marked `(modified)` when tracked files had changed from it, `(modified ?)`
+    when that went unanswered; any other unanswered item prints `?`, and its
+    reason stays in the file.
+    """
+    origin = entry.get("origin")
+    if not isinstance(origin, dict):
+        return "unrecorded"
+    commit = origin.get("commit")
+    mark = CHANGES_MARK.get(origin.get("uncommitted_changes"), "")
+    parts = [origin.get("machine") or "?", origin.get("os") or "?",
+             f"{commit[:SHORT_DIGEST]}{mark}" if commit else "?",
+             origin.get("cases_file") or "?"]
+    if isinstance(origin.get("binary"), dict):
+        parts.append(_binary_part(origin["binary"]))
+    return " · ".join(parts)
+
+
+def _provenance_verdict(configurations: dict) -> "list[str]":
+    """The campaign's verdict, above its table: a reader should not need the column."""
+    gaps = [missing_provenance(entry) for entry in configurations.values()]
+    unverified = list(filter(None, gaps))
+    if not gaps:
+        return []
+    if not unverified:
+        return ["Every row's result file records the Ollama build, the model digest and the "
+                "decode options it ran with.", ""]
+    fields = ", ".join(f"`{field}`" for field in PROVENANCE_FIELDS
+                       if any(field in gap for gap in unverified))
+    return [f"**Unverified: {len(unverified)} of {len(gaps)} rows** — their result "
+            f"files lack {fields}, so their counts can be neither replayed nor compared with "
+            "another run's.", ""]
+
+
+def _runs_of(entry: dict) -> "int | None":
+    """How many passes over the suite a row's counts add up, if its file says."""
+    runs = entry.get("runs")
+    return runs if isinstance(runs, int) and not isinstance(runs, bool) else None
+
+
+def _runs_cell(entry: dict) -> str:
+    runs = _runs_of(entry)
+    return "?" if runs is None else str(runs)
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _runs_group(runs: "int | None", count: int) -> str:
+    if runs is None:
+        return f"{count} with no recorded run count"
+    return f"{count} with {_plural(runs, 'run')}"
+
+
+def _runs_verdict(configurations: dict) -> "list[str]":
+    """A warning above a table whose rows add up different numbers of runs.
+
+    A count is a sum over its configuration's runs, not a per-run figure: the
+    same model screened twice shows twice the errors of one screened once. The
+    2026-08-16 campaign screened its Ollama models twice and its MLX ones once,
+    and printed both sums side by side (#1949). The sums stay as the result
+    files hold them, so a cell can be checked against its file, and a per-run
+    mean would print half an error wherever two runs disagreed.
+    """
+    groups = collections.Counter(_runs_of(entry) for entry in configurations.values())
+    if len(groups) < 2:
+        return []
+    order = sorted(groups, key=lambda runs: (runs is None, runs or 0))
+    parts = ", ".join(_runs_group(runs, groups[runs]) for runs in order)
+    return [f"**Rows sum different numbers of runs** — {parts}. Each count adds up the "
+            "errors of all its runs: compare two rows per run, not as printed.", ""]
+
+
+def _scored_ids(entry: dict) -> "set[str] | None":
+    """The case ids a file's scored rows name, each row carrying its case's id."""
+    rows = entry.get("cases")
+    if not isinstance(rows, list) or not rows:
+        return None
+    if not all(isinstance(row, dict) and isinstance(row.get("id"), str) for row in rows):
+        return None
+    return {row["id"] for row in rows}
+
+
+def _suite_of(entry: dict) -> "tuple[int, bool, str] | None":
+    """The suite a row ran, as `(cases, checks known, digest)`.
+
+    As its file records it, the digest covers each case's definition. Files
+    written before `suite` was recorded, the 2026-08-16 campaign's among them,
+    still hold the id of every case they scored, but not what those cases
+    checked: their suite is those ids, digested apart and marked so, and never
+    equal to a recorded one, since two files naming the same ids may have been
+    graded against different checks.
+    """
+    suite = entry.get("suite")
+    if (isinstance(suite, dict) and isinstance(suite.get("cases"), int)
+            and isinstance(suite.get(SUITE_DIGEST), str)):
+        return suite["cases"], True, suite[SUITE_DIGEST]
+    ids = _scored_ids(entry)
+    if ids is None:
+        return None
+    return len(ids), False, hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()
+
+
+# The mark of a row that did not run the suite most rows of its table ran.
+SUITE_DIFFERS = "(differs)"
+_NO_COMMON_SUITE = object()
+
+
+def _common_suite(suites: "list[tuple[int, bool, str] | None]") -> object:
+    """The suite most rows ran, or a sentinel no row equals when none leads."""
+    ranked = collections.Counter(suites).most_common(2)
+    if not ranked or (len(ranked) == 2 and ranked[0][1] == ranked[1][1]):
+        return _NO_COMMON_SUITE
+    return ranked[0][0]
+
+
+def _suite_text(suite: "tuple[int, bool, str] | None") -> str:
+    """A suite's cell: its cases, or only their ids when that is all its file names."""
+    if suite is None:
+        return "?"
+    cases, checks, digest = suite
+    return f"{_plural(cases, 'case' if checks else 'case id')} · {digest[:SHORT_DIGEST]}"
+
+
+def _suite_cells(entries: dict) -> "dict[str, str]":
+    """Each row's suite, marked when it is not the one most rows of its table ran.
+
+    With no suite ahead, as with two rows on two suites, no row ran the
+    table's suite and every row is marked.
+    """
+    suites = {name: _suite_of(entry) for name, entry in entries.items()}
+    common = _common_suite(list(suites.values()))
+    return {name: _suite_text(suite) + ("" if suite == common else f" {SUITE_DIFFERS}")
+            for name, suite in suites.items()}
+
+
+def _suite_group(suite: "tuple[int, bool, str] | None", count: int) -> str:
+    if suite is None:
+        return f"{count} with no recorded suite"
+    return f"{count} with {_suite_text(suite)}"
+
+
+def _suite_verdict(entries: dict) -> "list[str]":
+    """A warning above a table whose rows ran different suites.
+
+    A count adds up the cases of its own suite. #1955 grew the suite from 19
+    scenarios to 29, and a phase can run a subset: the 2026-08-16 end-to-end
+    rows covered 1 case and 4 under one heading, and nothing said so (#1949).
+    """
+    groups = collections.Counter(_suite_of(entry) for entry in entries.values())
+    if len(groups) < 2:
+        return []
+    order = sorted(groups, key=lambda suite: (suite is None, suite or (0, False, "")))
+    parts = ", ".join(_suite_group(suite, groups[suite]) for suite in order)
+    return [f"**Rows ran different suites** — {parts}. Each count adds up its own suite's "
+            "cases, so rows on different suites do not compare; a row is marked "
+            f"`{SUITE_DIFFERS}` unless it ran the suite most rows ran.", ""]
+
+
+def _checks_verdict(entries: dict) -> "list[str]":
+    """A warning above a table some of whose rows name case ids and no checks.
+
+    A file that records no suite still names the cases it scored, and the report
+    digests those ids; what the cases checked, it cannot say. Rows that agree on
+    the ids may have been graded against different checks, so the table says
+    their digest is of ids alone rather than let it pass for a suite's.
+    """
+    suites = [_suite_of(entry) for entry in entries.values()]
+    ids_only = sum(1 for suite in suites if suite is not None and not suite[1])
+    if not ids_only:
+        return []
+    return [f"**Checks unrecorded: {ids_only} of {len(suites)} rows** — their result files "
+            "name the cases they scored, not what those cases checked, so their suite cell "
+            "digests the case ids alone (`case ids`): rows that agree on it may still have "
+            "been graded against different checks.", ""]
+
+
 def _quality_cell(totals: dict, key: str) -> str:
     """A quality count, or a refusal to state one that cannot mean anything.
 
@@ -1629,12 +2153,14 @@ def _quality_cell(totals: dict, key: str) -> str:
     return str(count)
 
 
-def _report_row(name: str, entry: dict) -> str:
+def _report_row(name: str, entry: dict, suite: str) -> str:
     totals = entry.get("totals", {})
     cold = entry.get("cold", {}).get("cold_total_seconds")
     warm = entry.get("warmup", {})
     return " | ".join([
         f"| `{name}`",
+        _runs_cell(entry),
+        suite,
         str(totals.get("fatal", 0)),
         _quality_cell(totals, "major"),
         _quality_cell(totals, "minor"),
@@ -1643,7 +2169,9 @@ def _report_row(name: str, entry: dict) -> str:
         f"{totals.get('p50_seconds', float('nan')):.1f}s",
         f"{totals.get('p95_seconds', float('nan')):.1f}s",
         "n/a" if cold is None else f"{cold:.1f}s{_cache_mark(entry)}",
-        f"{warm.get('rounds', '?')}{'' if warm.get('stabilised', True) else ' (unstable)'} |",
+        f"{warm.get('rounds', '?')}{'' if warm.get('stabilised', True) else ' (unstable)'}",
+        _provenance_cell(entry),
+        f"{_origin_cell(entry)} |",
     ])
 
 
@@ -1662,26 +2190,28 @@ def render_report(results: dict) -> str:
 
     Generated, never typed: the class of error where a published table and the
     measurement behind it drift apart cannot exist if the table is derived.
+    Every cell comes from a run's own file. Nothing is read when the report is
+    rendered: the 2026-08-16 report's Environment section was, and printed the
+    renderer's machine, checkout and a local cases path as the campaign's
+    (#1949). Where each run ran from is in its row's `origin` cell.
     """
     lines = [
         f"# velesdb-memory extraction bench — {results.get('campaign', 'undated')}",
         "",
         "Generated by `scripts/bench-memory-extraction.py report`. Do not edit:",
         "re-run the generator instead.",
-        "",
-        "## Environment",
-        "",
-    ]
-    lines += [f"- **{key}**: {value}" for key, value in sorted(results.get("environment", {}).items())]
-    lines += [
-        "",
-        "## Configurations",
-        "",
-        "| configuration | fatal | major | minor | parse | cut | p50 | p95 | cold | warm-up |",
-        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     configurations = results.get("configurations", {})
-    lines += [_report_row(name, entry) for name, entry in configurations.items()]
+    lines += ["", "## Configurations", ""]
+    lines += (_provenance_verdict(configurations) + _runs_verdict(configurations)
+              + _suite_verdict(configurations) + _checks_verdict(configurations))
+    lines += [
+        "| configuration | runs | suite | fatal | major | minor | parse | cut | p50 | p95 "
+        "| cold | warm-up | provenance | origin |",
+        "|" + "---|" * 14,
+    ]
+    suites = _suite_cells(configurations)
+    lines += [_report_row(name, entry, suites[name]) for name, entry in configurations.items()]
     lines += _language_section(configurations)
     lines += _end_to_end_section(results.get("end_to_end", {}))
     return "\n".join(lines) + "\n"
@@ -1692,7 +2222,12 @@ def _end_to_end_section(runs: dict) -> "list[str]":
 
     Screening reads the model's reply; this reads the graph the daemon kept
     afterwards. A drain that never completed is reported as `not drained`
-    rather than as its timeout, because a give-up is not a duration.
+    rather than as its timeout, because a give-up is not a duration. Every row
+    reads `unverified`: the daemon finds its own Ollama, so no file of this
+    phase can name the build or the weights that served it. Its counts add up
+    the cases each row stored, and rows need not store the same ones: the
+    2026-08-16 `outline` run covered 1 case and `qwen3:14b` 4, so each row
+    prints its suite.
     """
     if not runs:
         return []
@@ -1700,9 +2235,13 @@ def _end_to_end_section(runs: dict) -> "list[str]":
         "",
         "## End-to-end (what the daemon actually stored)",
         "",
-        "| configuration | fatal | major | drain | burst p95 | enrichment dropped |",
-        "|---|---|---|---|---|---|",
+        *_suite_verdict(runs),
+        *_checks_verdict(runs),
+        "| configuration | suite | fatal | major | drain | burst p95 | enrichment dropped "
+        "| provenance | origin |",
+        "|" + "---|" * 9,
     ]
+    suites = _suite_cells(runs)
     for name, entry in runs.items():
         totals = entry.get("totals", {})
         burst = entry.get("burst", {})
@@ -1712,9 +2251,10 @@ def _end_to_end_section(runs: dict) -> "list[str]":
         drain_cell = f"{drain:.1f}s" if drained and drain is not None else "not drained"
         p95 = burst.get("p95_seconds")
         lines.append(
-            f"| `{name}` | {totals.get('fatal', 0)} | {totals.get('major', 0)} | "
+            f"| `{name}` | {suites[name]} | {totals.get('fatal', 0)} | {totals.get('major', 0)} | "
             f"{drain_cell} | {f'{p95 * 1000:.0f}ms' if p95 is not None else '-'} | "
-            f"{burst.get('autograph_dropped', '-')} |")
+            f"{burst.get('autograph_dropped', '-')} | {_provenance_cell(entry)} | "
+            f"{_origin_cell(entry)} |")
     return lines
 
 
@@ -1734,15 +2274,17 @@ def _language_section(configurations: dict) -> "list[str]":
         "on that alone: `works at` and `travaille chez` are two graph predicates",
         "for one relation, and the graph fragments accordingly.",
         "",
-        "| configuration | fatal fr | major fr | fatal en | major en | gap | weaker |",
-        "|---|---|---|---|---|---|---|",
+        "| configuration | runs | suite | fatal fr | major fr | fatal en | major en | gap "
+        "| weaker |",
+        "|" + "---|" * 9,
     ]
-    for name, entry in configurations.items():
-        gap = entry.get("mirror_gap")
-        if not gap:
-            continue
+    mirrored = {name: entry for name, entry in configurations.items() if entry.get("mirror_gap")}
+    suites = _suite_cells(mirrored)
+    for name, entry in mirrored.items():
+        gap = entry["mirror_gap"]
         lines.append(
-            f"| `{name}` | {gap['fr']['fatal']} | {gap['fr']['major']} | "
+            f"| `{name}` | {_runs_cell(entry)} | {suites[name]} | "
+            f"{gap['fr']['fatal']} | {gap['fr']['major']} | "
             f"{gap['en']['fatal']} | {gap['en']['major']} | {gap['gap']} | "
             f"{gap['weaker'] or 'balanced'} |"
         )
@@ -1760,62 +2302,134 @@ def cmd_from_log(args: argparse.Namespace) -> int:
     return 0
 
 
-def _command_output(*argv: str) -> str:
-    """One command's first line, or `unavailable` — never a raised campaign."""
+def _started_at(entry: dict) -> "datetime.datetime | None":
+    """When a run started, if its file says so in a form that orders: ISO 8601 with an offset."""
+    stamp = entry.get("started_at")
+    if not isinstance(stamp, str):
+        return None
     try:
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return "unavailable"
-    line = (out.stdout or out.stderr or "").strip().splitlines()
-    return line[0] if line else "unavailable"
+        started = datetime.datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return started if started.tzinfo is not None else None
 
 
-def collect_environment(binary: "Path | None" = None) -> dict:
-    """The measuring conditions, read from the machine rather than typed.
+def _run_order(paths: "list[Path]", entries: "dict[Path, dict]") -> "tuple[list[Path], bool]":
+    """One configuration's files in the order they ran, and whether their starts decided it.
 
-    The daemon binary's mtime is in here because it is what distinguishes the
-    campaign's before from its after: the same source tree served by a stale
-    binary measures the previous release.
+    A start orders a file only against another start. One file of the
+    configuration without one, and no 2026-08-16 file has one, leaves the order
+    to the file names: the run order only if the campaign numbered them by it.
     """
-    environment = {
-        "machine": _command_output("uname", "-m"),
-        "os": _command_output("sw_vers", "-productVersion"),
-        "rustc": _command_output("rustc", "--version"),
-        "ollama": _command_output("ollama", "--version"),
-        "develop_commit": _command_output("git", "rev-parse", "HEAD"),
-        "cases_file": str(CASES_FILE),
-        "num_ctx": DEFAULT_NUM_CTX,
-    }
-    if binary is not None and binary.exists():
-        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(binary.stat().st_mtime))
-        environment["daemon_binary"] = str(binary)
-        environment["daemon_binary_mtime"] = stamp
-    return environment
+    starts = [_started_at(entries[path]) for path in paths]
+    if any(start is None for start in starts):
+        return sorted(paths), False
+    return [path for _start, path in sorted(zip(starts, paths))], True
 
 
-def merge_configurations(directory: Path, phase: str = "screen") -> dict:
-    """Fold every per-configuration result in a tree into one campaign map.
-
-    `screen` writes one file per configuration and `report` reads one campaign,
-    with nothing in between: the consolidation was being done by hand, which is
-    exactly the step where a published table drifts from its measurement.
-    Sub-directories are kept and prefixed, so a declared variant stays labelled
-    as one instead of overwriting its own reference row.
-    """
-    configurations: "dict[str, dict]" = {}
+def _read_phase(directory: Path, phase: str) -> "dict[Path, dict]":
+    """Every result file of one phase in a tree, in path order."""
+    entries = {}
     for path in sorted(directory.rglob("*.json")):
         entry = json.loads(path.read_text(encoding="utf-8"))
         # Both phases carry `totals`, with different members: screening has
         # parse_rate and percentiles, end-to-end has a drain time. Folding them
         # into one table would print a screening row for a run that never
         # screened anything, so the phase decides rather than the shape.
-        if entry.get("phase") != phase:
-            continue
-        name = entry.get("config") or path.stem
-        variant = path.parent.name
-        if variant != directory.name:
-            name = f"{name} [{variant}]"
-        configurations[name] = entry
+        if entry.get("phase") == phase:
+            entries[path] = entry
+    return entries
+
+
+def _runs_by_configuration(entries: "dict[Path, dict]") -> "dict[tuple[Path, str], list[Path]]":
+    """The files of each configuration in each directory, in path order."""
+    runs: "dict[tuple[Path, str], list[Path]]" = collections.defaultdict(list)
+    for path, entry in entries.items():
+        runs[(path.parent, entry.get("config") or path.stem)].append(path)
+    return runs
+
+
+def _row_label(directory: Path, path: Path, config: str, earlier: int, timed: bool) -> str:
+    """A row's label: its configuration, its variant directory, and whether it replays one.
+
+    `earlier` counts the runs of the same configuration, in the same directory,
+    ordered before this one. A later one is a second pass over that
+    configuration, as the order control's `99-qwen3-4b-instruct.json` is of
+    `01-…`, and its label says so and names its file. Unless their recorded
+    starts ordered them (`timed`), only their file names did, and the label
+    says that too: a name does not prove which run started later.
+    """
+    variant = path.parent.name
+    label = config if variant == directory.name else f"{config} [{variant}]"
+    if not earlier:
+        return label
+    basis = "replay" if timed else "replay by file-name order"
+    return f"{label} ({basis}: {path.name})"
+
+
+# A local absolute path, whole: `/` or `~/`, then a name, with no space anywhere.
+LOCAL_PATH = re.compile(r"~?/\S+")
+
+
+def without_local_paths(value: object) -> object:
+    """`value` with every string that is a local absolute path cut to its last component.
+
+    A result file keeps what its run saw, local paths included: it is the
+    evidence. The campaign file folded from those files, and the report
+    rendered from it, are read on other machines, where
+    `/Users/<someone>/…/models/ornith-35b` names a home directory and nothing
+    anyone can open, while `ornith-35b` names the weights. The 2026-08-16 MLX
+    files name theirs that way, in `residency_before` and in each `storage`
+    record (#1949). A digest, a revision or a repository id is no local path,
+    and stays whole.
+    """
+    if isinstance(value, dict):
+        return {key: without_local_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [without_local_paths(item) for item in value]
+    if isinstance(value, str) and LOCAL_PATH.fullmatch(value):
+        return Path(value).name
+    return value
+
+
+def merge_configurations(directory: Path, phase: str = "screen") -> dict:
+    """Fold every result file in a tree into one campaign map, one row per file.
+
+    `screen` writes one file per configuration and `report` reads one campaign,
+    with nothing in between: the consolidation was being done by hand, which is
+    exactly the step where a published table drifts from its measurement.
+    Sub-directories are kept and prefixed, so a declared variant stays labelled
+    as one instead of overwriting its own reference row.
+
+    One directory can hold one configuration twice: the 2026-08-16 order control
+    screened its first model again last, as `99-qwen3-4b-instruct.json` beside
+    `01-…`. Keyed by configuration alone, the replay replaced the reference, and
+    the published row printed the replay's timings under the reference's name
+    (#1949), and which of the two was the replay rested on their names alone.
+    A configuration's runs are now ordered by the start each file records
+    (`started_at`): the first keeps the plain label, each later one is labelled
+    a replay and names its file, and they fill that configuration's rows, which
+    keep their places in path order. Files a start cannot order, the 2026-08-16
+    campaign's among them, fall back to their names, and their replay labels
+    say so. One row per model is not an invariant to enforce: both passes are
+    measurements, and the gap between them is what an order control exists to
+    show. A label two files would still share is refused, never overwritten: a
+    report does not drop a result file. A row is its file's record with every
+    local path cut to its last component (`without_local_paths`).
+    """
+    entries = _read_phase(directory, phase)
+    rows: "dict[Path, tuple[str, Path]]" = {}
+    for (_parent, config), places in _runs_by_configuration(entries).items():
+        ordered, timed = _run_order(places, entries)
+        for earlier, (place, path) in enumerate(zip(places, ordered)):
+            rows[place] = (_row_label(directory, path, config, earlier, timed), path)
+    configurations: "dict[str, dict]" = {}
+    for place in entries:
+        name, path = rows[place]
+        if name in configurations:
+            raise SystemExit(f"{path}: its row label {name!r} is already another file's, "
+                             "and a report must not drop a result file")
+        configurations[name] = without_local_paths(entries[path])
     return configurations
 
 
@@ -1828,8 +2442,6 @@ def cmd_report(args: argparse.Namespace) -> int:
         directory = Path(args.from_dir)
         results = {
             "campaign": args.campaign or directory.name,
-            "environment": collect_environment(
-                Path(args.binary) if getattr(args, "binary", None) else None),
             "configurations": merge_configurations(directory, "screen"),
             "end_to_end": merge_configurations(directory, "endtoend"),
         }
@@ -1896,6 +2508,8 @@ def preflight(residency: dict, model: str) -> dict:
 
 
 def cmd_screen(args: argparse.Namespace) -> int:
+    # Taken first: a replay is told from its reference by which started first.
+    started = utc_now()
     cap = getattr(args, "generation_cap", None) or read_generation_cap()
     template = read_graph_prompt_template()
     backend = build_backend(args, cap)
@@ -1903,10 +2517,15 @@ def cmd_screen(args: argparse.Namespace) -> int:
     prompt = build_graph_prompt(cases[0]["passages"][0]["text"], template)
     residency = backend.residency()
     checked = preflight(residency, args.config)
+    runtime = backend.runtime()
     outcome = {
         "config": args.config,
+        "started_at": started,
+        "origin": run_origin(Path(args.cases), served_binary(backend.base_url, runtime)),
         "generation_cap": cap,
         "settings": backend.settings(),
+        "runtime": runtime,
+        "suite": suite_identity(cases, "screen"),
         "residency_before": residency,
         "storage": checked["backing"],
         "estimated_size": checked["estimated_size"],
@@ -1962,14 +2581,38 @@ def endtoend_env(args: argparse.Namespace) -> "dict[str, str]":
     return env
 
 
+# Why an end-to-end file names no Ollama build and no digest.
+DAEMON_ENDPOINT_REASON = "the daemon resolves its own endpoint"
+
+
+def endtoend_runtime(args: argparse.Namespace) -> dict:
+    """What phase B can say about the Ollama it measured: nothing, and why.
+
+    The disposable daemon talks to Ollama itself, and which server answers is
+    its own resolution: its embedder's endpoint comes from the environment it
+    inherits (`VELESDB_MEMORY_EMBEDDER_URL`, the legacy `VELESDB_MEMORY_OLLAMA_URL`)
+    or from its default, and the bench names neither. Asking the URL the bench
+    believes the daemon uses would write a guess down as an observation, and a
+    build or digest read from the wrong server would print as verified.
+    """
+    return unasked_runtime([args.config, args.embedder], DAEMON_ENDPOINT_REASON)
+
+
 def cmd_endtoend(args: argparse.Namespace) -> int:
+    started = utc_now()
+    origin = run_origin(Path(args.cases), launched_binary(Path(args.binary)))
+    cases = load_cases(Path(args.cases), getattr(args, "split", None))
     daemon = DisposableDaemon(Path(args.binary), args.port, endtoend_env(args))
     daemon.start()
     try:
-        outcome = endtoend(daemon, load_cases(Path(args.cases), getattr(args, "split", None)))
+        outcome = endtoend(daemon, cases)
     finally:
         daemon.stop()
     outcome["config"] = args.config
+    outcome["started_at"] = started
+    outcome["origin"] = origin
+    outcome["runtime"] = endtoend_runtime(args)
+    outcome["suite"] = suite_identity(cases, "endtoend")
     totals = outcome["totals"]
     print(f"## {args.config}: fatal={totals['fatal']} major={totals['major']} "
           f"drain_max={totals['max_drain_seconds']:.1f}s "
@@ -2086,7 +2729,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="consolidate every per-configuration result under this "
                              "tree instead; sub-directories label declared variants")
     report.add_argument("--campaign", help="campaign label; defaults to the directory name")
-    report.add_argument("--binary", help="daemon binary whose mtime dates the measurement")
     report.add_argument("--merged-out", dest="merged_out",
                         help="write the consolidated campaign JSON, the report's source")
     report.add_argument("--out")
