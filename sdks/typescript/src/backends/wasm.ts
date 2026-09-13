@@ -43,9 +43,9 @@ import type { FilterInput } from '../filter';
 import type { CapabilityMap } from '../capabilities';
 import { WASM_CAPABILITIES } from '../capabilities';
 import { ConnectionError, NotFoundError, VelesDBError } from '../types';
-import type { WasmModule, CollectionData } from './wasm-types';
+import type { WasmModule, CollectionData, WasmVectorStore } from './wasm-types';
 import { requireWasmFieldsListed, requireWasmValueListed } from './wasm-capability-guards';
-import { indexSparse, newSparseIds, retireSparse } from './wasm-sparse';
+import { freeSparse, indexSparse, newSparseIds, retireSparse } from './wasm-sparse';
 
 // Internal helpers
 import {
@@ -142,6 +142,9 @@ export class WasmBackend implements IVelesDBBackend {
   // close() during an in-flight init() would let the racy completion of
   // runInit() flip _initialized back to true after close() set it false.
   private _initGen = 0;
+  // Creates the metadata-only store that holds a collection's sparse index.
+  private readonly newSparseStore = (): WasmVectorStore =>
+    this.wasmModule!.VectorStore.new_metadata_only();
 
   // ========================================================================
   // Lifecycle
@@ -198,7 +201,10 @@ export class WasmBackend implements IVelesDBBackend {
   isInitialized(): boolean { return this._initialized; }
 
   async close(): Promise<void> {
-    for (const [, data] of this.collections) { data.store.free(); }
+    for (const [, data] of this.collections) {
+      data.store.free();
+      freeSparse(data.sparseIds);
+    }
     this.collections.clear();
     this._initialized = false;
     this._initInFlight = null;
@@ -252,6 +258,7 @@ export class WasmBackend implements IVelesDBBackend {
     const collection = this.collections.get(name);
     if (!collection) { throw new NotFoundError(`Collection '${name}'`); }
     collection.store.free();
+    freeSparse(collection.sparseIds);
     this.collections.delete(name);
   }
 
@@ -297,7 +304,7 @@ export class WasmBackend implements IVelesDBBackend {
       collection.store.insert(BigInt(id), vector);
     }
     if (doc.sparseVector) {
-      indexSparse(collection.store, collection.sparseIds, id, doc.sparseVector);
+      indexSparse(collection.sparseIds, this.newSparseStore, id, doc.sparseVector);
     }
 
     if (doc.payload) {
@@ -339,7 +346,7 @@ export class WasmBackend implements IVelesDBBackend {
         collection.payloads.set(canonicalPayloadKey(doc.id), doc.payload);
       }
       if (doc.sparseVector) {
-        indexSparse(collection.store, collection.sparseIds, toNumericId(doc.id), doc.sparseVector);
+        indexSparse(collection.sparseIds, this.newSparseStore, toNumericId(doc.id), doc.sparseVector);
       }
     }
   }
@@ -354,7 +361,7 @@ export class WasmBackend implements IVelesDBBackend {
     const removed = collection.store.remove(BigInt(numericId));
     if (removed) {
       collection.payloads.delete(canonicalPayloadKey(id));
-      retireSparse(collection.sparseIds, numericId);
+      retireSparse(collection.sparseIds, this.newSparseStore, numericId);
     }
     return removed;
   }
@@ -369,7 +376,7 @@ export class WasmBackend implements IVelesDBBackend {
       const removed = collection.store.remove(BigInt(numericId));
       if (removed) {
         collection.payloads.delete(canonicalPayloadKey(id));
-        retireSparse(collection.sparseIds, numericId);
+        retireSparse(collection.sparseIds, this.newSparseStore, numericId);
         count += 1;
       }
     }

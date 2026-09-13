@@ -54,6 +54,10 @@ class MockVectorStore {
     store.storage_mode = mode;
     return store;
   }
+
+  static new_metadata_only(): MockVectorStore {
+    return new MockVectorStore(0, 'cosine');
+  }
 }
 
 const mockWasmModule = {
@@ -423,6 +427,19 @@ function expectRefusal(outcome: unknown, capability: string): void {
   expect(err.message).toContain(capability);
 }
 
+function sparseIdsOf(
+  backend: WasmBackend,
+  collection: string
+): { dead: number; byId: Map<bigint, unknown>; vectors: Map<bigint, unknown> } {
+  const internals = backend as unknown as {
+    collections: Map<
+      string,
+      { sparseIds: { dead: number; byId: Map<bigint, unknown>; vectors: Map<bigint, unknown> } }
+    >;
+  };
+  return internals.collections.get(collection)!.sparseIds;
+}
+
 function storeOf(backend: WasmBackend, collection: string): MockVectorStore {
   const internals = backend as unknown as {
     collections: Map<string, { store: MockVectorStore }>;
@@ -486,6 +503,54 @@ describe('WasmBackend — upsert indexes sparse vectors; sparse search sees live
     await backend.upsert('s', { id: 1, vector: [], payload: { v: 2 } });
 
     expect(await hitIds({ 7: 1 })).toEqual(['1']);
+  });
+
+  it('caps a sparse search at k when retired ids rank below live ones', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    await backend.upsert('s', { id: 2, vector: [], sparseVector: { 7: 3 } });
+    await backend.upsert('s', { id: 3, vector: [], sparseVector: { 7: 2 } });
+    await backend.delete('s', 1);
+
+    expect(await hitIds({ 7: 1 }, 1)).toEqual(['2']);
+  });
+
+  it('keeps retired sparse ids no more numerous than live ones', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    await backend.upsert('s', { id: 2, vector: [], sparseVector: { 8: 1 } });
+    for (let i = 0; i < 50; i += 1) {
+      await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1, [100 + i]: 1 } });
+      const ids = sparseIdsOf(backend, 's');
+      expect(ids.dead).toBeLessThanOrEqual(ids.byId.size);
+      expect(ids.vectors.size).toBe(ids.byId.size);
+    }
+  });
+
+  it("rebuilds without the retired vectors, so none can take a live point's place", async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 5 } });
+    await backend.upsert('s', { id: 2, vector: [], sparseVector: { 7: 1 } });
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 8: 1 } });
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 9: 1 } });
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 10: 1 } });
+
+    expect(sparseIdsOf(backend, 's').dead).toBe(0);
+    expect(await hitIds({ 7: 1 }, 1)).toEqual(['2']);
+  });
+
+  it('never returns a replaced or deleted point, before or after the sparse index is rebuilt', async () => {
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 7: 1 } });
+    await backend.upsert('s', { id: 2, vector: [], sparseVector: { 7: 0.5 } });
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 9: 1 } });
+    expect(await hitIds({ 7: 1 })).toEqual(['2']);
+    expect(await hitIds({ 9: 1 })).toEqual(['1']);
+
+    await backend.upsert('s', { id: 1, vector: [], sparseVector: { 11: 1 } });
+    await backend.delete('s', 2);
+
+    expect(sparseIdsOf(backend, 's').dead).toBe(0);
+    expect(await hitIds({ 7: 1 })).toEqual([]);
+    expect(await hitIds({ 9: 1 })).toEqual([]);
+    const [hit] = await backend.search('s', [], { sparseVector: { 11: 2 } });
+    expect(hit).toMatchObject({ id: '1', score: 2 });
   });
 
   it('still returns k live points when dead postings outrank them', async () => {

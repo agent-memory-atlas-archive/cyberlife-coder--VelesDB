@@ -60,6 +60,10 @@ class MockVectorStore {
     store.storage_mode = mode;
     return store;
   }
+
+  static new_metadata_only(): MockVectorStore {
+    return new MockVectorStore(0, 'cosine');
+  }
 }
 
 const mockWasmModule = {

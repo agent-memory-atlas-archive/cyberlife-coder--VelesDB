@@ -21,9 +21,14 @@ import type {
  * SDK computed `multi_query_search`'s `weights` and never passed them
  * (#2095). Declared with this list, every binding method the SDK calls must
  * receive every argument (`null` for "none"), so a new or unpassed argument
- * fails the typecheck.
+ * fails the typecheck. `memory.ts` declares `MemoryService` the same way.
  */
-type AllParams<F> = F extends (...args: infer P) => unknown ? Required<P> : never;
+export type AllParams<F> = F extends (...args: infer P) => unknown ? Required<P> : never;
+
+/** {@link AllParams} of a velesdb-wasm class's constructor. */
+export type AllConstructorParams<C> = C extends abstract new (...args: infer P) => unknown
+  ? Required<P>
+  : never;
 
 /** {@link AllParams} of a `VectorStore` method. */
 type StoreParams<M extends keyof BindingVectorStore> = AllParams<BindingVectorStore[M]>;
@@ -143,6 +148,11 @@ export interface WasmVectorStore {
 export interface WasmVectorStoreConstructor {
   /** Create a store holding its vectors in `mode` (`full`, `sq8`, `binary`, …). */
   new_with_mode(...args: AllParams<typeof BindingVectorStore.new_with_mode>): WasmVectorStore;
+
+  /** Create a store with no vectors: it holds a collection's sparse index (`wasm-sparse.ts`). */
+  new_metadata_only(
+    ...args: AllParams<typeof BindingVectorStore.new_metadata_only>
+  ): WasmVectorStore;
 }
 
 /** Typed interface for the @wiscale/velesdb-wasm module. */
@@ -170,13 +180,18 @@ export interface WasmModule {
 /**
  * Sparse bookkeeping for one collection: each sparse upsert is indexed under
  * a fresh sparse id, and a replaced or deleted point's id is retired, since
- * the binding cannot remove postings (`backends/wasm-sparse.ts`).
+ * the binding cannot remove postings; the index is rebuilt once retired ids
+ * outnumber live ones (`backends/wasm-sparse.ts`).
  */
 export interface SparseIds {
+  /** The metadata-only store holding the sparse index; `null` until the first sparse upsert. */
+  store: WasmVectorStore | null;
   /** Live sparse id of each point that has a sparse vector, by numeric point id. */
   byPoint: Map<number, bigint>;
   /** Point behind each live sparse id. */
   byId: Map<bigint, number>;
+  /** Each live sparse id's vector, kept to rebuild the index from. */
+  vectors: Map<bigint, { indices: Uint32Array; values: Float32Array }>;
   /** Retired ids the binding still holds; a search over-fetches by this many. */
   dead: number;
   /** Next sparse id to hand out. */

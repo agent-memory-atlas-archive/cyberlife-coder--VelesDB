@@ -174,8 +174,11 @@ describe('wasmSearch — filter / sparse / hybrid branches', () => {
     const sparse_search = vi.fn(() => [{ doc_id: 5n, score: 0.7 }]);
     const store = buildStore({ sparse_search });
     const ctx = buildCtx('docs', store, { dimension: 0 });
-    // Sparse id 5 is point 5's live sparse vector (see wasm-sparse.ts).
-    ctx.getCollection('docs')!.sparseIds.byId.set(5n, 5);
+    // Sparse id 5 is point 5's live sparse vector, in the collection's
+    // sparse store (see wasm-sparse.ts).
+    const sparseIds = ctx.getCollection('docs')!.sparseIds;
+    sparseIds.store = buildStore({ sparse_search });
+    sparseIds.byId.set(5n, 5);
 
     const result = await wasmSearch(ctx, 'docs', [], {
       sparseVector: { 1: 0.5, 2: 0.3 },
@@ -764,5 +767,37 @@ describe("wasmSearchBatch — each entry's filter reaches the binding (#2095)", 
     await wasmSearchBatch(ctx, 'docs', [{ vector: [0.1, 0.2], filter: TENANT_FILTER }]);
 
     expect(search_with_filter).toHaveBeenCalledWith(expect.any(Float32Array), 10, TENANT_FILTER);
+  });
+});
+
+describe('wasmMultiQuerySearch — the weighted triple is checked in f32, as core checks it (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([
+    ['[0.5, 0.5, 0.001]', { avgWeight: 0.5, maxWeight: 0.5, hitWeight: 0.001 }],
+    ['[0.6, 0.3, 0.101]', { avgWeight: 0.6, maxWeight: 0.3, hitWeight: 0.101 }],
+  ])('refuses %s: its f32 sum is 1.0010000467, past the tolerance', async (_label, fusionParams) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: 'weighted', fusionParams })
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect(multi).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['[0.3, 0.3, 0.399]', { avgWeight: 0.3, maxWeight: 0.3, hitWeight: 0.399 }],
+    ['[0.25, 0.25, 0.499]', { avgWeight: 0.25, maxWeight: 0.25, hitWeight: 0.499 }],
+  ])('passes %s, which core accepts in f32 though f64 would not', async (_label, fusionParams) => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: 'weighted', fusionParams });
+
+    expect(multi).toHaveBeenCalledTimes(1);
   });
 });

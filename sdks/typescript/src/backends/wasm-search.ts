@@ -43,7 +43,7 @@ function searchSparseOnly(
   values: number[],
   k: number
 ): SearchResult[] {
-  return sparseHits(collection!.store, collection!.sparseIds, indices, values, k).map(
+  return sparseHits(collection!.sparseIds, indices, values, k).map(
     ([id, score]) => ({
       id: String(id),
       score,
@@ -64,7 +64,7 @@ function searchHybridFusion(
   const denseForFuse: Array<[number, number]> = denseResults.map(
     ([id, score]) => [Number(id), score]
   );
-  const sparseForFuse = sparseHits(collection!.store, collection!.sparseIds, indices, values, k);
+  const sparseForFuse = sparseHits(collection!.sparseIds, indices, values, k);
 
   const fused: WasmSparseResult[] = ctx.wasmModule.hybrid_search_fuse(
     denseForFuse, sparseForFuse, 60, k
@@ -277,19 +277,27 @@ const WEIGHTED_TRIPLE = ['avgWeight', 'maxWeight', 'hitWeight'] as const;
 
 /**
  * How far from 1.0 a weighted triple may sum: core's `validate_weight_sum`
- * (`crates/velesdb-core/src/fusion/strategy.rs`). The binding checks it
- * again, but reports a failure as a bare string instead of an error.
+ * (`crates/velesdb-core/src/fusion/strategy.rs`), an f32 `0.001`. The
+ * binding checks it again, but reports a failure as a bare string.
  */
-const WEIGHTED_SUM_TOLERANCE = 0.001;
+const WEIGHTED_SUM_TOLERANCE = Math.fround(0.001);
 
 /**
  * Refuse, as core does, a weighted triple with a negative or non-finite
  * weight, or one that does not sum to 1.0.
+ *
+ * The check runs in f32, as core's `validate_non_negative` and
+ * `validate_weight_sum` do on the `Float32Array` the binding receives: each
+ * weight rounded to f32, summed `(avg + max) + hit` with every step rounded,
+ * then `|sum - 1| > 0.001`. In f64 the two disagree both ways near the
+ * tolerance: `[0.5, 0.5, 0.001]` sums to 1.0010000467 in f32, and
+ * `[0.3, 0.3, 0.399]` to 0.9990000129.
  */
 function validateWeightedTriple(weights: readonly number[]): void {
-  const sum = weights.reduce((total, weight) => total + weight, 0);
-  const invalid = weights.some((weight) => !Number.isFinite(weight) || weight < 0);
-  if (invalid || Math.abs(sum - 1) > WEIGHTED_SUM_TOLERANCE) {
+  const f32 = weights.map((weight) => Math.fround(weight));
+  const sum = f32.reduce((total, weight) => Math.fround(total + weight), 0);
+  const invalid = f32.some((weight) => !Number.isFinite(weight) || weight < 0);
+  if (invalid || Math.abs(Math.fround(sum - 1)) > WEIGHTED_SUM_TOLERANCE) {
     throw new VelesDBError(
       'multiQuerySearch weighted fusion: avgWeight, maxWeight and hitWeight must be ' +
         `finite, non-negative and sum to 1.0 within ${WEIGHTED_SUM_TOLERANCE}; ` +

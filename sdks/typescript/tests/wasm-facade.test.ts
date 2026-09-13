@@ -37,6 +37,10 @@ class MockVectorStore {
   static new_with_mode(dimension: number, metric: string, _mode: string): MockVectorStore {
     return new MockVectorStore(dimension, metric);
   }
+
+  static new_metadata_only(): MockVectorStore {
+    return new MockVectorStore(0, 'cosine');
+  }
 }
 
 const mockWasmModule = {

@@ -124,12 +124,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `multi_query_search` from a hand copy that predated the `weights`
   argument velesdb-wasm has taken since 4.0.0.
 
-  The weights now reach the binding, and every binding method the SDK
-  calls is declared with the binding's own full parameter list, optional
-  parameters made required, so an argument the SDK computes and does not
-  pass fails the typecheck. Sparse vectors are indexed. The binding cannot
-  delete postings, so each sparse upsert gets a fresh sparse id and a
-  replaced or deleted point's old one is retired: it never matches again.
+  The weights now reach the binding, and every binding function the SDK
+  calls, `VectorStore`'s and `MemoryService`'s alike, is declared with the
+  binding's own full parameter list, optional parameters made required, so
+  an argument the SDK computes and does not pass fails the typecheck; only
+  the two module initialisers, called with or without an argument, are
+  typed by hand. Sparse vectors are indexed. The binding cannot delete
+  postings, so each sparse upsert gets a fresh sparse id and a replaced or
+  deleted point's old one is retired: it never matches again. Retired ids
+  would pile up and slow every sparse search (20,000 replacements of one
+  point took one from 0.0022 ms to 2.03 ms), so the sparse index lives in a
+  store of its own and is rebuilt from the live sparse vectors once retired
+  ids outnumber live ones: it never holds more than twice the live entries,
+  at O(1) amortized cost. velesdb-wasm deleting postings itself (#2287)
+  will make the rebuild unnecessary.
   `createCollection` creates the store in the requested `storageMode`.
   `WASM_CAPABILITIES` is the one table the backend consults before it uses
   an option. It gains `filteredSearch`, `multiQueryFusionParams`,
@@ -152,8 +160,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than `vector`, or `hnsw`, `pqRescoreOversampling`, `deferredIndexing` or
   `asyncIndexBuilder`; `query` with `timeoutMs` or `stream: true`. A
   weighted triple core would reject (a negative or non-finite weight, or a
-  sum more than 0.001 from 1.0) now throws `BAD_REQUEST` instead of the
-  binding's bare string. On REST, `multiQuerySearchIds` with a `filter`
+  sum more than 0.001 from 1.0, computed in f32 as core computes it) now
+  throws `BAD_REQUEST` instead of the binding's bare string. On REST, `multiQuerySearchIds` with a `filter`
   now fails with the server's `400` instead of returning unfiltered ids.
 
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
