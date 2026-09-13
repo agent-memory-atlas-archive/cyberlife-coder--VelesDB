@@ -92,10 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between releases, which the tool reads as a patch update, arming lints that
   only a release commit could satisfy.
 
-- **The MSRV is checked against its one source (#1987).**
-  `scripts/tests/test_msrv_single_source.py` fails `CI Success` when
-  `rust-toolchain.toml` or any workflow's `RUST_VERSION` stops matching the
-  workspace `rust-version`. Each copy said it matched; nothing checked.
+- **`rust-toolchain.toml` decides the Rust version (#1987).**
+  `scripts/tests/test_msrv_single_source.py` fails `CI Success` when the
+  toolchain file and the workspace `rust-version` disagree, when a member
+  crate declares its own `rust-version`, or when a workflow names a Rust
+  version instead of installing from the toolchain file; a job that builds
+  with nightly may, in a comment saying why. It found propagation-guard.yml
+  installing 1.86 while the MSRV is 1.90.
 
 - **Four review signals that block nothing (#1987).** A weekly
   `minimal-versions` job in `quality-deep.yml`, also run on pull requests that
@@ -104,8 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request that changes `velesdb-core`, `core-review.yml` prints its
   `cargo public-api` diff against the base and runs `cargo mutants --in-diff`
   on the changed code, uploading the report. `codeql.yml` analyzes Rust,
-  Python and JavaScript/TypeScript on push, pull request and weekly. None of
-  them is read by `CI Success`.
+  Python, JavaScript/TypeScript and the workflows themselves on push, pull
+  request and weekly. None of them is read by `CI Success`.
 
 - **A deferred removal promised for a future major can no longer be skipped by
   that major.** `scripts/check-deferred-removals.py` carries each promise with

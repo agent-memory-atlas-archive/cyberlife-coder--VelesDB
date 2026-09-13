@@ -42,8 +42,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Swift and Kotlin appear only as two mobile quickstart examples.
-        language: [rust, python, javascript-typescript]
+        # `actions` runs the workflow queries (script injection, untrusted
+        # checkout) over .github/workflows. Swift and Kotlin appear only as
+        # two mobile quickstart examples.
+        language: [actions, rust, python, javascript-typescript]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

@@ -205,7 +205,7 @@ These signals are tracked but do not block release individually:
 | Minimal dependency versions | `velesdb-core` and `velesdb-memory` compile with every direct dependency at the lowest version their manifests allow, on the MSRV toolchain | `minimal-versions` job in `quality-deep.yml` (weekly, and on PRs that change a `Cargo.toml`) |
 | Public API diff | Every addition, change or removal in `velesdb-core`'s public API is printed for review; a *breaking* one is blocked separately, by `semver-checks` in `CI Success` | `public-api` job in `core-review.yml` (PRs that change `crates/velesdb-core/`) |
 | Mutation testing | No mutant of the changed `velesdb-core` code survives its unit tests; the report is uploaded as an artifact | `cargo mutants --in-diff`, `mutants` job in `core-review.yml` (same PRs) |
-| Static analysis | CodeQL findings on Rust, Python and JavaScript/TypeScript, in the Security tab | `codeql.yml` (push, PR, weekly) |
+| Static analysis | CodeQL findings on Rust, Python, JavaScript/TypeScript and the GitHub Actions workflows, in the Security tab | `codeql.yml` (push, PR, weekly) |
 
 ---
 

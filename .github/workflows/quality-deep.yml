@@ -37,7 +37,7 @@ on:
         type: boolean
         default: true
       run_minimal_versions:
-        description: 'Check the published crates against their minimal dependency versions'
+        description: 'Check velesdb-core and velesdb-memory against their minimal dependency versions'
         type: boolean
         default: true
 
@@ -73,6 +73,7 @@ env:
 jobs:
   # ===========================================================================
   # Miri UB Detection - Détecte undefined behavior dans unsafe code
+  # Nightly: Miri is distributed only as a nightly component.
   # ===========================================================================
   miri:
     name: Miri UB Detection
@@ -161,6 +162,8 @@ jobs:
 
   # ===========================================================================
   # Loom Concurrency Tests - Détecte deadlocks et data races
+  # Nightly: velesdb-core's `loom` feature is nightly-only, as its Cargo.toml
+  # documents.
   # ===========================================================================
   loom:
     name: Loom Concurrency Tests
@@ -208,6 +211,7 @@ jobs:
 
   # ===========================================================================
   # Fuzzing - Robustesse des parsers et APIs exposées
+  # Nightly: cargo-fuzz builds with `-Z sanitizer`, a nightly-only flag.
   # ===========================================================================
   fuzz:
     name: Fuzzing
@@ -267,6 +271,8 @@ jobs:
 
   # ===========================================================================
   # cargo-careful - Debug assertions dans la std (optionnel)
+  # Nightly: cargo-careful rebuilds the standard library, which needs nightly
+  # and rust-src.
   # ===========================================================================
   careful:
     name: Careful (extra checks)
@@ -304,16 +310,22 @@ jobs:
             -- --test-threads=1
 
   # ===========================================================================
-  # Minimal versions: the lower bounds velesdb-core and velesdb-memory publish
-  # still compile
+  # Minimal versions: velesdb-core and velesdb-memory still compile at the
+  # lowest dependency versions their manifests allow
   # ===========================================================================
-  # Both crates publish to crates.io, where a consumer's resolver may pick any
-  # version a manifest allows, not the one Cargo.lock holds. A `foo = "1.2"`
-  # whose code needs 1.4 builds here forever and fails for that consumer.
-  # `-Z direct-minimal-versions` resolves each direct dependency to the lowest
-  # version its requirement allows and leaves transitive ones at their newest,
-  # which is what a consumer's fresh resolve gets; the check then runs on the
-  # MSRV toolchain rust-toolchain.toml pins.
+  # A fresh resolve picks the newest version of everything, so it never meets
+  # a lower bound that is too low. The consumer who does is one whose other
+  # dependencies hold a crate at the bottom of the range our manifest allows:
+  # a `foo = "1.2"` whose code needs 1.4 then fails in their build, never in
+  # ours. `-Z direct-minimal-versions` builds that consumer: each direct
+  # dependency at the lowest version its requirement allows, transitive ones
+  # at their newest. The check runs on the MSRV toolchain rust-toolchain.toml
+  # pins.
+  #
+  # The resolve covers every workspace member's requirements. The check
+  # compiles velesdb-core and velesdb-memory, the two crates ci.yml's
+  # `semver-checks` also scopes itself to; tauri-plugin-velesdb and
+  # velesdb-migrate publish a library too and are not compiled here.
   #
   # Not a merge gate: this workflow is outside ci.yml, so `CI Success` never
   # reads it, and its verdict can move with no change here whenever a
@@ -346,7 +358,7 @@ jobs:
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
 
-      - name: Check the published crates
+      - name: Check velesdb-core and velesdb-memory
         run: cargo check -p velesdb-core -p velesdb-memory --all-features
 
   # ===========================================================================
