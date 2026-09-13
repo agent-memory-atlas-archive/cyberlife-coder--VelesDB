@@ -115,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files could say why. Each result file now records the model server's version
   and the weights' digest (`/api/version`, `/api/tags`) beside the decode
   options; the daemon an end-to-end run launches, by its `--version` line and
-  sha256; the host, the commit and whether tracked files differed from it; the
+  sha256; the host, the commit and whether a file it holds differed from it in
+  the working tree, asked of the commit rather than git's index; the
   cases file by its path in the repository, only when the recorded commit
   holds it, and whether it differed from that commit; when the run started; and the suite it
   ran, as a case count and a digest of what that phase's scorer reads of each
@@ -129,7 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its Ollama models twice and its MLX ones once, and its two end-to-end rows
   covered 1 case and 4. A file written before the options were recorded is
   credited with the one it holds, the `generation_cap` the bench sent as
-  `num_predict`. Every result file is a row of its own: the order
+  `num_predict` (as `max_tokens` to the MLX server). Every report cell is put on
+  one line with its pipes escaped, so no value a file holds can split a row.
+  Every result file is a row of its own: the order
   control's replay had replaced the reference row it shares a label with, so the
   published row showed the replay's timings. The report's Environment section,
   which printed the rendering machine's commit, rustc and a `num_ctx` no run

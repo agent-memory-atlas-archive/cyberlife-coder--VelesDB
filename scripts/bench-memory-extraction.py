@@ -929,6 +929,11 @@ def _mapping(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _integer(value: object) -> "int | None":
+    """`value` if it is an integer and not a boolean, which JSON's `true` would be in Python."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _ollama_answer(base_url: str, path: str) -> "tuple[dict, str | None]":
     """One provenance question: the server's answer, or why there is none.
 
@@ -1361,11 +1366,11 @@ def utc_now() -> str:
 # Why a result file names no cases file: a path outside the repository names a
 # directory on one machine, not a file anyone else can open.
 OUTSIDE_REPOSITORY = "not under the repository, and a local path is not recorded"
-# Why it names none inside the checkout: the recorded commit does not hold it, so its
-# path beside that commit would name a file nobody can check out.
-NOT_AT_COMMIT = "not at the recorded commit, so its path there names nothing"
-# Why none is looked up at all when the run could record no commit.
-NO_COMMIT = "no commit was recorded to look it up in"
+# Why it names none inside the checkout: the recorded commit holds no file at its path,
+# so the path beside that commit would name a file nobody can check out.
+NOT_AT_COMMIT = "the recorded commit holds no file there, so its path names nothing"
+# Why nothing is compared with the commit when the run could record none.
+NO_COMMIT = "no commit was recorded to compare it with"
 
 
 # How long a command the bench asks, git or a binary's `--version`, has to answer
@@ -1374,7 +1379,8 @@ NO_COMMIT = "no commit was recorded to look it up in"
 ANSWER_TIMEOUT_S = 30
 
 
-def _answer(argv: "list[str]", command: str) -> "tuple[str | None, str | None]":
+def _answer(argv: "list[str]", command: str,
+            env: "dict[str, str] | None" = None) -> "tuple[str | None, str | None]":
     """What a command prints, or why there is nothing: `command` names it in the reason.
 
     Its input is closed, so a binary that reads it instead of answering the flag
@@ -1382,7 +1388,7 @@ def _answer(argv: "list[str]", command: str) -> "tuple[str | None, str | None]":
     `ANSWER_TIMEOUT_S` to answer; past that it is killed, and the reason says so.
     """
     try:
-        done = subprocess.run(argv, capture_output=True, text=True,
+        done = subprocess.run(argv, capture_output=True, text=True, env=env,
                               timeout=ANSWER_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         if isinstance(exc, subprocess.TimeoutExpired):
@@ -1393,9 +1399,9 @@ def _answer(argv: "list[str]", command: str) -> "tuple[str | None, str | None]":
     return done.stdout.strip(), None
 
 
-def _git(*argv: str) -> "tuple[str | None, str | None]":
+def _git(*argv: str, env: "dict[str, str] | None" = None) -> "tuple[str | None, str | None]":
     """One answer from git about the checkout this script runs from, or why there is none."""
-    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}")
+    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}", env)
 
 
 def _in_repository(path: Path) -> "str | None":
@@ -1412,27 +1418,71 @@ def _literal(path: str) -> str:
     return f":(literal){path}"
 
 
-def _tracked_path(path: Path, commit: "str | None") -> "tuple[str | None, str | None]":
-    """`path` relative to the repository if the recorded `commit` holds it, or why not.
+def _committed_file(path: Path,
+                    commit: "str | None") -> "tuple[tuple[str, str] | None, str | None]":
+    """`path` relative to the repository, and the object id of the file the recorded
+    `commit` holds there; or None, and why it holds none.
 
     The commit is asked, not git's index, which can disagree with it both ways: a
     file staged but not committed is at no commit, and one committed then taken out
-    of the index is still at this one (#1949).
+    of the index is still at this one (#1949). Only a `blob` is a file: `ls-tree`
+    answers for a directory too.
     """
     relative = _in_repository(path)
     if relative is None:
         return None, OUTSIDE_REPOSITORY
     if not commit:
         return None, NO_COMMIT
-    listed, gap = _git("ls-tree", "--name-only", commit, "--", _literal(relative))
-    return (relative, None) if listed else (None, gap or NOT_AT_COMMIT)
+    entry, gap = _git("ls-tree", commit, "--", _literal(relative))
+    fields = (entry or "").partition("\t")[0].split()
+    if fields[1:2] != ["blob"]:
+        return None, gap or NOT_AT_COMMIT
+    return (relative, fields[2]), None
 
 
-def _changed(*pathspec: str) -> "tuple[bool | None, str | None]":
-    """Whether tracked files, those `pathspec` names or all of them, differ from the
-    commit, or why git did not say. An untracked file changes no committed code."""
-    status, gap = _git("status", "--porcelain", "--untracked-files=no", "--", *pathspec)
-    return (None if status is None else bool(status)), gap
+def _differs(relative: str, blob: str) -> "tuple[bool | None, str | None]":
+    """Whether the file at `relative` differs from the committed `blob`, or why git did not say.
+
+    Its content is hashed as a commit would store it, through the filters its
+    attributes name, so a checkout that turned its line endings into CRLF has not
+    changed it. Git's index is not asked: after `rm --cached`, an edit staged then
+    undone, or under `--skip-worktree`, it answers for something else (#1949).
+    """
+    stored, gap = _git("hash-object", "--", relative)
+    return (None if stored is None else stored != blob), gap
+
+
+def _cases_origin(cases_file: Path, commit: "str | None") -> "tuple[dict, dict]":
+    """The cases file as `origin` records it, and why each field it leaves null is null."""
+    fields = ("cases_file", "cases_file_modified")
+    committed, gap = _committed_file(cases_file, commit)
+    if committed is None:
+        return dict.fromkeys(fields), dict.fromkeys(fields, gap)
+    changed, changed_gap = _differs(*committed)
+    return dict(zip(fields, (committed[0], changed))), {"cases_file_modified": changed_gap}
+
+
+def _changed(commit: "str | None") -> "tuple[bool | None, str | None]":
+    """Whether a file the recorded `commit` holds differs from it in the working tree, or is
+    missing; or why git did not say.
+
+    Asked of the commit through an index of its own, never the checkout's: `read-tree`
+    fills a scratch index with the commit, `update-index --refresh` hashes each working
+    file through its filters, and `diff-files` names what differs or is gone. The
+    checkout's index answers for something else after `rm --cached`, an edit staged then
+    undone, or under `--skip-worktree` (#1949). An untracked file is not counted: it
+    changes no committed code.
+    """
+    if not commit:
+        return None, NO_COMMIT
+    with tempfile.TemporaryDirectory(prefix="velesdb-bench-index-") as scratch:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        for argv in (("read-tree", commit), ("update-index", "-q", "--refresh"),
+                     ("diff-files", "--name-only")):
+            answer, gap = _git(*argv, env=env)
+            if gap:
+                return None, gap
+    return bool(answer), None
 
 
 def _sha256_of(path: Path) -> "tuple[str | None, str | None]":
@@ -1495,34 +1545,32 @@ def run_origin(cases_file: Path, binary: "dict | None") -> dict:
     Environment section read when the report was rendered, so it named the
     renderer's machine and checkout as the campaign's, and a cases file under a
     local worktree path (#1949). A commit alone would claim that the code at it
-    ran, so `uncommitted_changes` says whether tracked files differed from it.
+    ran, so `uncommitted_changes` says whether the working files differed from it
+    (`_changed`).
     The cases file is recorded by its path in the repository, and only if the
-    recorded commit holds it (`_tracked_path`), with `cases_file_modified` saying whether it
-    differed from the commit; otherwise both are null, with the reason.
+    recorded commit holds it as a file, with `cases_file_modified` saying whether
+    its content differs from that file (`_cases_origin`); otherwise both are null,
+    with the reason.
     Whatever else goes unanswered stays null, with the reason under `missing`.
     A commit does not identify the binary a run drove, which may have been
     built elsewhere: `binary` records it (`launched_binary`, `served_binary`),
     and is None for a phase that drives none.
     """
     commit, commit_gap = _git("rev-parse", "HEAD")
-    changed, changed_gap = _changed()
-    cases_path, cases_gap = _tracked_path(cases_file, commit)
-    cases_changed, cases_changed_gap = (_changed(_literal(cases_path)) if cases_path
-                                        else (None, cases_gap))
+    changed, changed_gap = _changed(commit)
+    cases, cases_reasons = _cases_origin(cases_file, commit)
     origin = {
         "machine": platform.machine() or None,
         "os": platform.platform(terse=True) or None,
         "commit": commit or None,
         "uncommitted_changes": changed,
-        "cases_file": cases_path,
-        "cases_file_modified": cases_changed,
+        **cases,
     }
     reasons = {"machine": "the platform names no machine",
                "os": "the platform names no system",
                "commit": commit_gap or "git rev-parse HEAD named no commit",
                "uncommitted_changes": changed_gap,
-               "cases_file": cases_gap,
-               "cases_file_modified": cases_changed_gap}
+               **cases_reasons}
     missing = {key: reasons[key] for key, value in origin.items() if value is None}
     return {**origin, "binary": binary, "missing": missing}
 
@@ -2032,14 +2080,14 @@ def missing_provenance(entry: dict) -> "list[str]":
     counts as settled. Options are checked for presence, not truth: `0` and
     `False` are values a run sends. A version or a digest counts only as a
     string (`_text`): a file is read as it is. `num_predict` is on the record
-    wherever `generation_cap` is: every screening file, those written before
-    `settings` among them, records the cap `screen` hands its backend, which sends
-    it as `num_predict` (to an OpenAI-compatible server as `max_tokens`), as the
-    bench already did on 2026-08-16.
+    wherever `generation_cap` is, as a positive integer: every screening file,
+    those written before `settings` among them, records the cap `screen` hands its
+    backend, which sends it as `num_predict` (to an OpenAI-compatible server as
+    `max_tokens`), as the bench already did on 2026-08-16.
     """
     runtime = _mapping(entry.get("runtime"))
     recorded = set(_mapping(entry.get("settings")))
-    if isinstance(entry.get("generation_cap"), int):
+    if (_integer(entry.get("generation_cap")) or 0) > 0:
         recorded.add("num_predict")
     if _text(runtime.get("ollama_version")):
         recorded.add("ollama_version")
@@ -2048,17 +2096,38 @@ def missing_provenance(entry: dict) -> "list[str]":
     return [field for field in PROVENANCE_FIELDS if field not in recorded]
 
 
+def _one_line(text: str) -> str:
+    """`text` with each run of whitespace, line breaks included, made one space."""
+    return " ".join(text.split())
+
+
 def _inline(text: str) -> str:
-    """`text` fit for a table cell: on one line, cut to `REASON_WIDTH`, its pipes escaped.
+    """`text` on one line and cut to `REASON_WIDTH`.
 
     What a server or a binary says of itself, or why it said nothing, is its own
-    words: a line break would split the row, a pipe its cells, and a junk reply
-    can run to kilobytes. The file keeps the text whole.
+    words, and a junk reply can run to kilobytes. The file keeps the text whole;
+    the row it lands in escapes its pipes (`_table_row`).
     """
-    line = " ".join(text.split())
+    line = _one_line(text)
     if len(line) > REASON_WIDTH:
         line = line[:REASON_WIDTH - 1] + "…"
-    return line.replace("|", "\\|")
+    return line
+
+
+def _table_row(cells: list) -> str:
+    """One markdown table row, each cell on one line and its pipes escaped.
+
+    A report prints what its files hold: a count, a label, a digest or a host name
+    reaches its cell as a file holds it, whoever wrote the file, and a line break
+    in one would split its row, a `|` its cells (#1949).
+    """
+    return "| " + " | ".join(_one_line(str(cell)).replace("|", "\\|") for cell in cells) + " |"
+
+
+def _count_cell(value: object) -> str:
+    """A count a server returned, printed as one; anything else it returned, cut (`_inline`)."""
+    count = _integer(value)
+    return str(count) if count is not None else _inline(str(value))
 
 
 def _unverified_reason(entry: dict) -> str:
@@ -2079,16 +2148,16 @@ def _provenance_cell(entry: dict) -> str:
     An unverified row prints why beside the verdict when its run recorded a
     reason (`_unverified_reason`): an end-to-end run is unverified because the
     daemon chose its server, a screening run because its server was down or
-    would not say, and neither because its file predates the record. What a
-    verified row's server named is printed through `_inline` too.
+    would not say, and neither because its file predates the record. A verified
+    row's version, what its server named, is cut like a reason (`_inline`).
     """
     if missing_provenance(entry):
         why = _unverified_reason(entry)
         return f"unverified ({why})" if why else "unverified"
     runtime = entry["runtime"]
     digest = runtime["model_digests"][entry["config"]]
-    return (f"ollama {_inline(runtime['ollama_version'])} · {_inline(digest[:SHORT_DIGEST])} "
-            f"· ctx {_inline(str(entry['settings']['num_ctx']))}")
+    return (f"ollama {_inline(runtime['ollama_version'])} · {digest[:SHORT_DIGEST]} "
+            f"· ctx {entry['settings']['num_ctx']}")
 
 
 # How an origin cell marks a commit, or the cases file, by whether it differed from
@@ -2152,8 +2221,7 @@ def _provenance_verdict(configurations: dict) -> "list[str]":
 
 def _runs_of(entry: dict) -> "int | None":
     """How many passes over the suite a row's counts add up, if its file says."""
-    runs = entry.get("runs")
-    return runs if isinstance(runs, int) and not isinstance(runs, bool) else None
+    return _integer(entry.get("runs"))
 
 
 def _runs_cell(entry: dict) -> str:
@@ -2319,8 +2387,8 @@ def _report_row(name: str, entry: dict, suite: str) -> str:
     totals = entry.get("totals", {})
     cold = entry.get("cold", {}).get("cold_total_seconds")
     warm = entry.get("warmup", {})
-    return " | ".join([
-        f"| `{name}`",
+    return _table_row([
+        f"`{name}`",
         _runs_cell(entry),
         suite,
         str(totals.get("fatal", 0)),
@@ -2333,7 +2401,7 @@ def _report_row(name: str, entry: dict, suite: str) -> str:
         "n/a" if cold is None else f"{cold:.1f}s{_cache_mark(entry)}",
         f"{warm.get('rounds', '?')}{'' if warm.get('stabilised', True) else ' (unstable)'}",
         _provenance_cell(entry),
-        f"{_origin_cell(entry)} |",
+        _origin_cell(entry),
     ])
 
 
@@ -2412,11 +2480,11 @@ def _end_to_end_section(runs: dict) -> "list[str]":
                       for case in entry.get("cases", []))
         drain_cell = f"{drain:.1f}s" if drained and drain is not None else "not drained"
         p95 = burst.get("p95_seconds")
-        lines.append(
-            f"| `{name}` | {suites[name]} | {totals.get('fatal', 0)} | {totals.get('major', 0)} | "
-            f"{drain_cell} | {f'{p95 * 1000:.0f}ms' if p95 is not None else '-'} | "
-            f"{burst.get('autograph_dropped', '-')} | {_provenance_cell(entry)} | "
-            f"{_origin_cell(entry)} |")
+        lines.append(_table_row([
+            f"`{name}`", suites[name], totals.get("fatal", 0), totals.get("major", 0),
+            drain_cell, f"{p95 * 1000:.0f}ms" if p95 is not None else "-",
+            _count_cell(burst.get("autograph_dropped", "-")), _provenance_cell(entry),
+            _origin_cell(entry)]))
     return lines
 
 
@@ -2444,12 +2512,10 @@ def _language_section(configurations: dict) -> "list[str]":
     suites = _suite_cells(mirrored)
     for name, entry in mirrored.items():
         gap = entry["mirror_gap"]
-        lines.append(
-            f"| `{name}` | {_runs_cell(entry)} | {suites[name]} | "
-            f"{gap['fr']['fatal']} | {gap['fr']['major']} | "
-            f"{gap['en']['fatal']} | {gap['en']['major']} | {gap['gap']} | "
-            f"{gap['weaker'] or 'balanced'} |"
-        )
+        lines.append(_table_row([
+            f"`{name}`", _runs_cell(entry), suites[name],
+            gap["fr"]["fatal"], gap["fr"]["major"], gap["en"]["fatal"], gap["en"]["major"],
+            gap["gap"], gap["weaker"] or "balanced"]))
     return lines
 
 

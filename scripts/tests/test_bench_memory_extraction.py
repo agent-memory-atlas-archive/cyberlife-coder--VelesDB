@@ -45,6 +45,7 @@ import math
 import os
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -919,13 +920,24 @@ def git_answer(root: Path, *argv: str) -> str:
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
+def working_files_differ(root: Path) -> bool:
+    """Whether a file HEAD holds differs in the working tree at `root`, or is missing: git's own
+    comparison, against an index of HEAD alone, so the checkout's index plays no part."""
+    with tempfile.TemporaryDirectory() as scratch:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        for argv in (("read-tree", "HEAD"), ("update-index", "-q", "--refresh"),
+                     ("diff-files", "--name-only")):
+            done = subprocess.run(["git", "-C", str(root), *argv], env=env,
+                                  capture_output=True, text=True, check=True)
+        return bool(done.stdout.strip())
+
+
 def checkout_origin() -> dict:
     """Where these tests run from, asked the way a result file must record it."""
     root = SCRIPT_PATH.parents[1]
     return {"machine": platform.machine(), "os": platform.platform(terse=True),
             "commit": git_answer(root, "rev-parse", "HEAD"),
-            "uncommitted_changes": bool(git_answer(root, "status", "--porcelain",
-                                                   "--untracked-files=no"))}
+            "uncommitted_changes": working_files_differ(root)}
 
 
 def origin_cell(origin: dict) -> str:
@@ -1178,12 +1190,18 @@ class ProvenanceReportTest(unittest.TestCase):
     def test_a_file_older_than_its_settings_is_credited_with_its_generation_cap(self):
         """Every 2026-08-16 screening file records `generation_cap`, the cap the bench sends
         as `num_predict` (to an OpenAI-compatible server as `max_tokens`): of the decode
-        options, that one is on the record (#2280 review)."""
+        options, that one is on the record (#2280 review). Only a positive integer is a cap:
+        JSON's `true` is one in Python, and `null`, `"512"` and `0` are no cap it sent."""
         legacy = {"config": "m", "generation_cap": 512}
         self.assertIn("lack `ollama_version`, `digest`, `num_ctx`, `temperature`, `constrained`,",
                       bench.render_report({"configurations": {"m": legacy}}))
-        self.assertIn("`num_ctx`, `num_predict`, `temperature`",
-                      bench.render_report({"configurations": {"m": {"config": "m"}}}))
+        for cap in ("absent", None, True, "512", 0):
+            with self.subTest(generation_cap=cap):
+                entry = {"config": "m"}
+                if cap != "absent":
+                    entry["generation_cap"] = cap
+                self.assertIn("`num_ctx`, `num_predict`, `temperature`",
+                              bench.render_report({"configurations": {"m": entry}}))
 
     def test_what_a_server_or_a_binary_names_prints_on_one_line_escaped(self):
         """A version or a digest is the server's text, and a `--version` line the binary's, as
@@ -1198,6 +1216,54 @@ class ProvenanceReportTest(unittest.TestCase):
                       rendered)
         self.assertIn(f" · velesdb-memory 1.0 \\| dirty build ({DIGEST[:12]}) |", rendered)
         self.assertEqual(sum(line.startswith("| `m`") for line in rendered.splitlines()), 1)
+
+    def test_what_a_server_or_a_binary_names_is_cut_like_a_reason(self):
+        """A junk answer can run to kilobytes: a version, or a `--version` line, is cut to
+        `REASON_WIDTH` as a reason is, and the file keeps it whole (#2280 review)."""
+        long, cut = "v" * 500, "v" * (bench.REASON_WIDTH - 1) + "…"
+        entry = with_value(recorded_entry(verified=True), ("runtime", "ollama_version"), long)
+        entry["origin"]["binary"]["version"] = long
+        rendered = bench.render_report({"configurations": {"m": entry}})
+        self.assertIn(f"| ollama {cut} · {DIGEST[:12]} · ctx 2048 |", rendered)
+        self.assertIn(f" · {cut} ({DIGEST[:12]}) |", rendered)
+
+    def test_a_count_the_daemon_returned_prints_as_one_and_anything_else_cut(self):
+        """`autograph_dropped` is what the daemon's `memory_status` returned (#2280 review): an
+        integer prints as a count, never cut, and anything else on one line, cut and escaped."""
+        printed = {3: "3", 10 ** 130: str(10 ** 130), True: "True",
+                   "2 lost|x\nmore": "2 lost\\|x more",
+                   "x" * 500: "x" * (bench.REASON_WIDTH - 1) + "…"}
+        for dropped, cell in printed.items():
+            with self.subTest(dropped=str(dropped)[:9]):
+                entry = {"config": "m", "totals": {"fatal": 0, "major": 0},
+                         "burst": {"autograph_dropped": dropped}}
+                rendered = bench.render_report({"end_to_end": {"m": entry}})
+                self.assertIn(f"| - | {cell} | unverified |", rendered)
+
+    def test_no_value_a_file_holds_can_split_a_table_row(self):
+        """Each cell is put on one line and its pipes escaped as its row is written: a count, a
+        label, a digest or a host name reaches the report as the file holds it (#2280 review)."""
+        junk = "x|y\nz"
+        origin = {"machine": junk, "os": junk, "commit": junk * 4, "cases_file": junk}
+        screened = {"config": "m", "runs": 1, "origin": origin,
+                    "suite": {"cases": 1, "definitions_sha256": junk * 4},
+                    "totals": {"fatal": junk, "major": junk, "minor": junk, "parse_rate": 1.0,
+                               "truncated": junk, "p50_seconds": 1.0, "p95_seconds": 1.0},
+                    "warmup": {"rounds": junk},
+                    "mirror_gap": {"fr": {"fatal": junk, "major": junk},
+                                   "en": {"fatal": junk, "major": junk},
+                                   "gap": junk, "weaker": junk}}
+        stored = {"config": "m", "origin": origin, "totals": {"fatal": junk, "major": junk},
+                  "burst": {"autograph_dropped": junk}}
+        rendered = bench.render_report({"configurations": {f"m{junk}": screened},
+                                        "end_to_end": {f"m{junk}": stored}})
+        for heading, columns in (("## Configurations", 14), ("## Language symmetry", 9),
+                                 ("## End-to-end", 9)):
+            with self.subTest(table=heading):
+                section = rendered.split(heading, 1)[1].split("\n## ", 1)[0]
+                rows = [line for line in section.splitlines() if line.startswith("| `m")]
+                self.assertEqual(len(rows), 1, rows)
+                self.assertEqual(len(re.findall(r"(?<!\\)\|", rows[0])), columns + 1, rows[0])
 
 
 class ProvenanceWiringTest(unittest.TestCase):
@@ -1456,10 +1522,11 @@ class EndToEndRuntimeTest(unittest.TestCase):
         """The shipped cases file is recorded by its path in the repository, never a local one."""
         record, rendered = self.endtoend_then_report()
         self.assertIsInstance(record.get("origin"), dict, "the result file records no origin")
-        shipped = "scripts/memory-extraction-cases.json"
-        changed = git_answer(SCRIPT_PATH.parents[1], "status", "--porcelain", "--", shipped)
+        shipped, root = "scripts/memory-extraction-cases.json", SCRIPT_PATH.parents[1]
+        committed = git_answer(root, "ls-tree", "HEAD", "--", shipped).split()[2]
+        changed = git_answer(root, "hash-object", "--", shipped) != committed
         self.assertEqual(record["origin"], {
-            **checkout_origin(), "cases_file": shipped, "cases_file_modified": bool(changed),
+            **checkout_origin(), "cases_file": shipped, "cases_file_modified": changed,
             "binary": launched_fake_binary(), "missing": {}})
         rows = report_table(rendered, "## End-to-end")
         self.assertEqual(rows["qwen3:14b"].get("origin"), origin_cell(record["origin"]))
@@ -1580,6 +1647,45 @@ def scratch_checkout():
             yield root
 
 
+# What an edit writes, in the index states below.
+EDITED = '{"edited": true}\n'
+
+
+def take_out_of_the_index(root: Path, name: str) -> None:
+    git_answer(root, "rm", "--quiet", "--cached", name)
+
+
+def stage_an_edit_then_undo_it(root: Path, name: str) -> None:
+    original = (root / name).read_text(encoding="utf-8")
+    (root / name).write_text(EDITED, encoding="utf-8")
+    git_answer(root, "add", name)
+    (root / name).write_text(original, encoding="utf-8")
+
+
+def edit_hidden_by(flag: str):
+    """An edit git's index is told not to look at (`--skip-worktree`, `--assume-unchanged`)."""
+    def edit(root: Path, name: str) -> None:
+        git_answer(root, "update-index", flag, name)
+        (root / name).write_text(EDITED, encoding="utf-8")
+    return edit
+
+
+def check_out_with_crlf(root: Path, name: str) -> None:
+    """`name` checked out again with CRLF line endings, as a committed attribute asks."""
+    (root / ".gitattributes").write_text(f"{name} text eol=crlf\n", encoding="utf-8")
+    git_commit(root, ".gitattributes")
+    (root / name).unlink()
+    git_answer(root, "checkout", "--", name)
+
+
+# States in which git's index answers for something other than the working files, each with
+# whether the file then differs from the recorded commit.
+INDEX_STATES = (("taken out of the index", take_out_of_the_index, False),
+                ("edited, staged and put back", stage_an_edit_then_undo_it, False),
+                ("edited under --skip-worktree", edit_hidden_by("--skip-worktree"), True),
+                ("edited under --assume-unchanged", edit_hidden_by("--assume-unchanged"), True))
+
+
 class CheckoutOriginTest(unittest.TestCase):
     """What `origin` says of a checkout is git's answer about the bench's own (#1949 review).
 
@@ -1603,21 +1709,49 @@ class CheckoutOriginTest(unittest.TestCase):
         self.assertIsNone(origin["cases_file"])
         self.assertEqual(origin["missing"].get("cases_file"), bench.NOT_AT_COMMIT)
 
-    def test_a_committed_file_taken_out_of_the_index_is_named_and_marked(self):
-        """`git rm --cached` leaves the file at the recorded commit, and differing from it."""
+    def test_the_file_is_compared_with_the_commit_whatever_the_index_says(self):
+        """`cases_file_modified` compares the file with the one the recorded commit holds, not
+        with git's index (#2280 review). Taken out of the index, or edited, staged and put
+        back, it is the commit's file; edited under `--skip-worktree` or `--assume-unchanged`,
+        where `git status` sees nothing, it is not."""
+        for label, prepare, modified in INDEX_STATES:
+            with self.subTest(label), scratch_checkout() as root:
+                prepare(root, "cases.json")
+                origin = bench.run_origin(root / "cases.json", None)
+                self.assertEqual((origin["cases_file"], origin["cases_file_modified"]),
+                                 ("cases.json", modified))
+
+    def test_a_file_is_compared_as_git_would_store_it(self):
+        """A checkout that turned the line endings into CRLF, as the attributes ask, has not
+        changed the file: its content is hashed through the filters a commit applies."""
         with scratch_checkout() as root:
-            git_answer(root, "rm", "--quiet", "--cached", "cases.json")
+            check_out_with_crlf(root, "cases.json")
+            checked_out = (root / "cases.json").read_bytes()
             origin = bench.run_origin(root / "cases.json", None)
+        self.assertEqual(checked_out, b"{}\r\n")
         self.assertEqual((origin["cases_file"], origin["cases_file_modified"]),
-                         ("cases.json", True))
+                         ("cases.json", False))
+
+    def test_a_path_the_commit_holds_as_a_directory_is_no_cases_file(self):
+        """`ls-tree` answers for a directory too: a file whose path the recorded commit holds
+        as a tree is at no commit (#2280 review)."""
+        with scratch_checkout() as root:
+            (root / "d.json").mkdir()
+            (root / "d.json" / "inner").write_text("x\n", encoding="utf-8")
+            git_commit(root, "d.json/inner")
+            git_answer(root, "rm", "-r", "--quiet", "--cached", "d.json")
+            shutil.rmtree(root / "d.json")
+            (root / "d.json").write_text("{}\n", encoding="utf-8")
+            origin = bench.run_origin(root / "d.json", None)
+        self.assertEqual((origin["cases_file"], origin["missing"].get("cases_file")),
+                         (None, bench.NOT_AT_COMMIT))
 
     def test_a_commit_git_cannot_read_leaves_its_reason(self):
         """Asked about a commit it does not have, git fails: the reason names the command."""
         with scratch_checkout() as root:
-            path, gap = bench._tracked_path(root / "cases.json", "0" * 40)
-        self.assertIsNone(path)
-        self.assertRegex(gap, r"^git ls-tree --name-only 0{40} -- :\(literal\)cases\.json "
-                              r"exited \d+$")
+            committed, gap = bench._committed_file(root / "cases.json", "0" * 40)
+        self.assertIsNone(committed)
+        self.assertRegex(gap, r"^git ls-tree 0{40} -- :\(literal\)cases\.json exited \d+$")
 
     def test_a_name_git_would_read_as_a_pattern_is_taken_as_written(self):
         """As pathspecs, `:cases.json` names `cases.json` and `case?.json` matches it: neither
@@ -1653,8 +1787,27 @@ class CheckoutOriginTest(unittest.TestCase):
         self.assertEqual(cell, origin_cell(edited))
         self.assertIn(" · cases.json (modified)", cell)
 
+    def test_uncommitted_changes_compare_the_commit_with_the_working_files(self):
+        """`uncommitted_changes` says whether a file the recorded commit holds differs from it in
+        the working tree, or is missing, and asks the commit, never git's index, which these
+        states make answer for something else (#2280 review). The checkout's index, entries
+        and flags, is left as it was."""
+        def deleted(root: Path, name: str) -> None:
+            (root / name).unlink()
+
+        states = INDEX_STATES + (("checked out with CRLF line endings", check_out_with_crlf, False),
+                                 ("deleted", deleted, True))
+        for label, prepare, changed in states:
+            with self.subTest(label), scratch_checkout() as root:
+                prepare(root, "notes.txt")
+                index = git_answer(root, "ls-files", "--stage", "-v")
+                origin = bench.run_origin(root / "cases.json", None)
+                self.assertIs(origin["uncommitted_changes"], changed)
+                self.assertEqual(git_answer(root, "ls-files", "--stage", "-v"), index)
+
     def test_an_untracked_file_is_no_change_to_the_commit(self):
-        """`uncommitted_changes` is about tracked files: a stray draft changes no committed code."""
+        """`uncommitted_changes` is about the files the commit holds: a stray draft changes no
+        committed code, so it does not count."""
         with scratch_checkout() as root:
             (root / "draft.json").write_text("{}\n", encoding="utf-8")
             origin = bench.run_origin(root / "cases.json", None)
@@ -1662,7 +1815,7 @@ class CheckoutOriginTest(unittest.TestCase):
 
     def test_a_checkout_git_cannot_read_leaves_its_reasons(self):
         """Outside any repository git answers nothing: each null says why, the command that
-        failed or, for the cases file, that no commit was recorded to look it up in."""
+        failed or, for what is compared with the commit, that none was recorded."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             (root / "cases.json").write_text("{}\n", encoding="utf-8")
@@ -1674,7 +1827,7 @@ class CheckoutOriginTest(unittest.TestCase):
         missing = origin["missing"]
         self.assertEqual((missing["cases_file"], missing["cases_file_modified"]),
                          (bench.NO_COMMIT, bench.NO_COMMIT))
-        self.assertRegex(origin["missing"]["uncommitted_changes"], r"^git status .* exited \d+$")
+        self.assertEqual(missing["uncommitted_changes"], bench.NO_COMMIT)
 
     def test_a_run_from_another_directory_names_the_checkout_of_its_bench(self):
         with scratch_checkout() as root, tempfile.TemporaryDirectory() as elsewhere, \
