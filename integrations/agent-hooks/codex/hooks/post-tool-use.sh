@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Mark the session only after an opted-in VelesDB recall completed successfully.
+# Mark the session only after an opted-in VelesDB recall completed successfully,
+# and record the working context a successful save or load names.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,4 +37,9 @@ if [ -n "$session_id" ] && successful_memory_recall "$payload"; then
   fi
 fi
 
+# The working context this conversation saves or loads becomes the one the
+# SessionStart and Stop reminders name (lib/common.sh).
+if [ -n "$session_id" ]; then
+  remember_working_session "$session_id" "$payload" || true
+fi
 echo '{}'

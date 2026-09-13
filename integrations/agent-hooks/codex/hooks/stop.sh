@@ -37,6 +37,7 @@ if [ -z "$session_id" ]; then
 fi
 
 resolve_config "$cwd"
+adopt_working_session "$session_id" || true
 
 if ! dirty_dir="$(record_dir_path "codex-learning-dirty" "$session_id")" \
   || ! generic_sentinel="$(sentinel_path "codex-stop" "$session_id")" \

@@ -106,6 +106,11 @@ if [ -n "$session_id" ] && successful_memory_recall "$payload"; then
     fi
   fi
 fi
+# The working context this conversation saves or loads becomes the one the
+# SessionStart, PreCompact and Stop reminders name (lib/common.sh).
+if [ -n "$session_id" ]; then
+  remember_working_session "$session_id" "$payload" || true
+fi
 [ -n "$session_id" ] || session_id="unknown-session"
 
 # `updatedToolOutput` is ignored by Claude when it does not match the built-in

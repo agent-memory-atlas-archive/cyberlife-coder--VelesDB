@@ -91,7 +91,10 @@ statusMessage = "velesdb-memory: record successful recall"
 ## 3. Pin identity and opt in to enforcement
 
 The lifecycle hooks derive `project` from `basename(cwd)` and use
-`session="rolling"` by default. The edit guard resolves every `Add`, `Update`,
+`session="rolling"` by default; once a conversation saves its working context
+under another session of the same project, or loads one that exists, its
+`SessionStart` and `Stop` reminders name that session instead. The edit guard
+resolves every `Add`, `Update`,
 `Delete`, and `Move` target in `tool_input.command`, so a patch issued from a
 different cwd still observes each target repository's policy. To pin identity,
 drop a `.velesdb-hooks.json` at the repository root (lookups walk up at most 20
@@ -116,9 +119,9 @@ unrelated projects are never blocked.
 
 | Script | Event | Output channel | Behaviour |
 |---|---|---|---|
-| `hooks/session-start.sh` | `SessionStart` | `hookSpecificOutput.additionalContext` | Asks the model to call `load_working_context` first, and to close the `feedback` loop on memories that helped. When `source == "compact"` it appends a post-compaction reminder (see below). |
+| `hooks/session-start.sh` | `SessionStart` | `hookSpecificOutput.additionalContext` | Asks the model to call `load_working_context` first, for the session this conversation last saved or loaded (else the configured one), and to close the `feedback` loop on memories that helped. When `source == "compact"` it appends a post-compaction reminder (see below). |
 | `hooks/pre-tool-use.sh` | `PreToolUse` | exit 2 + stderr | Refuses `apply_patch` until every opted-in target repository has a successful recall sentinel for this host session. Missing `jq` also blocks instead of failing open. |
-| `hooks/post-tool-use.sh` | `PostToolUse` | `{}` plus sentinel side effect | Marks `recall`, `recall_fused`, `recall_where`, `entity`, `why`, or scoped `compile_context` only when the MCP response is successful. |
+| `hooks/post-tool-use.sh` | `PostToolUse` | `{}` plus sentinel side effect | Marks `recall`, `recall_fused`, `recall_where`, `entity`, `why`, or scoped `compile_context` only when the MCP response is successful, and records the session of a successful `save_working_context`, or of a `load_working_context` that found one, for the `SessionStart` and `Stop` reminders. |
 | `hooks/stop.sh` | `Stop` | `decision: "block"` + `reason` | In an opted-in repository, blocks on the first Stop and after each later covered `apply_patch` batch with the four-step checklist and `save_working_context`; snapshots the session-wide records into an atomic pending/delivered manifest before consuming them, so an interrupted checklist is re-emitted and each completed continuation passes. Without enforcement, keeps the legacy first-Stop save reminder. |
 
 The guard markers live under `${TMPDIR:-/tmp}/velesdb-agent-hooks-$UID/`, keyed on
@@ -199,6 +202,9 @@ session, not just when asked:
 
 Use a stable `session` id (e.g. `"rolling"`) rather than a fresh id per
 run, so state actually accumulates across sessions instead of fragmenting.
+A conversation that keeps its state under a session of its own (one per
+campaign, say) is reminded of that one: the hooks follow the last session it
+saved or loaded for the project.
 Pick `project` to match the repository/product, not the individual task.
 ```
 

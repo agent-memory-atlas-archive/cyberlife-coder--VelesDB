@@ -109,6 +109,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load call alone reports the cost as gone when it has only moved.
 
 ### Fixed
+- **The agent hooks remind a conversation of the working context it uses.**
+  The SessionStart, PreCompact and Stop hooks of the Claude Code and Codex
+  integrations named the session set in `.velesdb-hooks.json` (else
+  `rolling`), whatever session the conversation kept its state under. After a
+  compaction, a conversation working under a session of its own was told to
+  load a context it never wrote, and at Stop to save over one another
+  conversation may own. PostToolUse now records the session of each successful
+  `save_working_context`, and of each `load_working_context` that found one,
+  for the current project and per host session; the reminders name that
+  session, and after a compaction the Claude Code SessionStart hook asks to
+  load it again. A load that found nothing, another project's session, a failed
+  call and a name outside `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` are ignored: none
+  can redirect the reminders or carry text into them.
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
   served at `GET /api-docs/openapi.json` by a server built with

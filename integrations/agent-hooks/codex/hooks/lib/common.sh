@@ -129,6 +129,14 @@ successful_memory_recall() {
       ;;
   esac
 
+  successful_tool_response "$payload"
+}
+
+# successful_tool_response PAYLOAD: the MCP call behind a PostToolUse payload
+# returned a non-empty text result and no error.
+successful_tool_response() {
+  local payload="$1"
+
   printf '%s' "$payload" | jq -e '
     ((.tool_response | type) == "object")
     and ((.tool_response.content? | type) == "array")
@@ -319,6 +327,88 @@ recall_targets_current_project() {
   fi
   scoped_project="$(recall_scope_project "$payload")" || return 1
   [ "$scoped_project" = "$PROJECT" ]
+}
+
+# --- The working context this conversation uses -------------------------------
+# The configured `session` (`.velesdb-hooks.json`, else "rolling") is only a
+# default. A conversation that keeps its state under another session — one per
+# campaign, say — must be reminded of THAT one at SessionStart, PreCompact and
+# Stop: naming the default after a compaction makes it load a stale context, or
+# save over one another conversation owns. PostToolUse records the session of
+# each successful save_working_context, and of each load_working_context that
+# found one, per host session and for the current project only; the reminders
+# adopt it.
+
+# valid_working_session NAME: a session name safe to quote inside a reminder.
+# Bash's =~ anchors the whole string; jq's test("^…$") would anchor one line
+# and let a newline smuggle text into the model's context.
+valid_working_session() {
+  local pattern='^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+  [[ "$1" =~ $pattern ]]
+}
+
+# working_context_found PAYLOAD: the load_working_context result says found.
+working_context_found() {
+  printf '%s' "$1" | jq -e '
+    [ (if ((.tool_response | type) == "array") then .tool_response[] else .tool_response.content[]? end)
+      | select(type == "object" and .type == "text")
+      | .text | fromjson? | select(type == "object") | .found ]
+    | any(. == true)
+  ' >/dev/null 2>&1
+}
+
+# working_context_call PAYLOAD: print the session a successful working-context
+# call used for the current project; fail for any other call.
+working_context_call() {
+  local payload="$1"
+  local tool_name
+  local session
+  tool_name="$(printf '%s' "$payload" | jq -r '.tool_name // empty')"
+  case "$tool_name" in
+    mcp__velesdb-memory__save_working_context|mcp__velesdb_memory__save_working_context)
+      ;;
+    mcp__velesdb-memory__load_working_context|mcp__velesdb_memory__load_working_context)
+      # A load that found nothing names a session nobody keeps: a typo must
+      # not redirect every later reminder.
+      working_context_found "$payload" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  successful_tool_response "$payload" || return 1
+  [ "$(printf '%s' "$payload" | jq -r '.tool_input.project // empty')" = "$PROJECT" ] || return 1
+  session="$(printf '%s' "$payload" | jq -r '.tool_input.session // empty')"
+  valid_working_session "$session" || return 1
+  printf '%s' "$session"
+}
+
+# remember_working_session SESSION_ID PAYLOAD: record the session of a
+# successful working-context call for the current project.
+remember_working_session() {
+  local session
+  local marker
+  session="$(working_context_call "$2")" || return 1
+  marker="$(sentinel_path "working-session" "$1")" || return 1
+  write_private_marker "$marker" \
+    "$(jq -cn --arg project "$PROJECT" --arg session "$session" '{project: $project, session: $session}')"
+}
+
+# adopt_working_session SESSION_ID: set SESSION to the working context this host
+# session last saved or loaded for the current project. Fails, leaving SESSION
+# as configured, when there is none.
+adopt_working_session() {
+  local marker
+  local session
+  [ -n "$1" ] || return 1
+  marker="$(sentinel_path "working-session" "$1")" || return 1
+  valid_private_marker "$marker" || return 1
+  session="$(jq -r --arg project "$PROJECT" '
+    if type == "object" and .project == $project and (.session | type) == "string"
+    then .session else empty end
+  ' "$marker" 2>/dev/null)" || return 1
+  valid_working_session "$session" || return 1
+  SESSION="$session"
 }
 
 # promote_pending_recall DIR RECALL_KIND HOST_SESSION PAYLOAD
