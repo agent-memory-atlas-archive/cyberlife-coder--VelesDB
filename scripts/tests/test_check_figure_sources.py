@@ -479,6 +479,9 @@ class FigureSourcesTest(unittest.TestCase):
             "- Bulk import: 50K+ vectors/sec at 768D",
             "- Maintain 50M+ items/sec filter throughput (vs 19M/s with JSON)",
             "with per-batch latency 66% higher than single-threaded.",
+            "A search takes 3 seconds.",
+            "The p50 is 2 msec.",
+            "| Fast | 3 seconds |",
         ]
         root = self.tree({"docs/G.md": "\n".join(lines) + "\n"})
         self.assertEqual(len(self.flagged(root)), len(lines))
@@ -519,6 +522,18 @@ class FigureSourcesTest(unittest.TestCase):
         # "a \u00d73 speed-up" is a figure; "x86 FASTER" names an architecture.
         self.assertEqual(self.numbers_flagged("| \U0001F534 x86 FASTER | Investigate NEON codegen |"), [])
         self.assertEqual(self.numbers_flagged("It gives a \u00d73 speed-up."), ["3"])
+
+
+    def test_a_time_unit_in_the_header_reads_a_bare_cell(self):
+        # "| Build time (s) |" over "| 42 |" is 42 seconds, as "| 42 s |" is;
+        # a config word in that header still makes it a setting.
+        self.assertEqual(self.numbers_flagged("| Fast | 42 |", "| Mode | Build time (s) |"), ["42"])
+        self.assertEqual(self.numbers_flagged("| Fast | 42 |", "| Mode | Timeout (s) |"), [])
+
+    def test_an_escaped_pipe_stays_inside_its_cell(self):
+        # GFM keeps `\\|` inside its cell: the cells after it keep their headers.
+        self.assertEqual(self.numbers_flagged("| a \\| b | 97.4% |", "| Mode | Recall@10 |"), ["97.4"])
+        self.assertEqual(self.numbers_flagged("| a \\| b | 30 s |", "| Setting | Timeout |"), [])
 
 
 if __name__ == "__main__":

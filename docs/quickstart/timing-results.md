@@ -81,7 +81,7 @@ While building the Node scenario, `new VelesDB({ backend: 'wasm' }).init()` cras
 
 ## Cache behaviour caveat
 
-The Node scenario median (0.48 s) is unusually low because `npm` populates a registry cache after the first install of a tiny dependency tree (the SDK has only one dependency, `@wiscale/velesdb-wasm`). A genuinely-first-time developer with an empty `~/.npm` typically sees 4–8 s on the same scenario, dominated by the npm registry round-trip. The other three scenarios are not as heavily affected because their work is dominated by compile time (Rust, server) or wheel download (Python).
+The Node scenario median (0.48 s) is unusually low because `npm` populates a registry cache after the first install of a tiny dependency tree (the SDK has only one dependency, `@wiscale/velesdb-wasm`). A genuinely-first-time developer with an empty `~/.npm` waits longer on the same scenario, dominated by the npm registry round-trip (no recorded run times it). The other three scenarios are not as heavily affected because their work is dominated by compile time (Rust, server) or wheel download (Python).
 
 If you want a worst-case figure to quote externally, take the **maximum across all three runs** rather than the median:
 

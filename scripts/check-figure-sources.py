@@ -287,9 +287,13 @@ def table_times(line: str, header: str | None):
                 yield "latency", start, end
 
 
+# A cell boundary: GFM keeps an escaped `\|` inside its cell.
+CELL_BAR = re.compile(r"(?<!\\)\|")
+
+
 def cells(row: str) -> list[tuple[int, int]]:
     """(start, end) of the text of each cell of a table row."""
-    bars = [match.start() for match in re.finditer(r"\|", row)]
+    bars = [match.start() for match in CELL_BAR.finditer(row)]
     return [(left + 1, right) for left, right in zip(bars, bars[1:])]
 
 
@@ -310,6 +314,10 @@ def header_figures(line: str, header: str | None):
         if unit:
             probes.append(f"{unit.group(1)} {text} {unit.group(2)}")
         kind = next((kind for probe in probes for kind, _, _ in line_figures(probe)), None)
+        # A time unit in the header reads a bare cell as a time, as a unit in
+        # the cell does ("| Build time (s) |" over "| 42 |").
+        if not kind and unit and TABLE_TIME.search(f"{text} {unit.group(2)}"):
+            kind = "latency"
         # The cell's own labels still qualify it: its row label and column
         # header, as for any figure of the row ("| query timeout | 30 s |").
         if kind and not qualified(line, start, end, header, QUALIFIERS.get(kind, ())):
@@ -352,10 +360,14 @@ def table_labels(line: str, at: int, header: str | None) -> list[str]:
     known, and the label (first cell) of its row; nothing outside a table."""
     if not TABLE_ROW.match(line):
         return []
-    column = line.count("|", 0, at)
-    labels = header.split("|")[column : column + 1] if header else []
-    if column > 1:
-        labels.append(line.split("|")[1])
+    row = cells(line)
+    column = next((i for i, (start, end) in enumerate(row) if start <= at <= end), None)
+    if column is None:
+        return []
+    heads = cells(header) if header else []
+    labels = [header[slice(*heads[column])]] if column < len(heads) else []
+    if column > 0:
+        labels.append(line[slice(*row[0])])
     return labels
 
 

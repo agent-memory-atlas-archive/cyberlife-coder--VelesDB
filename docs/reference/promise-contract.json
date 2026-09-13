@@ -5662,7 +5662,7 @@
     {
       "id": "quantization_arena_optout_build_time",
       "file": "docs/guides/QUANTIZATION.md",
-      "must_contain": "most 1.3 s of build time",
+      "must_contain": "most 1.35 s of build time",
       "validation_command": "cargo run --release --example resident_set --features persistence -- write",
       "executable": false,
       "source": "commit adc85f5b (#2128, 2026-08-24, 'decide the arena is not configurable, and say why') added the `write` mode of examples/resident_set.rs and this table: filling 100 000 x 768-d into each backing, no graph and no quantizer - heap 58-62 ms, stable across runs; file-mapped 0.30-1.35 s, rising with each consecutive run (five runs). The commit names no machine. measured_version is the workspace version of that commit. This line restates the worst of those runs.",
@@ -5674,12 +5674,12 @@
         "granted": "2026-09-13",
         "for_workspace_major": 6
       },
-      "last_updated": "2026-09-13"
+      "last_updated": "2026-09-14"
     },
     {
       "id": "quantization_arena_fill_counterweight",
       "file": "docs/guides/QUANTIZATION.md",
-      "must_contain": "the arena fill time (1.3 s at worst)",
+      "must_contain": "the arena fill time (1.35 s at worst)",
       "validation_command": "cargo run --release --example resident_set --features persistence -- write",
       "executable": false,
       "source": "commit adc85f5b (#2128, 2026-08-24, 'decide the arena is not configurable, and say why') added the `write` mode of examples/resident_set.rs and this table: filling 100 000 x 768-d into each backing, no graph and no quantizer - heap 58-62 ms, stable across runs; file-mapped 0.30-1.35 s, rising with each consecutive run (five runs). The commit names no machine. measured_version is the workspace version of that commit. This line restates the worst of those runs.",
@@ -5691,7 +5691,7 @@
         "granted": "2026-09-13",
         "for_workspace_major": 6
       },
-      "last_updated": "2026-09-13"
+      "last_updated": "2026-09-14"
     },
     {
       "id": "rustdoc_memory_million_fact_rebuild",
@@ -5705,6 +5705,23 @@
       "measured_machine": "n/a",
       "measured_version": "n/a",
       "last_updated": "2026-09-13"
+    },
+    {
+      "id": "rustdoc_memory_offset_ceiling_21min",
+      "file": "crates/velesdb-memory/src/migration/tests/performance.rs",
+      "must_contain": "and it takes ~21 minutes",
+      "validation_command": "cargo test -p velesdb-memory --release -- --ignored past_the_ceiling_the_offset_walk_truncates_and_the_cursor_does_not",
+      "executable": false,
+      "source": "The seeding of commit 83784a92's run ('Measured 2026-08-03 (macOS, 100 001 facts seeded in 1242 s)'), stated in minutes; 6a64778e moved it here unchanged. measured_version is the workspace version of that commit.",
+      "measured_on": "2026-08-03 (date of commit 83784a92, which records the run)",
+      "measured_machine": "macOS (the doc comment names no model)",
+      "measured_version": "4.2.0",
+      "stale_accepted": {
+        "reason": "The test's own recorded measurement (83784a92, 4.2.0); re-running it writes 100 001 facts and, per its #[ignore], wants a machine at rest - not done in this change.",
+        "granted": "2026-09-13",
+        "for_workspace_major": 6
+      },
+      "last_updated": "2026-09-14"
     }
   ],
   "claim_families": [

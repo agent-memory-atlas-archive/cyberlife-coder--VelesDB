@@ -89,11 +89,11 @@ Notes:
 |--------------|---------------|-----------|-------------|
 | **Full Precision** | 24.9 us | baseline | 1x |
 | **SQ8** | 25.2 us | 100% | 4x |
-| **PQ** | 257.6 us | 68.0% | ~16-32x |
+| **PQ** | 257.6 us | 68.0% | 16x (64D, m = 8) |
 
 Key findings:
 - **SQ8 is the best general-purpose mode**: zero recall loss with 4x compression and identical latency.
-- PQ search is slower due to ADC (Asymmetric Distance Computation) table lookups, but delivers 16--32x compression for memory-constrained deployments.
+- PQ search is slower due to ADC (Asymmetric Distance Computation) table lookups, but delivers 16x compression at 64D (m = 8) for memory-constrained deployments.
 - PQ recall improves significantly with higher dimensionality (256D+) and OPQ rotation.
 
 *Run `cargo bench -p velesdb-core --bench pq_recall_benchmark -- --noplot` to regenerate recall numbers.*
@@ -438,7 +438,7 @@ Compare against the numbers each library publishes for its own configuration
 ### 11.4 How to run
 
 ```bash
-# One-shot: download + index + measure (first run ≈ 3–5 min)
+# One-shot: download + index + measure (the first run downloads SIFT1M)
 cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m
 
 # Using pre-downloaded data (offline / CI runner):
