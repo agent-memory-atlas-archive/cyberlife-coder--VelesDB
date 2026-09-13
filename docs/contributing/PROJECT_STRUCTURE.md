@@ -10,7 +10,7 @@ velesdb-core/
 ├── Cargo.toml                 # Workspace root
 ├── Cargo.lock                 # Dependency lockfile
 │
-├── rust-toolchain.toml        # Rust version (pinned, matches CI RUST_VERSION)
+├── rust-toolchain.toml        # Rust version (the only pin; CI installs it from this file)
 ├── rustfmt.toml               # Formatting config
 ├── clippy.toml                # Linter config
 ├── deny.toml                  # Dependency security audit
@@ -228,7 +228,7 @@ Pins the Rust toolchain version for all developers:
 
 ```toml
 [toolchain]
-channel = "1.90"  # pinned to the CI toolchain (RUST_VERSION) so local == CI
+channel = "1.90"  # the only toolchain pin: every CI job installs it from this file
 components = ["rustfmt", "clippy"]
 ```
 

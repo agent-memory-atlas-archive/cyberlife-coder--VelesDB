@@ -58,7 +58,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUST_VERSION: '1.90'
 
 jobs:
   # ===========================================================================
@@ -72,10 +71,8 @@ jobs:
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "release-memory"
@@ -223,10 +220,8 @@ jobs:
     environment: crates-io
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "release-memory"
@@ -301,19 +296,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
-          targets: ${{ matrix.target }}
-      # Belt-and-braces: rust-toolchain.toml pins the same version as
-      # `RUST_VERSION`, so the dtolnay step above already added the cross
-      # target's std to the toolchain cargo actually uses. This step targets
-      # the *active* toolchain (whatever rust-toolchain.toml resolves to), so
-      # cross targets (aarch64-linux-gnu, x86_64-apple-darwin) find core/std
-      # instead of failing with E0463 even if the two pins ever drift again.
-      - name: Add cross target std to the active toolchain
-        run: rustup target add ${{ matrix.target }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install --no-self-update --profile minimal
+          rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "release-memory-node-${{ matrix.target }}"
@@ -530,18 +516,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
-          targets: ${{ matrix.target }}
-
-      # Belt-and-braces, as in build-node: the step above already added the
-      # cross target to RUST_VERSION, the channel rust-toolchain.toml pins;
-      # this one targets whatever that file resolves to, so a drift between
-      # the two pins still cannot bring back E0463.
-      - name: Add target to the pinned toolchain
-        run: rustup target add ${{ matrix.target }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install --no-self-update --profile minimal
+          rustup target add ${{ matrix.target }}
 
       - name: Install aarch64 linux cross linker
         if: matrix.cross

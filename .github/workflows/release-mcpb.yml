@@ -28,8 +28,6 @@ permissions:
   id-token: write   # GitHub OIDC for mcp-publisher (proves io.github.cyberlife-coder/*)
 
 env:
-  # rust-toolchain.toml's channel; pinned by scripts/tests/test_ci_toolchain_pin.py
-  RUST_VERSION: "1.90"
   BIN: velesdb-memory
   SERVER_NAME: io.github.cyberlife-coder/velesdb-memory
 
@@ -69,20 +67,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
-          targets: ${{ matrix.target }}
-
-      # Belt-and-braces: the step above installs rust-toolchain.toml's own
-      # channel (RUST_VERSION) with the cross target. This one targets the
-      # *active* toolchain — whatever that file resolves to — so a drift
-      # between the two pins still cannot bring back E0463 "can't find crate
-      # for `std`", which is exactly what shelved the 0.8.0–0.9.1 bundles.
-      - name: Add target to the pinned toolchain
-        run: rustup target add ${{ matrix.target }}
+      # The cross target goes onto rust-toolchain.toml's toolchain, the one
+      # cargo builds with: adding it to any other toolchain is what shelved
+      # the 0.8.0–0.9.1 bundles (E0463 "can't find crate for `std`").
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install --no-self-update --profile minimal
+          rustup target add ${{ matrix.target }}
 
       - name: Install aarch64 linux cross linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'

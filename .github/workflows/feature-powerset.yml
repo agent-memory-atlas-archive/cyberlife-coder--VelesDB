@@ -32,20 +32,14 @@ on:
 permissions:
   contents: read
 
-env:
-  # rust-toolchain.toml's channel; pinned by scripts/tests/test_ci_toolchain_pin.py
-  RUST_VERSION: "1.90"
-
 jobs:
   memory-powerset:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: feature-powerset

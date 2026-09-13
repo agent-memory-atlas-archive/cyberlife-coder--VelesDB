@@ -1,3 +1,3 @@
 [toolchain]
-channel = "1.90"  # pinned to the CI toolchain (RUST_VERSION) so local == CI
+channel = "1.90"  # the only toolchain pin: every CI job installs it from this file
 components = ["rustfmt", "clippy"]
