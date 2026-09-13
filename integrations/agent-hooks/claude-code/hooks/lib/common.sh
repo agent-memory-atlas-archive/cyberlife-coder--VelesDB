@@ -397,8 +397,9 @@ recall_targets_current_project() {
 # adopt it.
 
 # valid_working_session NAME: a session name safe to quote inside a reminder.
-# Bash's =~ anchors the whole string; jq's test("^…$") would anchor one line
-# and let a newline smuggle text into the model's context.
+# Bash's =~ anchors the whole string. `grep -E` would match line by line and let
+# a newline carry text into the model's context; jq's test("^…$") admits a
+# trailing newline.
 valid_working_session() {
   local pattern='^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
   [[ "$1" =~ $pattern ]]
@@ -434,38 +435,78 @@ working_context_call() {
       ;;
   esac
   successful_tool_response "$payload" || return 1
-  [ "$(printf '%s' "$payload" | jq -r '.tool_input.project // empty')" = "$PROJECT" ] || return 1
-  session="$(printf '%s' "$payload" | jq -r '.tool_input.session // empty')"
+  # Both names are compared byte for byte: `$(…)` strips trailing newlines, so
+  # jq prints the session with a sentinel dot that is removed after.
+  printf '%s' "$payload" | jq -e --arg project "$PROJECT" '.tool_input.project == $project' \
+    >/dev/null 2>&1 || return 1
+  session="$(printf '%s' "$payload" \
+    | jq -j '.tool_input.session | if type == "string" then . + "." else empty end')" || return 1
+  [ -n "$session" ] || return 1
+  session="${session%.}"
   valid_working_session "$session" || return 1
   printf '%s' "$session"
 }
 
-# remember_working_session SESSION_ID PAYLOAD: record the session of a
+# working_session_marker HOST_SESSION PROJECT: the private record of the working
+# context one host session uses for one project. The memory store keys working
+# contexts by project name, so the record does too.
+working_session_marker() {
+  sentinel_path "working-session" "$(printf '%s\n%s' "$1" "$2")"
+}
+
+# remember_working_session HOST_SESSION PAYLOAD: record the session of a
 # successful working-context call for the current project.
 remember_working_session() {
   local session
   local marker
   session="$(working_context_call "$2")" || return 1
-  marker="$(sentinel_path "working-session" "$1")" || return 1
+  marker="$(working_session_marker "$1" "$PROJECT")" || return 1
   write_private_marker "$marker" \
-    "$(jq -cn --arg project "$PROJECT" --arg session "$session" '{project: $project, session: $session}')"
+    "$(jq -cn --arg host "$1" --arg project "$PROJECT" --arg session "$session" \
+      '{host: $host, project: $project, session: $session}')"
 }
 
-# adopt_working_session SESSION_ID: set SESSION to the working context this host
-# session last saved or loaded for the current project. Fails, leaving SESSION
-# as configured, when there is none.
-adopt_working_session() {
+# adopted_session_for HOST_SESSION PROJECT: print the working context that host
+# session last saved or loaded for that project. The record must name both: its
+# file name is a checksum, which two host sessions can share.
+adopted_session_for() {
   local marker
   local session
   [ -n "$1" ] || return 1
-  marker="$(sentinel_path "working-session" "$1")" || return 1
+  marker="$(working_session_marker "$1" "$2")" || return 1
   valid_private_marker "$marker" || return 1
-  session="$(jq -r --arg project "$PROJECT" '
-    if type == "object" and .project == $project and (.session | type) == "string"
-    then .session else empty end
+  session="$(jq -j --arg host "$1" --arg project "$2" '
+    if type == "object" and .host == $host and .project == $project and (.session | type) == "string"
+    then .session + "." else empty end
   ' "$marker" 2>/dev/null)" || return 1
+  [ -n "$session" ] || return 1
+  session="${session%.}"
   valid_working_session "$session" || return 1
+  printf '%s' "$session"
+}
+
+# adopt_working_session HOST_SESSION: set SESSION to the working context this
+# host session last saved or loaded for the current project. Fails, leaving
+# SESSION as configured, when there is none.
+adopt_working_session() {
+  local session
+  session="$(adopted_session_for "$1" "$PROJECT")" || return 1
   SESSION="$session"
+}
+
+# adopt_batch_sessions HOST_SESSION TARGETS: TARGETS, a JSON array of
+# {project, session, root} as PreToolUse froze them, with each session replaced
+# by the one this host session last saved or loaded for that project.
+adopt_batch_sessions() {
+  local targets="$2"
+  local project
+  local session
+  while IFS= read -r project; do
+    session="$(adopted_session_for "$1" "$project")" || continue
+    targets="$(printf '%s' "$targets" | jq -c --arg p "$project" --arg s "$session" \
+      'map(if .project == $p then .session = $s else . end)')" || return 1
+  done < <(printf '%s' "$targets" | jq -r '.[].project' | sort -u)
+  printf '%s' "$targets"
 }
 
 # promote_pending_recall DIR RECALL_KIND HOST_SESSION PAYLOAD

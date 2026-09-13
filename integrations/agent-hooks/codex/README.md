@@ -79,13 +79,13 @@ timeout = 10
 statusMessage = "velesdb-memory: require recall before edit"
 
 [[hooks.PostToolUse]]
-matcher = "^mcp__velesdb[-_]memory__(recall|recall_fused|recall_where|compile_context|entity|why)$"
+matcher = "^mcp__velesdb[-_]memory__(recall|recall_fused|recall_where|compile_context|entity|why|save_working_context|load_working_context)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
 command = "bash '/home/you/.codex/hooks/velesdb-memory/post-tool-use.sh'"
 timeout = 10
-statusMessage = "velesdb-memory: record successful recall"
+statusMessage = "velesdb-memory: record recall and working context"
 ```
 
 ## 3. Pin identity and opt in to enforcement

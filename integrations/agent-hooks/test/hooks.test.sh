@@ -922,36 +922,45 @@ WC_SAVED='{"id":1,"id_str":"1"}'
 WC_FOUND='{"found":true,"working":{"goal":"g"}}'
 WC_MISSING='{"found":false,"other_sessions":[]}'
 
+# These helpers feed a hook its payload as a here-string, never through a pipe:
+# a hook that does not read its stdin (the installer's positive control swaps in
+# one) would kill the pipe's writer with SIGPIPE, and under `set -euo pipefail`
+# the harness would end with 141 instead of failing by name. A failing call is
+# likewise left to the assertion that reads its output (#2277). WC_CWD runs a
+# helper in another project directory.
+
 # wc_call HOOKS_DIR HOST_SESSION TOOL PROJECT SESSION RESULT_TEXT [IS_ERROR]:
 # feed PostToolUse the payload of a velesdb-memory working-context call, in the
 # shape its host sends: Claude Code passes a successful MCP result's content
 # array itself, Codex the CallToolResult envelope (see successful_tool_response).
 wc_call() {
-  local envelope=false
+  local envelope=false payload
   [ "$1" = "$CODEX_HOOKS_DIR" ] && envelope=true
-  jq -n --arg cwd "$PROJECT_DIR" --arg sid "$2" --arg tool "$3" --arg project "$4" \
+  payload="$(jq -n --arg cwd "${WC_CWD:-$PROJECT_DIR}" --arg sid "$2" --arg tool "$3" --arg project "$4" \
     --arg session "$5" --arg text "$6" --argjson err "${7:-false}" --argjson envelope "$envelope" \
     '{session_id: $sid, cwd: $cwd, hook_event_name: "PostToolUse", tool_name: $tool,
       tool_input: {project: $project, session: $session},
       tool_response: (if $err then {content: [{type: "text", text: $text}], isError: true}
                       elif $envelope then {content: [{type: "text", text: $text}]}
-                      else [{type: "text", text: $text}] end)}' \
-    | bash "$1/post-tool-use.sh" >/dev/null
+                      else [{type: "text", text: $text}] end)}')"
+  bash "$1/post-tool-use.sh" <<<"$payload" >/dev/null || true
 }
 
 # wc_context HOOKS_DIR HOST_SESSION SOURCE: the SessionStart additionalContext.
 wc_context() {
-  jq -n --arg cwd "$PROJECT_DIR" --arg sid "$2" --arg src "$3" \
-    '{session_id: $sid, cwd: $cwd, hook_event_name: "SessionStart", source: $src}' \
-    | bash "$1/session-start.sh" | jq -r '.hookSpecificOutput.additionalContext'
+  local payload
+  payload="$(jq -n --arg cwd "${WC_CWD:-$PROJECT_DIR}" --arg sid "$2" --arg src "$3" \
+    '{session_id: $sid, cwd: $cwd, hook_event_name: "SessionStart", source: $src}')"
+  bash "$1/session-start.sh" <<<"$payload" | jq -r '.hookSpecificOutput.additionalContext' || true
 }
 
 # wc_reason HOOKS_DIR HOOK HOST_SESSION: the reason a Stop or PreCompact blocks with.
 wc_reason() {
-  jq -n --arg cwd "$PROJECT_DIR" --arg sid "$3" --arg event "$2" \
+  local payload
+  payload="$(jq -n --arg cwd "${WC_CWD:-$PROJECT_DIR}" --arg sid "$3" --arg event "$2" \
     '{session_id: $sid, cwd: $cwd, hook_event_name: $event, trigger: "auto",
-      stop_hook_active: false, last_assistant_message: "done"}' \
-    | bash "$1/$2.sh" | jq -r '.reason // empty'
+      stop_hook_active: false, last_assistant_message: "done"}')"
+  bash "$1/$2.sh" <<<"$payload" | jq -r '.reason // empty' || true
 }
 
 # wc_expect NAME TEXT SESSION: TEXT names SESSION, and no other.
@@ -1018,19 +1027,66 @@ wc_expect "Working context: a name carrying a quote is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-h" startup)" rolling
 
 # A record reached through a symlink is not ours: never adopted.
-wc_key="$(printf '%s' "$wc_sid-i" | cksum)"
-printf '{"project":"test-project","session":"campaign-linked"}\n' > "$TMP_TEST_DIR/linked-record"
+wc_key="$(printf '%s\n%s' "$wc_sid-i" test-project | cksum)"
+jq -cn --arg host "$wc_sid-i" '{host: $host, project: "test-project", session: "campaign-linked"}' \
+  > "$TMP_TEST_DIR/linked-record"
 ln -s "$TMP_TEST_DIR/linked-record" "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
 wc_expect "Working context: a symlinked record is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-i" startup)" rolling
 
 # The record is re-checked when read: one planted with a name the capture
 # would have refused is not adopted either.
-wc_key="$(printf '%s' "$wc_sid-j" | cksum)"
-printf '%s\n' '{"project":"test-project","session":"x\" and more"}' \
+wc_key="$(printf '%s\n%s' "$wc_sid-j" test-project | cksum)"
+jq -cn --arg host "$wc_sid-j" '{host: $host, project: "test-project", session: "x\" and more"}' \
   > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
 wc_expect "Working context: a planted record with an unsafe name is not adopted" \
   "$(wc_context "$HOOKS_DIR" "$wc_sid-j" startup)" rolling
+
+# A trailing newline is refused too; a check anchored like jq's `$` admits one.
+wc_call "$HOOKS_DIR" "$wc_sid-k" "$WC_SAVE" test-project $'campaign-k\n' "$WC_SAVED"
+wc_expect "Working context: a name ending in a newline is not adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-k" startup)" rolling
+
+# The project is compared byte for byte too.
+wc_call "$HOOKS_DIR" "$wc_sid-p" "$WC_SAVE" $'test-project\n' campaign-p "$WC_SAVED"
+wc_expect "Working context: a save for the project name plus a newline is not adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-p" startup)" rolling
+
+# The server may be registered under the underscore spelling.
+wc_call "$HOOKS_DIR" "$wc_sid-l" "mcp__velesdb_memory__save_working_context" test-project campaign-l "$WC_SAVED"
+wc_expect "Working context: a save through the underscore tool name is adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-l" startup)" campaign-l
+
+# One host session, two projects: each keeps the working context saved for it.
+PROJECT_B_DIR="$TMP_TEST_DIR/project-b"
+mkdir -p "$PROJECT_B_DIR"
+printf '{"project": "test-project-b", "session": "rolling"}\n' > "$PROJECT_B_DIR/.velesdb-hooks.json"
+wc_call "$HOOKS_DIR" "$wc_sid-m" "$WC_SAVE" test-project campaign-ma "$WC_SAVED"
+WC_CWD="$PROJECT_B_DIR" wc_call "$HOOKS_DIR" "$wc_sid-m" "$WC_SAVE" test-project-b campaign-mb "$WC_SAVED"
+wc_expect "Working context: a save in another project keeps this one's" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-m" startup)" campaign-ma
+wc_expect "Working context: each project of one host session keeps its own" \
+  "$(WC_CWD="$PROJECT_B_DIR" wc_context "$HOOKS_DIR" "$wc_sid-m" startup)" campaign-mb
+
+# Two host sessions in one project: a save by the other does not erase this one's.
+wc_call "$HOOKS_DIR" "$wc_sid-q1" "$WC_SAVE" test-project campaign-q1 "$WC_SAVED"
+wc_call "$HOOKS_DIR" "$wc_sid-q2" "$WC_SAVE" test-project campaign-q2 "$WC_SAVED"
+wc_expect "Working context: another host session's save does not erase this one's" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-q1" startup)" campaign-q1
+
+# A record's file name is a checksum, which two host sessions or two projects
+# can share: a record naming another host session, or another project, is not
+# adopted.
+wc_key="$(printf '%s\n%s' "$wc_sid-n" test-project | cksum)"
+jq -cn '{host: "another-host-session", project: "test-project", session: "campaign-n"}' \
+  > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
+wc_expect "Working context: a record naming another host session is not adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-n" startup)" rolling
+wc_key="$(printf '%s\n%s' "$wc_sid-o" test-project | cksum)"
+jq -cn --arg host "$wc_sid-o" '{host: $host, project: "another-project", session: "campaign-o"}' \
+  > "$HOOK_STATE_DIR/working-session-${wc_key// /-}.marker"
+wc_expect "Working context: a record naming another project is not adopted" \
+  "$(wc_context "$HOOKS_DIR" "$wc_sid-o" startup)" rolling
 
 # Codex: the same capture, and its compaction reminder names the session too.
 wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex" "$WC_SAVE" test-project campaign-codex "$WC_SAVED"
@@ -1038,9 +1094,16 @@ wc_expect "Working context (Codex): SessionStart after a compaction names it" \
   "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex" compact)" campaign-codex
 wc_expect "Working context (Codex): Stop names it" \
   "$(wc_reason "$CODEX_HOOKS_DIR" stop "$wc_sid-codex")" campaign-codex
+wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-load" "$WC_LOAD" test-project campaign-cl "$WC_FOUND"
+wc_expect "Working context (Codex): a load that found one is adopted" \
+  "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-load" compact)" campaign-cl
 wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-failed" "$WC_SAVE" test-project campaign-x '{"error":"refused"}' true
 wc_expect "Working context (Codex): a failed save is not adopted" \
   "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-failed" startup)" rolling
+wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-q1" "$WC_SAVE" test-project campaign-cq1 "$WC_SAVED"
+wc_call "$CODEX_HOOKS_DIR" "$wc_sid-codex-q2" "$WC_SAVE" test-project campaign-cq2 "$WC_SAVED"
+wc_expect "Working context (Codex): another host session's save does not erase this one's" \
+  "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-q1" startup)" campaign-cq1
 wc_expect "Working context (Codex): another host session keeps the configured one" \
   "$(wc_context "$CODEX_HOOKS_DIR" "$wc_sid-codex-other" startup)" rolling
 

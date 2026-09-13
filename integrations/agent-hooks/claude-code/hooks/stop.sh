@@ -112,6 +112,11 @@ if [ "$dirty_invalid" = "true" ]; then
 fi
 if [ "${#dirty_records[@]}" -gt 0 ]; then
   targets="$(jq -sc '[.[] | {project, session, root}]' "${dirty_records[@]}")"
+  # Each repository is named with the working context this conversation last
+  # saved or loaded for it, not the session PreToolUse froze into its record.
+  if adopted_targets="$(adopt_batch_sessions "$session_id" "$targets")"; then
+    targets="$adopted_targets"
+  fi
   for record_file in "${dirty_records[@]}"; do
     root="$(jq -r '.root' "$record_file")"
     marker_id="$(printf '%s\n%s' "$session_id" "$root")"
