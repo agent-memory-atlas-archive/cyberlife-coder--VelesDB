@@ -304,9 +304,13 @@ describe('WasmBackend', () => {
         fusionParams: { avgWeight: 0.6, maxWeight: 0.3, hitWeight: 0.1 },
       });
 
+      // The weights reach the binding as its sixth argument, [avg, max, hit].
+      // This test used to pin a five-argument call, i.e. the drop (#2095).
       expect(store.multi_query_search).toHaveBeenCalledWith(
-        expect.any(Float32Array), 1, 10, 'weighted', 60,
+        expect.any(Float32Array), 1, 10, 'weighted', 60, expect.any(Float32Array),
       );
+      const weights = store.multi_query_search.mock.calls[0][5] as Float32Array;
+      expect(Array.from(weights)).toEqual(Array.from(new Float32Array([0.6, 0.3, 0.1])));
       expect(results.length).toBe(1);
       expect(results[0].score).toBe(0.95);
     });

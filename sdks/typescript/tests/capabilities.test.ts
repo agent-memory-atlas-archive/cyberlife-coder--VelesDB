@@ -23,6 +23,9 @@ const ALL_CAPABILITY_KEYS: readonly (keyof CapabilityMap)[] = [
   'hybridSearch',
   'multiQuerySearch',
   'sparseSearch',
+  'namedSparseIndexes',
+  'includeVectors',
+  'idOnlySearch',
   'scroll',
   'graphTraversal',
   'secondaryIndexes',
@@ -54,15 +57,19 @@ describe('CapabilityMap — structural contract', () => {
     expect(Object.isFrozen(WASM_CAPABILITIES)).toBe(true);
   });
 
-  it('exposes velesqlFusionStrategies as a frozen string array on both maps', () => {
-    for (const map of [REST_CAPABILITIES, WASM_CAPABILITIES]) {
-      expect(Array.isArray(map.velesqlFusionStrategies)).toBe(true);
-      expect(Object.isFrozen(map.velesqlFusionStrategies)).toBe(true);
-      for (const s of map.velesqlFusionStrategies) {
-        expect(typeof s).toBe('string');
+  it.each(['velesqlFusionStrategies', 'filteredSearch', 'multiQueryFusionParams'] as const)(
+    'exposes %s as a frozen string array on both maps',
+    (key) => {
+      for (const map of [REST_CAPABILITIES, WASM_CAPABILITIES]) {
+        const list = map[key];
+        expect(Array.isArray(list)).toBe(true);
+        expect(Object.isFrozen(list)).toBe(true);
+        for (const s of list) {
+          expect(typeof s).toBe('string');
+        }
       }
     }
-  });
+  );
 });
 
 describe('REST_CAPABILITIES — full-feature contract', () => {
@@ -83,6 +90,24 @@ describe('REST_CAPABILITIES — full-feature contract', () => {
     expect(REST_CAPABILITIES.collectionIntrospection).toBe(true);
     expect(REST_CAPABILITIES.velesqlMatchOrderBy).toBe(true);
     expect(REST_CAPABILITIES.velesqlAlterCollection).toBe(true);
+    expect(REST_CAPABILITIES.namedSparseIndexes).toBe(true);
+    expect(REST_CAPABILITIES.includeVectors).toBe(true);
+    expect(REST_CAPABILITIES.idOnlySearch).toBe(true);
+    expect([...REST_CAPABILITIES.filteredSearch]).toEqual([
+      'search',
+      'sparseSearch',
+      'textSearch',
+      'hybridSearch',
+      'multiQuerySearch',
+    ]);
+    expect([...REST_CAPABILITIES.multiQueryFusionParams]).toEqual([
+      'k',
+      'avgWeight',
+      'maxWeight',
+      'hitWeight',
+      'denseWeight',
+      'sparseWeight',
+    ]);
     expect([...REST_CAPABILITIES.velesqlFusionStrategies]).toEqual([
       'rrf',
       'weighted',
@@ -99,10 +124,24 @@ describe('WASM_CAPABILITIES — focused subset', () => {
     expect(WASM_CAPABILITIES.textSearch).toBe(true);
     expect(WASM_CAPABILITIES.hybridSearch).toBe(true);
     expect(WASM_CAPABILITIES.multiQuerySearch).toBe(true);
+    // Sparse search runs on WASM; the map used to deny it (#2095).
+    expect(WASM_CAPABILITIES.sparseSearch).toBe(true);
+  });
+
+  it('filters dense search only, and lists the fusion params its binding takes', () => {
+    expect([...WASM_CAPABILITIES.filteredSearch]).toEqual(['search']);
+    expect([...WASM_CAPABILITIES.multiQueryFusionParams]).toEqual([
+      'k',
+      'avgWeight',
+      'maxWeight',
+      'hitWeight',
+    ]);
+    expect(WASM_CAPABILITIES.namedSparseIndexes).toBe(false);
+    expect(WASM_CAPABILITIES.includeVectors).toBe(false);
+    expect(WASM_CAPABILITIES.idOnlySearch).toBe(false);
   });
 
   it('does NOT support persistent / graph / streaming / VelesQL features', () => {
-    expect(WASM_CAPABILITIES.sparseSearch).toBe(false);
     expect(WASM_CAPABILITIES.scroll).toBe(false);
     expect(WASM_CAPABILITIES.graphTraversal).toBe(false);
     expect(WASM_CAPABILITIES.secondaryIndexes).toBe(false);

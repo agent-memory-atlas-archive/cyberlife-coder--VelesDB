@@ -109,6 +109,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load call alone reports the cost as gone when it has only moved.
 
 ### Fixed
+- **The TypeScript SDK's WASM backend refuses what it cannot honour
+  instead of dropping it (#2095).** `textSearch` never passed the caller's
+  `filter` on: velesdb-wasm's `text_search(query, k, field?)` has no filter
+  slot, so rows the filter excluded came back. `hybridSearch`,
+  `multiQuerySearch` and `search` with a `sparseVector` dropped their
+  filters the same way, and `search` ignored `sparseIndexName` and
+  `includeVectors: true`. `multiQuerySearch` passed only `fusionParams.k`,
+  because the SDK typed the binding's `multi_query_search` from a hand copy
+  that predated the `weights` argument velesdb-wasm has taken since 4.0.0.
+  `avgWeight`, `maxWeight` and `hitWeight` now reach the binding as its
+  single `[avg, max, hit]` argument, and the binding's search parameters
+  are read from its own declaration file. `db.capabilities()` reported
+  `sparseSearch: false` on WASM while sparse search ran. `WASM_CAPABILITIES`
+  is now the one table the WASM backend consults before it uses an option:
+  it reports `sparseSearch: true` and gains `filteredSearch`,
+  `multiQueryFusionParams`, `namedSparseIndexes`, `includeVectors` and
+  `idOnlySearch`, and a conformance test probes every key against the
+  backend. **Behaviour change, WASM backend only:** these calls used to
+  succeed with the argument silently ignored and now throw `NOT_SUPPORTED`,
+  naming the backend and the capability: a `filter` on `textSearch`,
+  `hybridSearch`, `multiQuerySearch` or a sparse `search`;
+  `sparseIndexName`; `includeVectors: true`; `fusionParams.denseWeight`,
+  `sparseWeight` (WASM `relative_score` weighs its branches equally) or any
+  other field `multiQueryFusionParams` does not list; and a weighted triple
+  given in part. The REST backend is unchanged.
+
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
   served at `GET /api-docs/openapi.json` by a server built with

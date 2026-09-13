@@ -528,3 +528,190 @@ describe('wasmQuery — VelesQL faithfulness guard', () => {
     expect(query).toHaveBeenLastCalledWith(expect.any(Float32Array), 2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #2095 — the WASM backend refuses what it cannot honour instead of dropping
+// it. Every refusal is NOT_SUPPORTED and names the backend and the capability
+// a caller can read beforehand from `db.capabilities()`.
+// ---------------------------------------------------------------------------
+
+/** Settle `promise`, returning its value or what it rejected with. */
+async function settle<T>(promise: Promise<T>): Promise<unknown> {
+  return promise.then(
+    (value) => value,
+    (error: unknown) => error
+  );
+}
+
+function expectRefusal(outcome: unknown, capability: string): void {
+  expect(outcome).toBeInstanceOf(VelesDBError);
+  const err = outcome as VelesDBError;
+  expect(err.code).toBe('NOT_SUPPORTED');
+  expect(err.message).toMatch(/WASM backend/);
+  expect(err.message).toContain(capability);
+}
+
+const TENANT_FILTER = {
+  condition: { type: 'eq', field: 'tenant', value: 'mine' },
+};
+
+describe('WASM search — a filter is refused, never dropped (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('textSearch refuses a filter instead of returning rows it excludes', async () => {
+    // velesdb-wasm's text_search(query, k, field?) has no filter slot: its
+    // third argument names a payload field. Dropping the filter returns this
+    // row, which the caller's filter excludes.
+    const text_search = vi.fn(() => [{ id: 2n, payload: { tenant: 'other' } }]);
+    const ctx = buildCtx('docs', buildStore({ text_search }));
+
+    const outcome = await settle(
+      wasmTextSearch(ctx, 'docs', 'hello', { filter: TENANT_FILTER })
+    );
+
+    expectRefusal(outcome, 'filteredSearch');
+    expect(text_search).not.toHaveBeenCalled();
+  });
+
+  it('hybridSearch refuses a filter', async () => {
+    const hybrid_search = vi.fn(() => [
+      { id: 2n, score: 0.9, payload: { tenant: 'other' } },
+    ]);
+    const ctx = buildCtx('docs', buildStore({ hybrid_search }));
+
+    const outcome = await settle(
+      wasmHybridSearch(ctx, 'docs', [0.1, 0.2], 'hello', { filter: TENANT_FILTER })
+    );
+
+    expectRefusal(outcome, 'filteredSearch');
+    expect(hybrid_search).not.toHaveBeenCalled();
+  });
+
+  it('multiQuerySearch refuses a filter', async () => {
+    const multi_query_search = vi.fn(() => [[2n, 0.9]]);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search }));
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { filter: TENANT_FILTER })
+    );
+
+    expectRefusal(outcome, 'filteredSearch');
+    expect(multi_query_search).not.toHaveBeenCalled();
+  });
+
+  it('search refuses a filter combined with a sparse vector', async () => {
+    const sparse_search = vi.fn(() => [{ doc_id: 2n, score: 0.9 }]);
+    const ctx = buildCtx('docs', buildStore({ sparse_search }));
+
+    const outcome = await settle(
+      wasmSearch(ctx, 'docs', [0.1, 0.2], {
+        sparseVector: { 1: 0.5 },
+        filter: TENANT_FILTER,
+      })
+    );
+
+    expectRefusal(outcome, 'filteredSearch');
+    expect(sparse_search).not.toHaveBeenCalled();
+  });
+});
+
+describe('WASM search — options it has no way to honour are refused (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('search refuses sparseIndexName: a WASM collection has one sparse index', async () => {
+    const sparse_search = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ sparse_search }));
+
+    const outcome = await settle(
+      wasmSearch(ctx, 'docs', [0.1, 0.2], {
+        sparseVector: { 1: 0.5 },
+        sparseIndexName: 'splade_v2',
+      })
+    );
+
+    expectRefusal(outcome, 'namedSparseIndexes');
+    expect(sparse_search).not.toHaveBeenCalled();
+  });
+
+  it('search refuses includeVectors: true, since its results carry no vector', async () => {
+    const search = vi.fn(() => [[1n, 0.9]]);
+    const ctx = buildCtx('docs', buildStore({ search }));
+
+    const outcome = await settle(
+      wasmSearch(ctx, 'docs', [0.1, 0.2], { includeVectors: true })
+    );
+
+    expectRefusal(outcome, 'includeVectors');
+  });
+
+  it('search accepts includeVectors: false, which asks for nothing', async () => {
+    const search = vi.fn(() => [[1n, 0.9]]);
+    const ctx = buildCtx('docs', buildStore({ search }));
+
+    const rows = await wasmSearch(ctx, 'docs', [0.1, 0.2], { includeVectors: false });
+
+    expect(rows).toEqual([{ id: '1', score: 0.9 }]);
+  });
+});
+
+describe('wasmMultiQuerySearch — fusionParams reach the binding or are refused (#2095)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("passes avgWeight/maxWeight/hitWeight as the binding's weights argument", async () => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+      fusion: 'weighted',
+      fusionParams: { avgWeight: 0.5, maxWeight: 0.25, hitWeight: 0.25 },
+    });
+
+    const weights = multi.mock.calls[0]![5];
+    expect(weights).toBeInstanceOf(Float32Array);
+    expect(Array.from(weights as Float32Array)).toEqual([0.5, 0.25, 0.25]);
+  });
+
+  it("passes no weights when none is given, so the binding applies core's defaults", async () => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    await wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], { fusion: 'weighted' });
+
+    expect(multi.mock.calls[0]![5]).toBeUndefined();
+  });
+
+  it.each(['denseWeight', 'sparseWeight'] as const)(
+    'refuses fusionParams.%s: WASM relative_score weighs its branches equally',
+    async (name) => {
+      const multi = vi.fn(() => []);
+      const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+      const outcome = await settle(
+        wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+          fusion: 'relative_score',
+          fusionParams: { [name]: 0.7 },
+        })
+      );
+
+      expectRefusal(outcome, 'multiQueryFusionParams');
+      expect(multi).not.toHaveBeenCalled();
+    }
+  );
+
+  it('refuses a partial weighted triple rather than inventing the missing weights', async () => {
+    const multi = vi.fn(() => []);
+    const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
+
+    const outcome = await settle(
+      wasmMultiQuerySearch(ctx, 'docs', [[0.1, 0.2]], {
+        fusion: 'weighted',
+        fusionParams: { avgWeight: 0.5 },
+      })
+    );
+
+    expect(outcome).toBeInstanceOf(VelesDBError);
+    expect((outcome as VelesDBError).code).toBe('NOT_SUPPORTED');
+    expect((outcome as VelesDBError).message).toMatch(/avgWeight, maxWeight and hitWeight/);
+    expect(multi).not.toHaveBeenCalled();
+  });
+});

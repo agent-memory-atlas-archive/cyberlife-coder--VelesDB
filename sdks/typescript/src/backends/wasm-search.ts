@@ -11,9 +11,17 @@ import type {
   MultiQuerySearchOptions,
   QueryOptions,
   QueryApiResponse,
+  FusionParams,
 } from '../types';
 import type { FilterInput } from '../filter';
 import { NotFoundError, VelesDBError } from '../types';
+import { wasmNotSupported } from './shared';
+import {
+  isSet,
+  requireWasmCapability,
+  requireWasmFilterSupport,
+  requireWasmFusionParams,
+} from './wasm-capability-guards';
 import type {
   WasmContext,
   WasmDenseResult,
@@ -116,6 +124,26 @@ function searchDenseOnly(
   });
 }
 
+/**
+ * Refuse the `SearchOptions` this backend cannot apply. `quality` is
+ * accepted and has nothing to tune: WASM search scans every stored vector,
+ * with no graph index whose recall a preset would trade for speed.
+ */
+function refuseUnhonouredSearchOptions(options: SearchOptions | undefined): void {
+  if (options?.includeVectors === true) {
+    requireWasmCapability('includeVectors', 'search with includeVectors: true');
+  }
+  if (isSet(options?.sparseIndexName)) {
+    requireWasmCapability('namedSparseIndexes', 'search with a sparseIndexName');
+  }
+  if (options?.sparseVector) {
+    requireWasmCapability('sparseSearch', 'search with a sparseVector');
+    requireWasmFilterSupport('sparseSearch', options.filter);
+  } else {
+    requireWasmFilterSupport('search', options?.filter);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Exported search functions
 // ---------------------------------------------------------------------------
@@ -140,6 +168,7 @@ export async function wasmSearch(
   }
 
   const k = options?.k ?? 10;
+  refuseUnhonouredSearchOptions(options);
 
   if (options?.sparseVector) {
     const { indices, values } = ctx.sparseVectorToArrays(options.sparseVector);
@@ -216,7 +245,10 @@ export async function wasmTextSearch(
   if (!collection) {
     throw new NotFoundError(`Collection '${collectionName}'`);
   }
+  requireWasmFilterSupport('textSearch', options?.filter);
   const k = options?.k ?? 10;
+  // The binding's third argument names one payload field to match. It is
+  // not a filter, which is why a filter is refused above.
   const raw: WasmSearchResultItem[] = collection.store.text_search(query, k, undefined);
   return raw.map(r => mapWasmResult(ctx, collection, r));
 }
@@ -232,6 +264,7 @@ export async function wasmHybridSearch(
   if (!collection) {
     throw new NotFoundError(`Collection '${collectionName}'`);
   }
+  requireWasmFilterSupport('hybridSearch', options?.filter);
   const queryVector = vector instanceof Float32Array ? vector : new Float32Array(vector);
   const k = options?.k ?? 10;
   const vectorWeight = options?.vectorWeight ?? 0.5;
@@ -248,6 +281,35 @@ export async function wasmHybridSearch(
 // Multi-query search
 // ---------------------------------------------------------------------------
 
+/** The weighted-fusion fields velesdb-wasm takes as one `[avg, max, hit]` argument. */
+const WEIGHTED_TRIPLE = ['avgWeight', 'maxWeight', 'hitWeight'] as const;
+
+/**
+ * Translate `fusionParams` into velesdb-wasm's `multi_query_search`
+ * arguments, refusing what the binding cannot apply.
+ *
+ * The three weighted-fusion weights travel as one argument, and the binding
+ * applies core's defaults only when that argument is absent. A partial
+ * triple is therefore refused rather than completed with guessed values.
+ */
+function wasmFusionArgs(params: FusionParams | undefined): {
+  rrfK: number;
+  weights: Float32Array | undefined;
+} {
+  requireWasmFusionParams(params);
+  const weights = WEIGHTED_TRIPLE.map((name) => params?.[name]).filter(isSet);
+  if (weights.length !== 0 && weights.length !== WEIGHTED_TRIPLE.length) {
+    wasmNotSupported(
+      'multiQuerySearch with only some of fusionParams avgWeight, maxWeight and ' +
+        'hitWeight (velesdb-wasm takes the three together)'
+    );
+  }
+  return {
+    rrfK: params?.k ?? 60,
+    weights: weights.length === 0 ? undefined : new Float32Array(weights),
+  };
+}
+
 export async function wasmMultiQuerySearch(
   ctx: WasmContext,
   collectionName: string,
@@ -258,6 +320,8 @@ export async function wasmMultiQuerySearch(
   if (!collection) {
     throw new NotFoundError(`Collection '${collectionName}'`);
   }
+  requireWasmFilterSupport('multiQuerySearch', options?.filter);
+  const { rrfK, weights } = wasmFusionArgs(options?.fusionParams);
   if (vectors.length === 0) {
     return [];
   }
@@ -276,7 +340,8 @@ export async function wasmMultiQuerySearch(
     numVectors,
     options?.k ?? 10,
     strategy,
-    options?.fusionParams?.k ?? 60
+    rrfK,
+    weights
   );
 
   return raw.map(r => mapWasmResult(ctx, collection, r));

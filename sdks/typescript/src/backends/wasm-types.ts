@@ -7,7 +7,16 @@
 
 import type { CollectionConfig } from '../types';
 import type { SparseVector } from '../types';
-import type { FilterInput } from '../filter';
+import type { VectorStore as BindingVectorStore } from '@wiscale/velesdb-wasm';
+
+/**
+ * Parameter list of a velesdb-wasm `VectorStore` method, read from the
+ * binding's declaration file. A hand-copied list went stale: it omitted the
+ * `weights` argument `multi_query_search` has taken since velesdb-wasm
+ * 4.0.0, so the SDK never passed it (#2095).
+ */
+type BindingParams<M extends keyof BindingVectorStore> =
+  BindingVectorStore[M] extends (...args: infer P) => unknown ? P : never;
 
 // ---------------------------------------------------------------------------
 // WASM result types — mirror the shapes returned by velesdb-wasm
@@ -81,49 +90,37 @@ export interface WasmVectorStore {
   /** Number of vectors in the store (getter property). */
   readonly len: number;
 
+  // The search methods take their parameter lists from the binding's own
+  // declaration file (`BindingParams`); only the result shapes, which the
+  // binding types as `any`, are stated here.
+
   /** k-NN dense search. Returns array of [id, score] tuples. */
-  search(query: Float32Array, k: number): WasmDenseResult[];
+  search(...args: BindingParams<'search'>): WasmDenseResult[];
 
   /** k-NN search with metadata filter. Returns array of {id, score, payload}. */
-  search_with_filter(
-    query: Float32Array,
-    k: number,
-    filter: FilterInput
-  ): WasmFilteredResult[];
+  search_with_filter(...args: BindingParams<'search_with_filter'>): WasmFilteredResult[];
 
   /** Sparse index search. Returns array of {doc_id, score}. */
-  sparse_search(
-    indices: Uint32Array,
-    values: Float32Array,
-    k: number
-  ): WasmSparseResult[];
+  sparse_search(...args: BindingParams<'sparse_search'>): WasmSparseResult[];
 
-  /** Text search on payload fields. Returns mixed result items. */
-  text_search(
-    query: string,
-    k: number,
-    field: string | undefined
-  ): WasmSearchResultItem[];
+  /**
+   * Text search on payload fields. The third argument names one payload
+   * field to match; this method takes no filter.
+   */
+  text_search(...args: BindingParams<'text_search'>): WasmSearchResultItem[];
 
   /** Hybrid vector + text search. Returns array of {id, score, payload}. */
-  hybrid_search(
-    queryVector: Float32Array,
-    textQuery: string,
-    k: number,
-    vectorWeight: number | undefined
-  ): WasmHybridResult[];
+  hybrid_search(...args: BindingParams<'hybrid_search'>): WasmHybridResult[];
 
-  /** Multi-query search with fusion strategy. Returns mixed result items. */
-  multi_query_search(
-    vectors: Float32Array,
-    numVectors: number,
-    k: number,
-    strategy: string,
-    rrfK: number
-  ): WasmSearchResultItem[];
+  /**
+   * Multi-query search with fusion: `(vectors, num_vectors, k, strategy,
+   * rrf_k?, weights?)`, `weights` being the weighted strategy's
+   * `[avg, max, hit]`. Returns mixed result items.
+   */
+  multi_query_search(...args: BindingParams<'multi_query_search'>): WasmSearchResultItem[];
 
   /** VelesQL-style query returning multi-model results. */
-  query(queryVector: Float32Array, k: number): Record<string, unknown>[];
+  query(...args: BindingParams<'query'>): Record<string, unknown>[];
 }
 
 // ---------------------------------------------------------------------------

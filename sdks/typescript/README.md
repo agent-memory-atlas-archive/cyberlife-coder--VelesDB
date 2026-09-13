@@ -384,6 +384,8 @@ Vector similarity search.
 | `sparseVector` | `Record<number, number>` | - | Sparse vector for hybrid sparse+dense search |
 | `quality` | `SearchQuality` | - | Search quality mode (e.g., `'fast'`, `'balanced'`, `'custom:256'`, `'adaptive:32:512'`) |
 
+> **WASM backend:** `filter` applies to dense search only. Combined with `sparseVector` it is refused with `NOT_SUPPORTED`, and so are `sparseIndexName` and `includeVectors: true`; none of them is silently ignored. `quality` is accepted and has nothing to tune, since WASM search scans every stored vector. `db.capabilities()` reports each case (`filteredSearch`, `namedSparseIndexes`, `includeVectors`).
+
 ```typescript
 const results = await db.search('docs', queryVector, {
   k: 10,
@@ -456,6 +458,8 @@ Full-text search using BM25 scoring.
 const results = await db.textSearch('docs', 'machine learning', { k: 10 });
 ```
 
+> **WASM backend:** the WASM build has no BM25 index. It returns payloads that contain the query as a case-insensitive substring, and refuses a `filter` with `NOT_SUPPORTED` rather than return rows the filter excludes (`db.capabilities().filteredSearch` does not list `'textSearch'`).
+
 #### `db.hybridSearch(collection, vector, textQuery, options?)`
 
 Combined vector similarity + BM25 text search with RRF fusion.
@@ -468,6 +472,8 @@ const results = await db.hybridSearch(
   { k: 10, vectorWeight: 0.7 }  // 70% vector, 30% text
 );
 ```
+
+> **WASM backend:** the text side is the same substring match as `textSearch`, scored 1 when it matches and 0 otherwise, then blended linearly with the vector score by `vectorWeight`. A `filter` is refused with `NOT_SUPPORTED`.
 
 #### `db.multiQuerySearch(collection, vectors, options?)`
 
@@ -503,7 +509,7 @@ const results = await db.multiQuerySearch('docs', [emb1, emb2], {
 });
 ```
 
-> **Note:** WASM supports `rrf`, `average`, `maximum`. The `weighted` and `relative_score` strategies are REST-only.
+> **WASM backend:** all five strategies run. `weighted` takes `avgWeight`, `maxWeight` and `hitWeight` together: pass all three, or none for core's defaults. A partial set is refused, because the binding cannot fill in the rest. WASM `relative_score` averages the query branches with equal weight, so `denseWeight` and `sparseWeight` are refused with `NOT_SUPPORTED`, and so is a `filter`. `db.capabilities().multiQueryFusionParams` lists the `fusionParams` fields a backend applies.
 
 #### Named sparse indexes — `sparseIndexName` vs `sparseSearchNamed()`
 
@@ -534,7 +540,7 @@ const sparseOnly = await db.sparseSearchNamed(
 When the collection has only one (default) sparse index, omit `sparseIndexName` on `db.search()`; the server picks the default. For named indexes, both APIs require the explicit name.
 
 > **Note:** Both APIs are REST-only when a named index is required.
-> The WASM backend has no concept of named sparse indexes — `sparseIndexName` is silently ignored on `db.search()` (the collection's single sparse index is used), and `db.sparseSearchNamed()` throws `wasmNotSupported`. Tracked as a follow-up to either surface a `wasmNotSupported` throw on `sparseIndexName` or implement named-sparse support in WASM.
+> The WASM backend has no concept of named sparse indexes: `sparseIndexName` on `db.search()` and `db.sparseSearchNamed()` both throw `NOT_SUPPORTED` (`db.capabilities().namedSparseIndexes` is `false`).
 
 ---
 
