@@ -136,8 +136,20 @@ pub(crate) fn load_snapshot(snapshot_path: &Path) -> io::Result<(FxHashMap<u64, 
         return Err(io::Error::new(io::ErrorKind::NotFound, "No snapshot"));
     }
 
-    let data = std::fs::read(snapshot_path)?;
-    let (wal_pos, entry_count) = validate_snapshot_header(&data)?;
+    parse_snapshot(&std::fs::read(snapshot_path)?)
+}
+
+/// Parses snapshot bytes into `(index, wal_position)`.
+///
+/// This is the whole parser; [`load_snapshot`] only reads the file. It takes
+/// bytes so the `fuzz_snapshot_parser` target can drive it, through
+/// `storage::parse_payload_snapshot`.
+///
+/// # Errors
+///
+/// Returns `InvalidData` if `data` is not a well-formed snapshot.
+pub(crate) fn parse_snapshot(data: &[u8]) -> io::Result<(FxHashMap<u64, u64>, u64)> {
+    let (wal_pos, entry_count) = validate_snapshot_header(data)?;
 
     let mut index = FxHashMap::default();
     index.reserve(entry_count);

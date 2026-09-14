@@ -62,6 +62,8 @@ mod metrics_tests;
 #[cfg(test)]
 mod mmap_durability_tests;
 #[cfg(test)]
+mod snapshot_tests;
+#[cfg(test)]
 mod storage_reliability_tests;
 #[cfg(test)]
 mod tests;
@@ -76,3 +78,21 @@ pub use mmap::MmapStorage;
 pub use traits::{PayloadStorage, VectorStorage};
 pub use wal_cursor::{WalConsumerId, WalCursor, WalPosition, WalRecord, WalWatermarkRegistry};
 pub use wal_cursor_reader::LogWalCursor;
+
+/// Parses payload-snapshot bytes with the parser [`LogPayloadStorage`] runs
+/// when it opens, and discards the parsed index.
+///
+/// This is the entry `fuzz/fuzz_targets/fuzz_snapshot_parser.rs` drives. It is
+/// compiled only under `--cfg fuzzing`, which cargo-fuzz sets, and in this
+/// crate's unit tests: `snapshot_tests` calls it, so a change that breaks the
+/// fuzz target's entry fails on the PR rather than in the scheduled fuzz job.
+/// No ordinary build contains it, and it is not part of the API.
+///
+/// # Errors
+///
+/// Returns `InvalidData` if `data` is not a well-formed snapshot.
+#[cfg(any(fuzzing, test))]
+#[doc(hidden)]
+pub fn parse_payload_snapshot(data: &[u8]) -> std::io::Result<()> {
+    snapshot::parse_snapshot(data).map(drop)
+}
