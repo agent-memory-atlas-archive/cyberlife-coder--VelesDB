@@ -116,8 +116,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the weights' digest (`/api/version`, `/api/tags`) beside the decode
   options; the daemon an end-to-end run launches, by its `--version` line and
   sha256; the host, the commit and whether a file it holds differed from it in
-  the working tree, asked of the commit rather than git's index (in a sparse
-  checkout, of the files it checks out); the
+  the working tree, asked of the commit rather than git's index (a file a
+  sparse checkout leaves out counts only while it is still in the working
+  tree); the
   cases file by its path in the repository, only when the recorded commit
   holds it, and whether it differed from that commit; when the run started; and the suite it
   ran, as a case count and a digest of what that phase's scorer reads of each

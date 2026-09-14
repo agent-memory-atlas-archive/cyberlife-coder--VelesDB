@@ -1691,16 +1691,15 @@ def commit_crlf_before_text_auto(root: Path, name: str) -> None:
 
 
 def check_out_sparsely(root: Path, _name: str) -> None:
-    """A sparse checkout whose cone leaves a committed directory out of the working tree; the
-    files at the root, `name` among them, stay in it."""
+    """A sparse checkout whose cone leaves a committed, clean directory out, which git then
+    removes from the working tree; the files at the root, `name` among them, stay in it."""
     for directory in ("kept", "left-out"):
         (root / directory).mkdir()
         (root / directory / "file.txt").write_text(f"{directory}\n", encoding="utf-8")
     git_commit(root, "kept/file.txt", "left-out/file.txt")
     git_answer(root, "sparse-checkout", "set", "kept")
-    # git removes the left-out file unless it cannot tell it clean; the checkout does not
-    # materialize it either way, so the state is made the same every time.
-    shutil.rmtree(root / "left-out", ignore_errors=True)
+    if (root / "left-out").exists():
+        raise AssertionError("git left the clean directory in place: the state tests nothing")
 
 
 def edit_in_a_sparse_checkout(root: Path, name: str) -> None:
@@ -1718,6 +1717,37 @@ INDEX_STATES = (("taken out of the index", take_out_of_the_index, False),
                 ("committed with CRLF before `* text=auto`", commit_crlf_before_text_auto, False),
                 ("in a clean sparse checkout", check_out_sparsely, False),
                 ("edited inside a sparse checkout's cone", edit_in_a_sparse_checkout, True))
+
+
+def terminated_inside_the_scratch_index(test: unittest.TestCase) -> "tuple[list, int, list]":
+    """A child blocked inside the scratch index's span, signalled once it says it is there:
+    what its temporary directory held then, its return code, and what it held after."""
+    child = textwrap.dedent(f"""
+        import importlib.util, time
+        spec = importlib.util.spec_from_file_location("bench", {str(SCRIPT_PATH)!r})
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        def blocked(*_argv, **_options):
+            print("inside", flush=True)
+            time.sleep(600)
+        bench._git = blocked
+        bench._changed("0" * 40)
+    """)
+    with tempfile.TemporaryDirectory() as tmp:
+        process = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE,
+                                   text=True, env={**os.environ, "TMPDIR": tmp})
+        try:
+            test.assertEqual(process.stdout.readline().strip(), "inside")
+            during = sorted(path.name for path in Path(tmp).iterdir())
+            process.send_signal(signal.SIGTERM)
+            code = process.wait(timeout=LAUNCH_PATIENCE_S)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+        after = sorted(path.name for path in Path(tmp).iterdir())
+    return during, code, after
 
 
 class CheckoutOriginTest(unittest.TestCase):
@@ -1865,36 +1895,67 @@ class CheckoutOriginTest(unittest.TestCase):
 
     def test_a_terminated_run_leaves_no_scratch_index_behind(self):
         """SIGTERM while the scratch index exists: Python's default handler ends the process
-        without cleaning up, so the bench raises it as `SystemExit` for that span (#2280
-        review). A child blocked inside the span is signalled once it says it is there."""
-        child = textwrap.dedent(f"""
-            import importlib.util, time
-            spec = importlib.util.spec_from_file_location("bench", {str(SCRIPT_PATH)!r})
-            bench = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(bench)
-            def blocked(*_argv, **_options):
-                print("inside", flush=True)
-                time.sleep(600)
-            bench._git = blocked
-            bench._changed("0" * 40)
-        """)
-        with tempfile.TemporaryDirectory() as tmp:
-            process = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE,
-                                       text=True, env={**os.environ, "TMPDIR": tmp})
-            try:
-                self.assertEqual(process.stdout.readline().strip(), "inside")
-                during = sorted(path.name for path in Path(tmp).iterdir())
-                process.send_signal(signal.SIGTERM)
-                code = process.wait(timeout=LAUNCH_PATIENCE_S)
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
-                process.stdout.close()
-            after = sorted(path.name for path in Path(tmp).iterdir())
+        without cleaning up, so the bench raises it where it lands for that span (#2280
+        review)."""
+        during, _code, after = terminated_inside_the_scratch_index(self)
         self.assertTrue(during and all(name.startswith("velesdb-bench-index-") for name in during),
                         during)
-        self.assertEqual((code, after), (128 + signal.SIGTERM, []))
+        self.assertEqual(after, [])
+
+    def test_a_terminated_run_still_dies_by_the_signal(self):
+        """Cleaned up, the process then dies by SIGTERM itself, as it would have outside that
+        span: no exit status stands in for the signal (#2280 review)."""
+        _during, code, _after = terminated_inside_the_scratch_index(self)
+        self.assertEqual(code, -signal.SIGTERM)
+
+    def test_a_dirty_file_git_left_outside_the_cone_is_changed(self):
+        """Git leaves a file its sparse rules exclude when the file is dirty: still in the working
+        tree and differing from the commit, it counts, in both fields (#2280 review). It is
+        looked for from the repository's root, whose paths git names, even for a bench whose
+        checkout sits below that root."""
+        with scratch_checkout() as root:
+            for directory in ("kept", "left-out"):
+                (root / directory).mkdir()
+                (root / directory / "cases.json").write_text("{}\n", encoding="utf-8")
+            git_commit(root, "kept/cases.json", "left-out/cases.json")
+            (root / "left-out" / "cases.json").write_text(EDITED, encoding="utf-8")
+            git_answer(root, "sparse-checkout", "set", "kept")
+            self.assertTrue((root / "left-out" / "cases.json").exists())
+            origin = bench.run_origin(root / "left-out" / "cases.json", None)
+            with mock.patch.object(bench, "ROOT", root / "kept"):
+                below = bench.run_origin(root / "kept" / "cases.json", None)
+        self.assertEqual((origin["cases_file"], origin["cases_file_modified"],
+                          origin["uncommitted_changes"]), ("left-out/cases.json", True, True))
+        self.assertEqual((below["cases_file"], below["cases_file_modified"],
+                          below["uncommitted_changes"]), ("cases.json", False, True))
+
+    def test_a_name_that_starts_with_a_space_is_read_whole(self):
+        """`-z` output is read as git wrote it: stripped, it lost a leading space, so an edited
+        ` cases.json` read unmodified, and a lone edited file named ` ` read as no change
+        (#2280 review)."""
+        for name, cases in ((" cases.json", " cases.json"), (" ", "cases.json")):
+            with self.subTest(name=repr(name)), scratch_checkout() as root:
+                (root / name).write_text("{}\n", encoding="utf-8")
+                git_commit(root, name)
+                (root / name).write_text(EDITED, encoding="utf-8")
+                origin = bench.run_origin(root / cases, None)
+                self.assertEqual((origin["cases_file"], origin["cases_file_modified"],
+                                  origin["uncommitted_changes"]), (cases, cases == name, True))
+
+    def test_a_bench_below_the_repository_root_marks_its_edited_cases_file(self):
+        """`diff-files` names paths from the repository's root, and the bench's checkout may sit
+        below it: the cases file is compared under the prefix git names (#2280 review)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp).resolve()
+            (outer / "sub").mkdir()
+            (outer / "sub" / "cases.json").write_text("{}\n", encoding="utf-8")
+            git_answer(outer, "init", "--quiet")
+            git_commit(outer, "sub/cases.json")
+            (outer / "sub" / "cases.json").write_text(EDITED, encoding="utf-8")
+            with mock.patch.object(bench, "ROOT", outer / "sub"):
+                origin = bench.run_origin(outer / "sub" / "cases.json", None)
+        self.assertEqual((origin["cases_file"], origin["cases_file_modified"],
+                          origin["uncommitted_changes"]), ("cases.json", True, True))
 
     def test_an_untracked_file_is_no_change_to_the_commit(self):
         """`uncommitted_changes` is about the files the commit holds: a stray draft changes no

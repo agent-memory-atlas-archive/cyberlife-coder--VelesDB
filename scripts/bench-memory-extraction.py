@@ -1382,12 +1382,14 @@ ANSWER_TIMEOUT_S = 30
 
 
 def _answer(argv: "list[str]", command: str, env: "dict[str, str] | None" = None,
-            feed: str = "") -> "tuple[str | None, str | None]":
+            feed: str = "", raw: bool = False) -> "tuple[str | None, str | None]":
     """What a command prints, or why there is nothing: `command` names it in the reason.
 
     Its input is `feed`, then closed, so a binary that reads it instead of answering
     the flag it is asked ends rather than waiting on the bench's terminal. It has
     `ANSWER_TIMEOUT_S` to answer; past that it is killed, and the reason says so.
+    What it prints is stripped, unless `raw`: a `-z` listing is read as written, since
+    a path may begin with a space.
     """
     try:
         done = subprocess.run(argv, capture_output=True, text=True, env=env,
@@ -1398,13 +1400,13 @@ def _answer(argv: "list[str]", command: str, env: "dict[str, str] | None" = None
         return None, f"{command} did not run ({type(exc).__name__})"
     if done.returncode != 0:
         return None, f"{command} exited {done.returncode}"
-    return done.stdout.strip(), None
+    return (done.stdout if raw else done.stdout.strip()), None
 
 
-def _git(*argv: str, env: "dict[str, str] | None" = None,
-         feed: str = "") -> "tuple[str | None, str | None]":
+def _git(*argv: str, env: "dict[str, str] | None" = None, feed: str = "",
+         raw: bool = False) -> "tuple[str | None, str | None]":
     """One answer from git about the checkout this script runs from, or why there is none."""
-    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}", env, feed)
+    return _answer(["git", "-C", str(ROOT), *argv], f"git {' '.join(argv)}", env, feed, raw)
 
 
 def _paths(listing: str) -> "frozenset[str]":
@@ -1412,22 +1414,33 @@ def _paths(listing: str) -> "frozenset[str]":
     return frozenset(filter(None, listing.split("\0")))
 
 
-def _exit_on(signum: int, _frame: object) -> None:
-    """A signal raised as `SystemExit`, so what a `with` or a `finally` holds is released."""
-    raise SystemExit(128 + signum)
+class _Terminated(BaseException):
+    """SIGTERM, raised where it lands so that what a `with` or a `finally` holds is released.
+
+    Not `SystemExit`: the bench is no gate, and ends by no exit status of its own.
+    """
+
+
+def _raise_terminated(_signum: int, _frame: object) -> None:
+    raise _Terminated
 
 
 @contextlib.contextmanager
-def _exits_on_sigterm():
-    """SIGTERM ends the process through `SystemExit` while this lasts (#1949).
+def _cleans_up_on_sigterm():
+    """SIGTERM, while this lasts, first releases what the `with` blocks inside it hold,
+    then ends the process by the signal itself, as it would have ended outside (#1949).
 
-    Python's default handler ends it at once, and a scratch directory a `with` holds
-    is left behind. The bench runs this from its main thread, the one a handler can be
-    set from.
+    Python's default handler ends the process at once, and a scratch directory a `with`
+    holds is left behind. The bench runs this from its main thread, the one a handler
+    can be set from.
     """
-    previous = signal.signal(signal.SIGTERM, _exit_on)
+    previous = signal.signal(signal.SIGTERM, _raise_terminated)
     try:
         yield
+    except _Terminated:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise
     finally:
         signal.signal(signal.SIGTERM, previous)
 
@@ -1472,24 +1485,38 @@ def _cases_origin(cases_file: Path, commit: "str | None", changed: "frozenset[st
     """The cases file as `origin` records it, and why each field it leaves null is null.
 
     Whether it differs is read from the comparison `uncommitted_changes` comes from
-    (`_changed`): one comparison answers both, so the two cannot disagree.
+    (`_changed`): one comparison answers both, so the two cannot disagree. That
+    comparison names paths from the repository's root, which ROOT may sit below, so the
+    cases file is looked for under the prefix `rev-parse --show-prefix` names.
     """
     fields = ("cases_file", "cases_file_modified")
     relative, gap = _committed_path(cases_file, commit)
     if relative is None:
         return dict.fromkeys(fields), dict.fromkeys(fields, gap)
-    modified = None if changed is None else relative in changed
-    return dict(zip(fields, (relative, modified))), {"cases_file_modified": changed_gap}
+    prefix, prefix_gap = _git("rev-parse", "--show-prefix")
+    modified = None if changed is None or prefix is None else f"{prefix}{relative}" in changed
+    return (dict(zip(fields, (relative, modified))),
+            {"cases_file_modified": changed_gap or prefix_gap})
 
 
 def _materialized(paths: "frozenset[str]") -> "tuple[frozenset[str] | None, str | None]":
-    """`paths` less those a sparse checkout's rules leave out of the working tree, or why git
-    did not say. Outside a sparse checkout, every path is in it."""
+    """`paths` less those a sparse checkout's rules leave out and that are indeed out of
+    the working tree, or why git did not say.
+
+    Git removes a clean file its rules exclude, which is no change; a dirty one it leaves
+    where it is, and that one still counts (#1949). Paths are named from the repository's
+    root, and looked for there. Outside a sparse checkout, every path counts.
+    """
     sparse, _ = _git("config", "--bool", "core.sparseCheckout")
     if sparse != "true" or not paths:
         return paths, None
-    kept, gap = _git("sparse-checkout", "check-rules", "-z", feed="\0".join(sorted(paths)))
-    return (None, gap) if kept is None else (_paths(kept), None)
+    kept, gap = _git("sparse-checkout", "check-rules", "-z", feed="\0".join(sorted(paths)),
+                     raw=True)
+    top, top_gap = _git("rev-parse", "--show-toplevel")
+    if kept is None or top is None:
+        return None, gap or top_gap
+    return paths - {path for path in paths - _paths(kept)
+                    if not os.path.lexists(Path(top, path))}, None
 
 
 def _changed(commit: "str | None") -> "tuple[frozenset[str] | None, str | None]":
@@ -1502,18 +1529,19 @@ def _changed(commit: "str | None") -> "tuple[frozenset[str] | None, str | None]"
     `diff-files` names what differs or is gone. The checkout's index answers for
     something else after `rm --cached`, an edit staged then undone, or under
     `--skip-worktree`, and `hash-object`, which reads no index, normalises a CRLF file
-    that `text=auto` leaves as committed (#1949). What a sparse checkout's rules leave
-    out of the working tree is not missing (`_materialized`). An untracked file is not
-    counted: it changes no committed code. A SIGTERM on the way still removes the
-    scratch index (`_exits_on_sigterm`).
+    that `text=auto` leaves as committed (#1949). A clean file a sparse checkout's rules
+    leave out, and git removed, is not missing (`_materialized`). An untracked file is
+    not counted: it changes no committed code. A SIGTERM on the way still removes the
+    scratch index before it ends the process (`_cleans_up_on_sigterm`).
     """
     if not commit:
         return None, NO_COMMIT
-    with _exits_on_sigterm(), tempfile.TemporaryDirectory(prefix="velesdb-bench-index-") as scratch:
+    with (_cleans_up_on_sigterm(),
+          tempfile.TemporaryDirectory(prefix="velesdb-bench-index-") as scratch):
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
         for argv in (("read-tree", commit), ("update-index", "-q", "--refresh"),
                      ("diff-files", "--name-only", "-z")):
-            answer, gap = _git(*argv, env=env)
+            answer, gap = _git(*argv, env=env, raw=True)
             if gap:
                 return None, gap
         return _materialized(_paths(answer))
