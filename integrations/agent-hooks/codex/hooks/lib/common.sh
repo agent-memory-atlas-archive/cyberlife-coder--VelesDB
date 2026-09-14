@@ -106,15 +106,15 @@ learning_marker_identity() {
   printf '%s\n%s' "$1" "${CONFIG_ROOT:-$PWD}"
 }
 
-# successful_memory_recall PAYLOAD
+# successful_memory_recall TOOL_NAME PAYLOAD
 # A recall counts only after a VelesDB MCP tool returned a successful result.
 # `compile_context` counts only when it actually requested memory_scope.
+# TOOL_NAME is the payload's, as PostToolUse already read it: the hook reads
+# it once, for this check and the working-context recording.
 successful_memory_recall() {
-  local payload="$1"
-  local tool_name
-  tool_name="$(printf '%s' "$payload" | jq -r '.tool_name // empty')"
+  local payload="$2"
 
-  case "$tool_name" in
+  case "$1" in
     mcp__velesdb-memory__recall|mcp__velesdb_memory__recall|\
     mcp__velesdb-memory__recall_fused|mcp__velesdb_memory__recall_fused|\
     mcp__velesdb-memory__recall_where|mcp__velesdb_memory__recall_where|\
