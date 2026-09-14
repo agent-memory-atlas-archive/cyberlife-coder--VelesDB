@@ -1573,7 +1573,7 @@ class FindingsTests(unittest.TestCase):
                          dockerfile_findings("FROM rust:${TAG} AS builder\n", "1.90"))
 
     # Round 4: a checkout of another repository carries its toolchain file, not this one's.
-    def test_a_checkout_of_another_repository_is_not_this_repositorys_file(self) -> None:
+    def test_a_foreign_checkout_does_not_carry_this_toolchain_file(self) -> None:
         text = (ONE_JOB + "      - uses: actions/checkout@v7\n        with:\n          repository: someone/other-repo\n"
                 + INSTALL_STEP + "      - run: cargo build\n")
         self.assertEqual(["j: step 1 installs in a checkout of someone/other-repo, not from this repository's rust-toolchain.toml",
