@@ -121,8 +121,10 @@ KINDS: dict[str, re.Pattern[str]] = {
 # word exempts the value it qualifies, in its cell, as its column header or as
 # its row label ("| query timeout | 30 s |"), and no other value of the row.
 TABLE_TIME = re.compile(rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|µs|us|ms|s)|{_LONG_TIME})\b(?!-)")
-# A column header may carry the unit of its cells: "| Latency (ms) |".
-HEADER_UNIT = re.compile(r"^(.*?)\s*\(([^()]{1,12})\)\s*$")
+# A column header may carry the unit of its cells: "| Latency (ms) |",
+# "| Build time [s] |". Emphasis around a cell's number is no part of it.
+HEADER_UNIT = re.compile(r"^(.*?)\s*(?:\(([^()]{1,12})\)|\[([^\[\]]{1,12})\])\s*$")
+CELL_MARKS = re.compile(r"^(?:\*\*|__|\*|_|`)+|(?:\*\*|__|\*|_|`)+$")
 # What leads a doc comment's text, so two wrapped lines join on their words.
 LEAD = re.compile(r"^\s*(?:(?:///|//!|\*)\s*)?")
 
@@ -311,12 +313,14 @@ def header_figures(line: str, header: str | None):
             continue
         probes = [f"{name} {text}", f"{text} {name}"]
         unit = HEADER_UNIT.match(name)
+        bare = CELL_MARKS.sub("", text)
+        sign = unit and (unit.group(2) or unit.group(3))
         if unit:
-            probes.append(f"{unit.group(1)} {text} {unit.group(2)}")
+            probes.append(f"{unit.group(1)} {bare} {sign}")
         kind = next((kind for probe in probes for kind, _, _ in line_figures(probe)), None)
         # A time unit in the header reads a bare cell as a time, as a unit in
-        # the cell does ("| Build time (s) |" over "| 42 |").
-        if not kind and unit and TABLE_TIME.search(f"{text} {unit.group(2)}"):
+        # the cell does ("| Build time (s) |" or "[s]" over "| 42 |", "| **42** |").
+        if not kind and unit and TABLE_TIME.search(f"{bare} {sign}"):
             kind = "latency"
         # The cell's own labels still qualify it: its row label and column
         # header, as for any figure of the row ("| query timeout | 30 s |").

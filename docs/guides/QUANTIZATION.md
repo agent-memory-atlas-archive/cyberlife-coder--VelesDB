@@ -330,7 +330,7 @@ and no quantizer in the frame.
 
 The heap figure is steady; the mapped one is I/O-bound and climbs as repeated
 293 MiB writes fill the host's dirty-page pool, so it is reported as a range
-rather than a point. Even at its worst it is **1.3 s of the 106.4 s that
+rather than a point. Even at its worst it is **1.35 s of the 106.4 s that
 separates an SQ8 build from a Full one — under 1.3%**, a share taken across
 the two runs (the build times are the resident-set run's). The rest is
 quantizer training and code encoding, which `SQ8` pays with any backing.

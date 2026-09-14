@@ -536,5 +536,15 @@ class FigureSourcesTest(unittest.TestCase):
         self.assertEqual(self.numbers_flagged("| a \\| b | 30 s |", "| Setting | Timeout |"), [])
 
 
+    def test_a_header_unit_reads_an_emphasized_cell(self):
+        # "| **42** |" under "(s)" is 42 seconds, as "| 42 |" is.
+        self.assertEqual(self.numbers_flagged("| Fast | **42** |", "| Mode | Build time (s) |"), ["42"])
+
+    def test_a_header_unit_in_brackets_reads_a_bare_cell(self):
+        # "[s]" and "[ms]" carry a unit as "(s)" does.
+        self.assertEqual(self.numbers_flagged("| Fast | 42 |", "| Mode | Build time [s] |"), ["42"])
+        self.assertEqual(self.numbers_flagged("| Fast | 42 |", "| Mode | Latency [ms] |"), ["42"])
+
+
 if __name__ == "__main__":
     unittest.main()

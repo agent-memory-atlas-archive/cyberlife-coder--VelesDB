@@ -111,34 +111,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Every performance figure in the guides, the reference docs, the rustdoc,
   the bindings' docs and the examples' READMEs names the run that measured it
-  (#2266).** Only the README's figures were pinned in `docs/reference/promise-
-  contract.json`; the review of #2250 found figures elsewhere that no run
-  produced, and some that contradicted the benchmark meant to back them. Each
-  now states what its run recorded, or leaves the text. `BENCHMARKS.md`'s
-  87.6% full-precision recall@10 came from clustered data, and the run on the
-  benchmark's own uniform data (e35d9612, which restored its `>= 0.95` assert)
-  measured 98.4%; the README's SIMD kernels read Cosine 32 ns, Euclidean 26 ns
-  and Jaccard 27 ns, as the April 3, 2026 run in `BENCHMARKS.md` §1 recorded
-  them, not 33, 20 and 35; the fast-insert and turbo constructors are 2.8x and
-  4.9x faster than `new` (1K × 768D, 2026-03-23), not "~2-3x" and "~3-5x";
-  `pq_recall_multidist`'s assert messages cited a recall "ceiling around
-  0.87-0.88" that the benchmark's own 2026-03-08 baseline contradicts (1.0 for
-  every clustered variant); a caching note quoted a 21% token saving its
-  README never records (20.3%); PQ's compression is `2 × dim / m` (dim/4 at
-  the default m = 8, so 16x for the 64-D benchmark), where 17 lines stated a
-  range. The constructors' recall figures, the pgvector insert ratio, the
-  storage modes' recall and training times at 768D, the mobile and FAQ recall
-  losses, a 25-30 Kvec/s write rate, the ColumnStore's "50M+ items/sec" goal,
-  the demos' "typical" timings and two first-run estimates go: no run produced
-  them. The register grows from 30 claims to 366. Each names its source; the
-  302 measured ones name their date (5 only the month), and 46 of those no
-  machine, because the commit or the doc that recorded the run names none. One
-  is re-derived on every run; the other 63 record what no run measures: a
-  target, a configured value, a scale, a floor a test asserts. 21 claims cover
-  a results table measured in one run, and the 249 measured on an earlier
-  major carry a dated waiver scoped to 6.x. `check-promise-contract.py` counts
-  a provenance that begins with `unknown` as unsourced, whatever reason
-  follows it.
+  (#2266).** Only the README's figures were pinned in
+  `docs/reference/promise-contract.json`; the review of #2250 found figures
+  elsewhere that no run produced, and some that contradicted the benchmark
+  meant to back them. Each now states what its run recorded, or leaves the
+  text. `BENCHMARKS.md`'s 87.6% full-precision recall@10 came from clustered
+  data, and the run on the benchmark's own uniform data (e35d9612, which
+  restored its `>= 0.95` assert) measured 98.4%; the README's SIMD kernels
+  read Cosine 32 ns, Euclidean 26 ns and Jaccard 27 ns, as the April 3, 2026
+  run in `BENCHMARKS.md` §1 recorded them, not 33, 20 and 35; the fast-insert
+  and turbo constructors are 2.8x and 4.9x faster than `new` (1K × 768D,
+  2026-03-23), not "~2-3x" and "~3-5x"; `pq_recall_multidist`'s assert
+  messages cited a recall "ceiling around 0.87-0.88" that the benchmark's own
+  2026-03-08 baseline contradicts (1.0 for every clustered variant); a caching
+  note quoted a 21% token saving its README never records (20.3%); PQ's
+  compression is `2 × dim / m` (dim/4 at the default m = 8, so 16x for the
+  64-D benchmark), where 17 lines stated a range. The constructors' recall
+  figures, the pgvector insert ratio, the storage modes' recall and training
+  times at 768D, the mobile and FAQ recall losses, a 25-30 Kvec/s write rate,
+  the ColumnStore's "50M+ items/sec" goal, the demos' "typical" timings and
+  two first-run estimates go: no run produced them. The register grows from 30
+  claims to 366. Each names its source; the 302 measured ones name their date
+  (5 only the month), and 46 of those no machine, because the commit or the
+  doc that recorded the run names none. One is re-derived on every run; the
+  other 63 record what no run measures: a target, a configured value, a scale,
+  a floor a test asserts. 21 claims cover a results table measured in one run.
+  Every documentary claim measured before 6.0 (249) carries a dated waiver
+  scoped to 6.x; the one executable claim measured before 6.0 is re-run by the
+  check instead. `check-promise-contract.py` counts a provenance that begins
+  with `unknown` as unsourced, whatever reason follows it.
 
   `scripts/check-figure-sources.py`, a step of the required `lint` job,
   refuses a figure that no claim registers. It reads a number with a unit
