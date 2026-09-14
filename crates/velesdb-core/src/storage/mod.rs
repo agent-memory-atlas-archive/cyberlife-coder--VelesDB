@@ -84,9 +84,10 @@ pub use wal_cursor_reader::LogWalCursor;
 ///
 /// This is the entry `fuzz/fuzz_targets/fuzz_snapshot_parser.rs` drives. It is
 /// compiled only under `--cfg fuzzing`, which cargo-fuzz sets, and in this
-/// crate's unit tests: `snapshot_tests` calls it, so a change that breaks the
-/// fuzz target's entry fails on the PR rather than in the scheduled fuzz job.
-/// No ordinary build contains it, and it is not part of the API.
+/// crate's unit tests, where `snapshot_tests` calls it: every PR builds and
+/// runs the entry itself. Its `fuzzing` gate and the fuzz target's call are
+/// not checked by any PR, because no PR job builds `fuzz/` (#2311). No
+/// ordinary build contains it, and it is not part of the API.
 ///
 /// # Errors
 ///
