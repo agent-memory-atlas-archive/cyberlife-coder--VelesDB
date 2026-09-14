@@ -137,23 +137,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other 63 record what no run measures: a target, a configured value, a scale,
   a floor a test asserts. 21 claims cover a results table measured in one run.
   Every documentary claim measured before 6.0 (249) carries a dated waiver
-  scoped to 6.x; the one executable claim measured before 6.0 is re-run by the
-  check instead. `check-promise-contract.py` counts a provenance that begins
-  with `unknown` as unsourced, whatever reason follows it.
+  scoped to 6.x; the one executable claim measured before 6.0 has none: its
+  validation_command, a grep that the two READMEs agree, runs on every check.
+  `check-promise-contract.py` counts a provenance that begins with `unknown`
+  as unsourced, whatever reason follows it.
 
   `scripts/check-figure-sources.py`, a step of the required `lint` job,
   refuses a figure that no claim registers. It reads a number with a unit
   together with a keyword or a verb before it, the end of the line above, or
   its table cell's column header, whose unit also reads a bare cell; below the
   millisecond, the unit alone; and every time of a table row, in a Markdown
-  file or a doc comment. A size, bound or config word exempts only the value
-  it qualifies, and a number in a code span only as code; bench code, whose
-  figures are the bounds it asserts and the results it prints, stays out. It
-  is a heuristic: a number with no unit and no such word, a duration whose
-  keyword is not beside it or given in minutes, a time in a table row labelled
-  by a config word, and a figure drawn in an image pass unseen, as its
-  docstring lists. The register, not the guard, is what binds a figure to its
-  run.
+  file or a doc comment. It reads a time in three forms only (a bare number
+  under a header that names its unit, a number with its unit, either inside
+  one emphasis pair) and reports any other shape that holds a number next to a
+  time unit as an unreadable figure, whatever the register holds. A size,
+  bound or config word exempts only the value it qualifies, and a number in a
+  code span only as code; bench code, whose figures are the bounds it asserts
+  and the results it prints, stays out. It is a heuristic: a number with no
+  unit and no such word, a duration whose keyword is not beside it or given in
+  minutes, a time in a table row labelled by a config word, and a figure drawn
+  in an image pass unseen, as its docstring lists. The register, not the
+  guard, is what binds a figure to its run.
 
 - **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
   copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,

@@ -546,5 +546,43 @@ class FigureSourcesTest(unittest.TestCase):
         self.assertEqual(self.numbers_flagged("| Fast | 42 |", "| Mode | Latency [ms] |"), ["42"])
 
 
+    def unreadable(self, doc: str, claim: str | None = None) -> list[str]:
+        """The unreadable-figure findings of a one-file tree; a claim over the
+        line must not turn one into a pass."""
+        root = self.tree({"docs/G.md": doc}, claims=(("docs/G.md", claim),) if claim else ())
+        return [v.split(": ")[0] for v in self.flagged(root) if ": unreadable figure: " in v]
+
+    def test_a_mark_between_a_number_and_its_unit_in_a_cell_is_unreadable(self):
+        doc = "| Mode | Latency (ms) |\n|---|---|\n| D | **3.2** ms |\n| F | **1.2** \u00b5s |\n"
+        self.assertEqual(self.unreadable(doc), ["docs/G.md:3", "docs/G.md:4"])
+
+    def test_a_footnote_on_a_cell_under_a_header_unit_is_unreadable(self):
+        doc = "| Mode | Build time (s) |\n|---|---|\n| Fast | 42\u00b9 |\n"
+        self.assertEqual(self.unreadable(doc), ["docs/G.md:3"])
+
+    def test_a_footnote_on_a_header_unit_is_unreadable(self):
+        doc = "| Mode | Build time (s)\u00b9 |\n|---|---|\n| Fast | 42 |\n"
+        self.assertEqual(self.unreadable(doc), ["docs/G.md:3"])
+
+    def test_a_bold_header_unit_is_unreadable(self):
+        doc = "| Mode | **Build time (s)** |\n|---|---|\n| Fast | 42 |\n"
+        self.assertEqual(self.unreadable(doc), ["docs/G.md:3"])
+
+    def test_a_mark_between_a_number_and_its_unit_in_prose_is_unreadable_even_when_claimed(self):
+        self.assertEqual(self.unreadable("The p50 is **42** ms.\n"), ["docs/G.md:1"])
+        self.assertEqual(self.unreadable("The p50 is **42** ms.\n", claim="The p50 is **42** ms"), ["docs/G.md:1"])
+
+    def test_a_number_with_its_unit_in_a_cell_is_read(self):
+        doc = "| Mode | Latency |\n|---|---|\n| Fast | 42 ms |\n"
+        self.assertEqual(self.unreadable(doc), [])
+        self.assertEqual(self.numbers_flagged("| Fast | 42 ms |", "| Mode | Latency |"), ["42"])
+
+    def test_a_number_with_its_unit_inside_one_emphasis_pair_is_read(self):
+        doc = "| Mode | Latency |\n|---|---|\n| Fast | **42 ms** |\nThe median is **42 ms**.\n"
+        self.assertEqual(self.unreadable(doc), [])
+        self.assertEqual(self.numbers_flagged("| Fast | **42 ms** |", "| Mode | Latency |"), ["42"])
+        self.assertEqual(self.numbers_flagged("The median is **42 ms**."), ["42"])
+
+
 if __name__ == "__main__":
     unittest.main()

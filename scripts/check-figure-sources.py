@@ -39,6 +39,15 @@ its table cell's label, and exempts that value alone. A number in a code span
 is exempt only as code (`sleep(10us)`, `4 × dim`): a quantity standing alone
 in one (`29.5 us`) is a figure.
 
+It fails closed on time figures: it reads one in exactly three forms, a bare
+number under a header that names its unit ("| Build time (s) |" over "| 42 |"),
+a number with its unit ("42 ms"), and either inside one emphasis pair ("**42**",
+"**42 ms**"). Any other shape that holds a number next to a time unit is an
+unreadable figure, reported with the form to write, whatever the register
+holds: a mark between the number and its unit ("**42** ms"), a footnote on a
+unit, a cell or a header ("42 ms¹", "42¹", "Build time (s)¹"), a bold header
+("**Build time (s)**"), or any other cell under a time unit ("~42").
+
 What it cannot see: this is a heuristic. It does not read
 - a number written with no unit and no such word ("4,000 of them a second");
 - a duration whose keyword or verb is not next to it ("14.19 s cold against
@@ -124,7 +133,27 @@ TABLE_TIME = re.compile(rf"(?<![\w.]){_NUM}\s*(?:(?-i:ns|µs|us|ms|s)|{_LONG_TIM
 # A column header may carry the unit of its cells: "| Latency (ms) |",
 # "| Build time [s] |". Emphasis around a cell's number is no part of it.
 HEADER_UNIT = re.compile(r"^(.*?)\s*(?:\(([^()]{1,12})\)|\[([^\[\]]{1,12})\])\s*$")
-CELL_MARKS = re.compile(r"^(?:\*\*|__|\*|_|`)+|(?:\*\*|__|\*|_|`)+$")
+# One emphasis pair around a whole cell ("**42**", "**42 ms**") is no part of it.
+ONE_PAIR = re.compile(r"^(\*\*|__|\*|_)(\S(?:.*\S)?)\1$")
+
+# Fail closed. A time is read in exactly these forms: a bare number under a
+# header that names its unit ("| Build time (s) |" over "| 42 |"), a number
+# with its unit ("42 ms"), and either inside one emphasis pair ("**42**",
+# "**42 ms**"). Any other shape that holds a number next to a time unit is an
+# unreadable figure, reported with the form to write, whatever the register
+# holds: a mark between the number and its unit ("**42** ms", "42\u00b9 ms"), a
+# footnote glued to the unit ("42 ms\u00b9"), a header unit the guard cannot
+# read ("**Build time (s)**", "Build time (s)\u00b9"), and any cell under a time
+# unit that is not one of the forms ("42\u00b9", "~42", "0.30–1.35").
+_TIME_UNIT = rf"(?:(?-i:ns|[µμ]s|us|ms|s)|{_LONG_TIME})"
+_SUPERSCRIPTS = "".join(chr(c) for c in (0xB9, 0xB2, 0xB3, *range(0x2070, 0x207A)))
+MARKED_TIME = re.compile(
+    rf"(?<![\w.]){_NUM}\s*(?:\*\*|__|\*|_|[{_SUPERSCRIPTS}])+\s*{_TIME_UNIT}(?![\w-])"
+    rf"|(?<![\w.]){_NUM}\s*{_TIME_UNIT}[{_SUPERSCRIPTS}]+",
+    re.I,
+)
+HEADER_TIME_UNIT = re.compile(rf"[(\[]\s*{_TIME_UNIT}\s*[)\]]", re.I)
+READABLE_CELL = re.compile(rf"^{_NUM}(?:\s*{_TIME_UNIT})?$", re.I)
 # What leads a doc comment's text, so two wrapped lines join on their words.
 LEAD = re.compile(r"^\s*(?:(?:///|//!|\*)\s*)?")
 
@@ -313,7 +342,7 @@ def header_figures(line: str, header: str | None):
             continue
         probes = [f"{name} {text}", f"{text} {name}"]
         unit = HEADER_UNIT.match(name)
-        bare = CELL_MARKS.sub("", text)
+        bare = inner(text)
         sign = unit and (unit.group(2) or unit.group(3))
         if unit:
             probes.append(f"{unit.group(1)} {bare} {sign}")
@@ -326,6 +355,31 @@ def header_figures(line: str, header: str | None):
         # header, as for any figure of the row ("| query timeout | 30 s |").
         if kind and not qualified(line, start, end, header, QUALIFIERS.get(kind, ())):
             yield kind, start, end
+
+
+def inner(text: str) -> str:
+    """A cell's text inside its one emphasis pair, if it has one."""
+    pair = ONE_PAIR.match(text)
+    return pair.group(2) if pair else text
+
+
+def unreadable_figures(line: str, header: str | None):
+    """Each (start, end, form) of a figure written in a shape the guard does not
+    read exactly, with the form to write instead. Fail closed: such a figure is
+    a finding, never a pass."""
+    for match in MARKED_TIME.finditer(line):
+        yield match.start(), match.end(), "`42 ms` or `**42 ms**`"
+    if header is None or not TABLE_ROW.match(line):
+        return
+    names = [header[start:end].strip() for start, end in cells(header)]
+    for column, (start, end) in enumerate(cells(line)):
+        text, name = line[start:end].strip(), names[column] if column < len(names) else ""
+        if not re.search(r"\d", text) or not HEADER_TIME_UNIT.search(name):
+            continue
+        if not HEADER_UNIT.match(name):
+            yield start, end, "a header `Name (unit)`, with nothing around it"
+        elif not READABLE_CELL.match(inner(text)):
+            yield start, end, "`42`, `42 s` or `**42**`"
 
 
 def wrapped_figures(previous: str, line: str):
@@ -450,6 +504,9 @@ def violations(root: Path) -> list[str]:
             if prose and prose[0] == number - 1 and is_prose(line):
                 wrapped = wrapped_figures(prose[1], line)
             prose = (number, line) if is_prose(line) else None
+            for _, _, form in unreadable_figures(line, header):
+                found.append(f"{rel}:{number}: unreadable figure: rewrite as {form}: {line.strip()[:140]}")
+                break
             if heading in sections_claimed:
                 continue
             for figure, start, end in (*figures(line, header), *wrapped):
