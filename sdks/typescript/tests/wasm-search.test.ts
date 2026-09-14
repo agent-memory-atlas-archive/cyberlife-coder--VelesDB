@@ -1147,7 +1147,9 @@ describe('WASM search — the rest of core input rules (#2095)', () => {
 describe('wasmMultiQuerySearch — a strategy that is not a string (#2095)', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it.each([5, { name: 'rrf' }])('refuses %p with BAD_REQUEST, before the binding sees it', async (fusion) => {
+  // `Object.create(null)` has no prototype, so `String()` throws on it: the refusal
+  // must name a value that is not a string by its type, never by coercing it.
+  it.each([5, { name: 'rrf' }, Object.create(null)])('refuses %s with BAD_REQUEST, before the binding sees it', async (fusion) => {
     const multi = vi.fn(() => []);
     const ctx = buildCtx('docs', buildStore({ multi_query_search: multi }));
 
@@ -1157,6 +1159,7 @@ describe('wasmMultiQuerySearch — a strategy that is not a string (#2095)', () 
 
     expect(outcome).toBeInstanceOf(VelesDBError);
     expect((outcome as VelesDBError).code).toBe('BAD_REQUEST');
+    expect((outcome as VelesDBError).message).toContain(`of type ${typeof fusion}`);
     expect(multi).not.toHaveBeenCalled();
   });
 

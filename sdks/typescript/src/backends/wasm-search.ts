@@ -364,13 +364,16 @@ const FUSION_STRATEGY_NAMES: ReadonlyMap<string, FusionStrategy> = new Map([
  * The canonical strategy `name` stands for, as core reads it. `name` comes
  * from the caller unchecked, and an untyped (JavaScript) caller can pass any
  * value: one that is not a string, or a name core does not know, is refused.
+ * The refusal names a value that is not a string by its type, never by
+ * coercing it: `String()` throws on an object with no prototype.
  */
 function canonicalStrategy(name: unknown): FusionStrategy {
   const strategy =
     typeof name === 'string' ? FUSION_STRATEGY_NAMES.get(name.toLowerCase()) : undefined;
   if (strategy === undefined) {
+    const named = typeof name === 'string' ? `'${name}'` : `of type ${typeof name}`;
     throw new VelesDBError(
-      `Unknown fusion strategy '${String(name)}': core accepts average (avg), maximum (max), ` +
+      `Unknown fusion strategy ${named}: core accepts average (avg), maximum (max), ` +
         'rrf, weighted and relative_score (rsf), in any case',
       'BAD_REQUEST'
     );

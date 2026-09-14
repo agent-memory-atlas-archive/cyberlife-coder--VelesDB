@@ -552,12 +552,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   At runtime a fusion strategy name is read as core reads it, in any case
   and with the aliases `avg`, `max` and `rsf`, spellings that only untyped
   (JavaScript) callers can send, since the `FusionStrategy` type keeps the
-  canonical names; an unknown name, or a value that is not a string,
-  throws `BAD_REQUEST`. `'rsf'` used to let `denseWeight` through, and
-  `'WEIGHTED'` dropped the caller's triple. `query` no longer reads
-  `params.k`, which REST ignores: a statement without `LIMIT` returns
-  core's default of 10 rows, `LIMIT` is capped at core's 100,000, and one
-  too large for a u64 throws `BAD_REQUEST`, as core's parser refuses it.
+  canonical names. `null` or absent means `rrf`, and an unknown name, or
+  any other value that is not a string, throws `BAD_REQUEST`. `'rsf'` used
+  to let `denseWeight` through, and `'WEIGHTED'` dropped the caller's
+  triple. `query` no longer reads `params.k`, which REST ignores: a
+  statement without `LIMIT` returns core's default of 10 rows, `LIMIT` is
+  capped at core's 100,000, and one too large for a u64 throws
+  `BAD_REQUEST`, as core's parser refuses it.
   On REST, `multiQuerySearchIds` with a `filter` now
   fails with the server's `400` instead of returning unfiltered ids.
 
