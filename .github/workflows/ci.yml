@@ -1060,7 +1060,11 @@ jobs:
 
       # rust-toolchain.toml is the only toolchain pin: every job that builds
       # Rust installs its toolchain, from the file, before its first cargo
-      # call. Pure text over the workflows, like the suite above.
+      # call. The suite reads the workflows with PyYAML, installed here at
+      # gate-contracts.yml's pin; without it the suite fails to import.
+      - name: Install PyYAML for the toolchain pin
+        run: python -m pip install --disable-pip-version-check pyyaml==6.0.3
+
       - name: Self-test the toolchain pin
         run: python3 -m unittest scripts.tests.test_ci_toolchain_pin
 

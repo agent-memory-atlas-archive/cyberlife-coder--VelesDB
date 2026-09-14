@@ -3,7 +3,7 @@
 # Rust toolchain bootstrap (which is a one-off setup, not per-project DX).
 #
 # `rust:slim` is the latest stable release, always at or above the workspace
-# MSRV (1.90, `rust-version` in the root Cargo.toml). The harness builds a
+# MSRV (`rust-version` in the root Cargo.toml). The harness builds a
 # fresh project inside the container, outside this repository, so
 # rust-toolchain.toml does not apply and no version is written here.
 FROM rust:slim

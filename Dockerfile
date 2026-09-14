@@ -1,5 +1,6 @@
-# Build stage. Unversioned on purpose: this image only carries rustup; the
-# toolchain is the one rust-toolchain.toml pins, installed below.
+# Build stage. Unversioned on purpose: the image carries rustup and a stable
+# toolchain this build does not use; the build runs on the toolchain
+# rust-toolchain.toml pins, installed below.
 FROM rust:bookworm AS builder
 
 LABEL maintainer="VelesDB Team <contact@wiscale.fr>"

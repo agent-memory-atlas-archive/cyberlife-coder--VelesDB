@@ -19,37 +19,43 @@ So the file is the only pin. Over every workflow (``*.yml``, ``*.yaml``), every
 composite action and every Dockerfile, this suite holds that:
 
 * nothing names a toolchain but ``nightly``: no ``RUST_VERSION``, no
-  ``*toolchain:`` input (flow mappings included), no ``RUSTUP_TOOLCHAIN``
+  ``*toolchain`` key anywhere in a workflow, no ``RUSTUP_TOOLCHAIN``
   assignment (key, inline, ``export``, ``$GITHUB_ENV`` or Dockerfile ``ENV``),
   no ``rustup toolchain install|add``, ``install``, ``update``, ``default``,
   ``override set|add`` or ``run`` naming one, no ``cargo +<toolchain>`` (by
-  path too), no ``FROM rust:<version>``, and the file's channel nowhere
-  outside a comment;
+  path too), no ``FROM rust:<version>`` once ``ARG`` defaults are expanded,
+  and the file's channel nowhere outside a comment;
 * every call that reaches cargo -- a build, ``cargo +X``, or
   ``Swatinem/rust-cache``, which runs ``cargo metadata`` -- finds its toolchain
   installed by an earlier step of the same job: ``X`` for ``cargo +X``; else the
   ``RUSTUP_TOOLCHAIN`` or rustup override in force; else the file of the
-  checkout the call runs in, installed by ``rustup toolchain install`` with no
-  toolchain name. A checkout with ``path:`` carries its own copy; outside every
-  checkout there is no file, only the runner's default toolchain;
-* each ``nightly`` pin carries a ``# nightly: <why>`` comment of its own step
-  or key, naming what the job runs on nightly: a ``-Z`` flag, miri, cargo fuzz
-  or cargo careful;
+  checkout of this repository the call runs in, following ``working-directory``,
+  ``cd``, ``pushd`` and ``popd``, installed by ``rustup toolchain install`` with
+  no toolchain name. Outside every checkout of this repository there is no
+  such file: only the runner's default toolchain, or another repository's;
+* each ``nightly`` pin carries a ``# nightly: <why>`` comment of its own step or
+  key, naming what the job runs on nightly -- a ``-Z`` flag, miri, cargo fuzz or
+  cargo careful -- as its ``run:`` values and ``*FLAGS`` variables show, never
+  its keys or step names;
 * no ``actions/cache`` step saves ``~/.rustup`` or ``~/.cargo/bin``;
-* no tracked file claims loom runs on nightly, and the loom commands the docs
-  give are the ones CI runs.
+* no tracked file claims loom runs on nightly, and every loom command a doc
+  gives is one CI runs.
 
-It fails closed, as the hand-written scanner of #2261 taught: what it cannot
-read exactly -- a flow-style ``env``/``with`` in a Rust job, a directory it
-cannot resolve, a Dockerfile instruction in exec form or a COPY whose landing
-it cannot tell -- is a finding, never a pass.
+Workflows are read by PyYAML, so flow mappings, anchors, aliases, merge keys
+and quoted keys mean what YAML says; a document PyYAML rejects is a finding.
+Anything else the guard does not model is a finding, never a pass: an ``env``
+or ``with`` that is not a mapping, a shell line it cannot tokenize, a ``cd``
+target holding ``$`` or a command substitution, a directory it cannot resolve,
+a Dockerfile heredoc, a COPY or RUN in exec form (options dropped first), a
+COPY of rust-toolchain.toml whose landing it cannot tell, or a ``FROM`` still
+holding ``$`` once ``ARG`` defaults are expanded.
 
-Stdlib only: the required job that runs it has a bare interpreter.
+PyYAML is the one dependency: every job that runs this suite installs it at one
+pin, and without it the import below fails loudly instead of skipping.
 """
 
 from __future__ import annotations
 
-import math
 import posixpath
 import re
 import shlex
@@ -59,6 +65,8 @@ import tomllib
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
@@ -70,11 +78,16 @@ CACHE_ACTION = "actions/cache@"
 RUST_CACHE_ACTION = "Swatinem/rust-cache@"
 CHECKOUT_ACTION = "actions/checkout@"
 RUST_ACTIONS = (TOOLCHAIN_ACTION, RUST_CACHE_ACTION, "PyO3/maturin-action@")
-# What a call resolves to with no rust-toolchain.toml to read, or when the guard
-# cannot tell which one governs it; and a directory the guard cannot resolve.
+# `repository:` values that check out this repository.
+THIS_REPOSITORY = ("", "${{ github.repository }}")
+# What a call resolves to with no rust-toolchain.toml of this repository to read,
+# or when the guard cannot tell which one governs it; a directory it cannot resolve.
 OUTSIDE = "<outside every checkout>"
 UNREADABLE = "<unreadable>"
 UNKNOWN_DIR = "<unknown directory>"
+FOREIGN = "foreign:"
+MERGE_TAG = "tag:yaml.org,2002:merge"
+PINS_UNEXPLAINED = "pins nightly without a comment `# nightly: <why>`"
 
 # A call that resolves its toolchain through rust-toolchain.toml or RUSTUP_TOOLCHAIN:
 # cargo, rustc or rustdoc, bare or by path, but not `~/.cargo/...`, `cargo-foo`
@@ -92,15 +105,19 @@ PLUS_RE = re.compile(r"(?<![\w.-])(?:cargo|rustc|rustdoc)(?:\.exe)?\s+\+([^\s\"'
 RUSTUP_RE = re.compile(
     r"\brustup(?:\.exe)?\s+(toolchain\s+(?:install|add)|install|update|default|override\s+(?:set|add)|run)\b([^\n;&|]*)"
 )
-KEYED_RE = re.compile(r"^\s*(?:-\s+)?(?:[\w-]*toolchain|RUSTUP_TOOLCHAIN)\s*:\s*(\S.*?)\s*$")
-FLOW_KEYED_RE = re.compile(r"[{,]\s*(?:[\w-]*toolchain|RUSTUP_TOOLCHAIN)\s*:\s*([^,}\]\s]+)")
 ASSIGN_RE = re.compile(r"\bRUSTUP_TOOLCHAIN\s*=\s*[\"']?([^\s\"'`;&|)]+)")
+ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_]\w*=")
 DOCKER_ENV_RE = re.compile(r"^\s*ENV\s+RUSTUP_TOOLCHAIN\s+([^\s=]+)")
-EXPORT_RE = re.compile(r"^\s*export\s+RUSTUP_TOOLCHAIN=")
-CD_RE = re.compile(r"^\s*cd\s+([^\s;&|]+)")
+TOOLCHAIN_KEY_RE = re.compile(r"^(?:[\w-]*toolchain|RUSTUP_TOOLCHAIN)$")
+# A Dockerfile heredoc opener; `<<<` is a here-string, not one.
+HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_]\w*)\1")
+ARG_REF_RE = re.compile(r"\$\{(\w+)(?::?-([^}]*))?\}|\$(\w+)")
+SEPARATORS = frozenset({"&&", "||", ";", ";;", "|", "&", "(", ")", "{", "}"})
+SHELL_KEYWORDS = frozenset({"then", "else", "do", "if", "elif", "while", "until", "!", "time"})
+DIRECTORY_COMMANDS = frozenset({"cd", "pushd", "popd"})
 INSTALL_VERBS = frozenset({"toolchain install", "toolchain add", "install"})
 OVERRIDE_VERBS = frozenset({"override set", "override add"})
-# RUST_VERSION as a key or a reference, never inside a longer name such as
+# RUST_VERSION as a reference, never inside a longer name such as
 # CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS (a cargo resolver setting).
 RUST_VERSION_RE = re.compile(r"(?<![\w.$])RUST_VERSION\s*[:=]|\benv\.RUST_VERSION\b|\$\{?RUST_VERSION\b")
 TOOLCHAIN_PATHS_RE = re.compile(r"\.rustup\b|\.cargo/bin\b")
@@ -108,18 +125,14 @@ VALUE_FLAGS = frozenset({"--profile", "-c", "--component", "-t", "--target"})
 NIGHTLY_REASON_RE = re.compile(r"^\s*#\s*nightly:\s*\S")
 # What needs nightly, as a reason names it and a job runs it.
 NIGHTLY_NEED_RE = re.compile(r"-Z\s*([A-Za-z][\w-]*)|\b(miri|fuzz|careful)\b", re.IGNORECASE)
-# Lines of the step or key that holds a pin, walked over to reach its comment.
-STRUCTURAL_RE = re.compile(r"^\s*(?:- )?(?:name|uses|if|with|env|run|shell|working-directory)\s*:")
-ITEM_RE = re.compile(r"^\s*- ")
-JOB_KEY_RE = re.compile(r"^  [A-Za-z0-9_-]+:\s*$")
-FROM_VERSION_RE = re.compile(r"^(?:--platform=\S+\s+)?(?:[\w.-]+/)*rust:(\d[\w.-]*)", re.IGNORECASE)
+FROM_VERSION_RE = re.compile(r"^(?:[\w.-]+/)*rust:(\d[\w.-]*)$", re.IGNORECASE)
 DOCKERFILE_NAME_RE = re.compile(r"(?:^|/)(?:Dockerfile(?:\.[\w.-]+)?|[\w.-]+\.Dockerfile)$")
 DOC_SUFFIXES = frozenset({".md", ".rs", ".toml", ".yml", ".yaml", ".txt", ".py", ".sh", ".ps1"})
 LOOM_CLAIM_EXEMPT = {
     "CHANGELOG.md": "history is not rewritten",
     "scripts/tests/test_ci_toolchain_pin.py": "the checker spells the words it looks for",
 }
-FLOW_KEYS = ("env", "with")
+COMMENT_RE = re.compile(r"^\s*#")
 REACH = {
     None: "builds the repository with the base image's toolchain, not rust-toolchain.toml's",
     OUTSIDE: "reaches cargo outside every checkout, on the runner's default toolchain",
@@ -130,10 +143,6 @@ INSTALL_ELSEWHERE = {
     UNREADABLE: "installs where the guard cannot tell which rust-toolchain.toml governs",
 }
 
-KEY_RE = re.compile(r"^( *)([A-Za-z0-9_-]+):(?:\s+(.*?))?\s*$")
-COMMENT_RE = re.compile(r"^\s*#")
-BLOCK_MARKERS = ("", "|", "|-", ">", ">-")
-
 
 def _unquote(value: str) -> str:
     value = re.sub(r"\s+#.*$", "", value).strip()
@@ -142,65 +151,83 @@ def _unquote(value: str) -> str:
     return value
 
 
-def _depth(line: str) -> float:
-    """Indentation of `line`; a blank line nests under whatever precedes it."""
-    return len(line) - len(line.lstrip(" ")) if line.strip() else math.inf
+def toolchain_file() -> tuple[str, frozenset[str]]:
+    table = tomllib.loads(TOOLCHAIN_FILE.read_text(encoding="utf-8"))["toolchain"]
+    return str(table["channel"]), frozenset(table.get("components", ()))
 
 
-def _indent(lines: list[str]) -> float:
-    return next((_depth(line) for line in lines if line.strip()), 0)
+# --- YAML, read by PyYAML -----------------------------------------------------
 
 
-def _value(raw: str) -> str | list[str]:
-    return [] if raw in BLOCK_MARKERS else _unquote(raw)
+def _load(text: str) -> tuple[yaml.Node | None, list[str]]:
+    try:
+        return yaml.compose(text, Loader=yaml.SafeLoader), []
+    except yaml.YAMLError as error:
+        return None, [f"the workflow is not valid YAML: {' '.join(str(error).split())}"]
 
 
-def _mapping(lines: list[str]) -> dict[str, str | list[str]]:
-    """Keys at the block's own indentation: an inline value, or the lines nested under it."""
-    indent = _indent(lines)
-    out: dict[str, str | list[str]] = {}
-    key = None
-    for line in lines:
-        depth = _depth(line)
-        if depth < indent:
-            break
-        match = KEY_RE.match(line) if depth == indent else None
-        if match:
-            key = match.group(2)
-            out[key] = _value(match.group(3) or "")
-        elif isinstance(out.get(key), list):
-            out[key].append(line)
-    return out
+def _pairs(node: yaml.Node | None) -> dict[str, tuple[yaml.Node, yaml.Node]]:
+    """A mapping node's scalar keys to (key, value) nodes, merge keys resolved; {} for anything else."""
+    if not isinstance(node, yaml.MappingNode):
+        return {}
+    merged: dict[str, tuple[yaml.Node, yaml.Node]] = {}
+    own: dict[str, tuple[yaml.Node, yaml.Node]] = {}
+    for key, value in node.value:
+        if key.tag == MERGE_TAG:
+            for source in value.value if isinstance(value, yaml.SequenceNode) else [value]:
+                for name, pair in _pairs(source).items():
+                    merged.setdefault(name, pair)
+        elif isinstance(key, yaml.ScalarNode):
+            own[key.value] = (key, value)
+    return {**merged, **own}
 
 
-def _child(keys: dict[str, str | list[str]], name: str) -> dict[str, str | list[str]]:
-    value = keys.get(name)
-    return _mapping(value) if isinstance(value, list) else {}
+def _value(pairs: dict[str, tuple[yaml.Node, yaml.Node]], name: str) -> yaml.Node | None:
+    pair = pairs.get(name)
+    return pair[1] if pair else None
 
 
-def _text(value: str | list[str] | None) -> str:
-    if value is None:
+def _scalar(node: yaml.Node | None) -> str | None:
+    return node.value if isinstance(node, yaml.ScalarNode) else None
+
+
+def _string(pairs: dict, name: str, where: str, problems: list[str]) -> str:
+    node = _value(pairs, name)
+    if node is None:
         return ""
-    return value if isinstance(value, str) else "\n".join(value)
+    text = _scalar(node)
+    if text is None:
+        problems.append(f"{where} writes `{name}` as something other than a string, which the guard cannot read")
+        return ""
+    return text
 
 
-def _flat(keys: dict[str, str | list[str]], name: str) -> dict[str, str]:
-    return {key: _text(value).strip() for key, value in _child(keys, name).items()}
+def _strings(pairs: dict, name: str, where: str, problems: list[str]) -> dict[str, str]:
+    """`env` or `with`: a mapping of strings; anything else is a problem."""
+    node = _value(pairs, name)
+    if node is None:
+        return {}
+    if not isinstance(node, yaml.MappingNode):
+        problems.append(f"{where} writes `{name}` as something other than a mapping, which the guard cannot read")
+        return {}
+    return {key: text for key, (_, value) in _pairs(node).items() if (text := _scalar(value)) is not None}
 
 
-def _flow(keys: dict[str, str | list[str]]) -> list[str]:
-    """`env`/`with` written as a flow collection, which this parser cannot read."""
-    return [key for key in FLOW_KEYS if isinstance(keys.get(key), str) and keys[key].lstrip().startswith(("{", "["))]
+def _directory(pairs: dict, where: str, problems: list[str]) -> str:
+    """`defaults.run.working-directory` of a workflow or a job."""
+    return _string(_pairs(_value(_pairs(_value(pairs, "defaults")), "run")), "working-directory", where, problems)
 
 
 @dataclass
 class Step:
     uses: str = ""
     run: str = ""
+    run_line: int = 0  # 0-based line where the run text starts
     inputs: dict[str, str] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
     directory: str = ""
-    flow: list[str] = field(default_factory=list)
+    first: int = 0  # 0-based line of the step's first code line
+    last: int = 0  # bound: the next step's first line, or the job's end
 
 
 @dataclass
@@ -208,7 +235,9 @@ class Job:
     env: dict[str, str]
     steps: list[Step]
     directory: str = ""
-    flow: list[str] = field(default_factory=list)
+    first: int = 0
+    last: int = 0
+    problems: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -216,59 +245,317 @@ class Workflow:
     env: dict[str, str]
     jobs: dict[str, Job]
     directory: str = ""
-    flow: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+    raw: list[str] = field(default_factory=list)
+    root: yaml.Node | None = None
 
 
-def _items(lines: list[str]) -> list[list[str]]:
-    """The `- ` items of a block sequence, whatever its indentation."""
-    depth = next((_depth(line) for line in lines if line.lstrip().startswith("- ")), None)
-    items: list[list[str]] = []
-    for line in lines:
-        if _depth(line) == depth and line.lstrip().startswith("- "):
-            items.append([line.replace("- ", "  ", 1)])
-        elif items:
-            items[-1].append(line)
-    return items
-
-
-def _step(item: list[str]) -> Step:
-    keys = _mapping(item)
+def _step(node: yaml.Node, where: str, problems: list[str]) -> Step:
+    pairs = _pairs(node)
+    if not isinstance(node, yaml.MappingNode):
+        problems.append(f"{where} is not a mapping, which the guard cannot read")
+    run = _value(pairs, "run")
     return Step(
-        uses=_text(keys.get("uses")),
-        run=_text(keys.get("run")),
-        inputs=_flat(keys, "with"),
-        env=_flat(keys, "env"),
-        directory=_text(keys.get("working-directory")),
-        flow=_flow(keys),
+        uses=_string(pairs, "uses", where, problems),
+        run=_string(pairs, "run", where, problems),
+        run_line=run.start_mark.line + (run.style in ("|", ">")) if run is not None else node.start_mark.line,
+        inputs=_strings(pairs, "with", where, problems),
+        env=_strings(pairs, "env", where, problems),
+        directory=_string(pairs, "working-directory", where, problems),
+        first=node.start_mark.line,
     )
 
 
-def _working_directory(keys: dict[str, str | list[str]]) -> str:
-    return _text(_child(_child(keys, "defaults"), "run").get("working-directory"))
-
-
-def _job(body: str | list[str]) -> Job:
-    keys = _mapping(body) if isinstance(body, list) else {}
-    steps = keys.get("steps")
-    return Job(
-        env=_flat(keys, "env"),
-        steps=[_step(item) for item in _items(steps if isinstance(steps, list) else [])],
-        directory=_working_directory(keys),
-        flow=_flow(keys),
-    )
+def _job(name: str, key: yaml.Node, node: yaml.Node, end: int) -> Job:
+    problems: list[str] = []
+    pairs = _pairs(node)
+    steps_node = _value(pairs, "steps")
+    if steps_node is not None and not isinstance(steps_node, yaml.SequenceNode):
+        problems.append(f"{name}: `steps` is not a list, which the guard cannot read")
+    items = steps_node.value if isinstance(steps_node, yaml.SequenceNode) else []
+    steps = [_step(item, f"{name}: step {index}", problems) for index, item in enumerate(items)]
+    for step, bound in zip(steps, [step.first for step in steps[1:]] + [end]):
+        step.last = bound
+    return Job(env=_strings(pairs, "env", f"{name}: job", problems), steps=steps,
+               directory=_directory(pairs, f"{name}: job", problems), first=key.start_mark.line, last=end, problems=problems)
 
 
 def parse(text: str) -> Workflow:
-    top = _mapping([line for line in text.splitlines() if not COMMENT_RE.match(line)])
-    jobs = {name: _job(body) for name, body in _child(top, "jobs").items()}
-    if not jobs and isinstance(top.get("runs"), list):
-        jobs = {"runs": _job(top["runs"])}  # a composite action: one job, `runs.steps`, no checkout of its own
-    return Workflow(env=_flat(top, "env"), jobs=jobs, directory=_working_directory(top), flow=_flow(top))
+    root, problems = _load(text)
+    raw = text.splitlines()
+    top = _pairs(root)
+    if root is not None and not isinstance(root, yaml.MappingNode):
+        problems.append("the workflow is not a mapping, which the guard cannot read")
+    workflow = Workflow(env=_strings(top, "env", "workflow", problems), jobs={},
+                        directory=_directory(top, "workflow", problems), problems=problems, raw=raw, root=root)
+    jobs = list(_pairs(_value(top, "jobs")).items())
+    if not jobs and _value(top, "runs") is not None:  # a composite action: one job, `runs.steps`, no checkout of its own
+        jobs = [("runs", top["runs"])]
+    heads = [key.start_mark.line for _, (key, _) in jobs] + [len(raw)]
+    for index, (name, (key, value)) in enumerate(jobs):
+        workflow.jobs[name] = _job(name, key, value, heads[index + 1])
+    return workflow
 
 
-def toolchain_file() -> tuple[str, frozenset[str]]:
-    table = tomllib.loads(TOOLCHAIN_FILE.read_text(encoding="utf-8"))["toolchain"]
-    return str(table["channel"]), frozenset(table.get("components", ()))
+def _children(node: yaml.Node, owner: yaml.Node | None) -> list[tuple[yaml.Node, yaml.Node | None]]:
+    if isinstance(node, yaml.MappingNode):
+        return [(value, key) for key, value in node.value]
+    if isinstance(node, yaml.SequenceNode):
+        return [(item, owner) for item in node.value]
+    return []
+
+
+def _nodes(root: yaml.Node | None) -> list[tuple[yaml.Node, yaml.Node | None]]:
+    """Every value node of the document with the key it sits under, each once (an alias shares its node)."""
+    seen, stack, out = set(), [(root, None)], []
+    while stack:
+        node, owner = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        out.append((node, owner))
+        stack += _children(node, owner)
+    return out
+
+
+def _mapping_pairs(root: yaml.Node | None) -> list[tuple[yaml.Node, yaml.Node, yaml.Node | None]]:
+    """Every (key, value, parent key) of the document, in order."""
+    pairs = [(key, value, owner) for node, owner in _nodes(root) if isinstance(node, yaml.MappingNode) for key, value in node.value]
+    return sorted(pairs, key=lambda triple: triple[0].start_mark.index)
+
+
+def _value_scalars(root: yaml.Node | None) -> list[tuple[yaml.ScalarNode, yaml.Node | None]]:
+    """Every scalar value or list item of the document in order, with the key it sits under."""
+    return sorted(((node, owner) for node, owner in _nodes(root) if isinstance(node, yaml.ScalarNode)),
+                  key=lambda pair: pair[0].start_mark.index)
+
+
+def _scalar_lines(node: yaml.ScalarNode) -> list[tuple[int, str]]:
+    """(0-based line, text) of a scalar's lines, shell comment lines left out."""
+    first = node.start_mark.line + (node.style in ("|", ">"))
+    return [(first + i, text) for i, text in enumerate(node.value.splitlines()) if not text.lstrip().startswith("#")]
+
+
+# --- nightly reasons ------------------------------------------------------------
+
+
+def _needs(text: str) -> set[str]:
+    """What a text says needs nightly: `-Z` flags, miri, cargo fuzz, cargo careful."""
+    return {f"-z{m.group(1).lower()}" if m.group(1) else m.group(2).lower() for m in NIGHTLY_NEED_RE.finditer(text)}
+
+
+def _job_needs(job: Job, workflow: Workflow) -> set[str]:
+    """What a job runs on nightly, read from its `run:` values and `*FLAGS` variables only."""
+    runs = [line for step in job.steps for line in step.run.splitlines() if not line.lstrip().startswith("#")]
+    envs = (workflow.env, job.env, *(step.env for step in job.steps))
+    flags = [value for env in envs for key, value in env.items() if key.endswith("FLAGS")]
+    return _needs("\n".join(runs + flags))
+
+
+class _Reasons:
+    """The comment block right above each code line of a text."""
+
+    def __init__(self, raw: list[str]) -> None:
+        self.above: dict[int, list[str]] = {}
+        pending: list[str] = []
+        for index, line in enumerate(raw):
+            if COMMENT_RE.match(line):
+                pending.append(line)
+                continue
+            if line.strip() and pending:
+                self.above[index] = pending
+            pending = []
+
+    def given(self, lines, needs: set[str]) -> bool:
+        """A block above one of `lines` holds a `# nightly:` line and names something in `needs`."""
+        blocks = [self.above.get(line, []) for line in lines]
+        return any(any(NIGHTLY_REASON_RE.match(c) for c in block) and bool(_needs("\n".join(block)) & needs) for block in blocks)
+
+
+def _pin_context(workflow: Workflow, line: int, parent: yaml.Node | None) -> tuple[list[int], set[str]]:
+    """The code lines whose comments may explain a pin at `line`, and what its job runs on nightly."""
+    for job in workflow.jobs.values():
+        for step in job.steps:
+            if step.first <= line < step.last:
+                return list(range(step.first, step.last)), _job_needs(job, workflow)
+        if job.first <= line < job.last:
+            return _own_lines(line, parent), _job_needs(job, workflow)
+    every = [_job_needs(job, workflow) for job in workflow.jobs.values()]
+    return _own_lines(line, parent), set().union(*every)
+
+
+def _own_lines(line: int, parent: yaml.Node | None) -> list[int]:
+    return [line] + ([parent.start_mark.line] if parent is not None else [])
+
+
+def _pins(text: str) -> list[tuple[str, bool]]:
+    """(toolchain, is a pin site that must say why) for each toolchain a shell text names."""
+    pins = [(match.group(1), False) for match in PLUS_RE.finditer(text)]
+    pins += [(name, True) for match in RUSTUP_RE.finditer(text) if (name := _named(match.group(2)))]
+    return pins + [(_unquote(match.group(1)), True) for match in ASSIGN_RE.finditer(text)]
+
+
+def _pin_findings(line: int, pins: list[tuple[str, bool]], explained) -> list[str]:
+    found = [f"line {line + 1} names toolchain {name!r}" for name, _ in pins if name != ALLOWED]
+    if any(site for name, site in pins if name == ALLOWED) and not explained():
+        found.append(f"line {line + 1} {PINS_UNEXPLAINED}")
+    return found
+
+
+def _key_findings(workflow: Workflow, reasons: _Reasons) -> list[str]:
+    """Every `*toolchain` key and RUST_VERSION key of the document, at any depth."""
+    found = []
+    for key, value, parent in _mapping_pairs(workflow.root):
+        line = key.start_mark.line
+        if not isinstance(key, yaml.ScalarNode):
+            found.append(f"line {line + 1} has a key the guard cannot read")
+        elif key.value == "RUST_VERSION":
+            found.append(f"line {line + 1} copies the toolchain version: 'RUST_VERSION'")
+        elif TOOLCHAIN_KEY_RE.match(key.value):
+            found += _toolchain_value(workflow, reasons, key, value, parent)
+    return found
+
+
+def _toolchain_value(workflow: Workflow, reasons: _Reasons, key: yaml.Node, value: yaml.Node, parent) -> list[str]:
+    line, name = key.start_mark.line, _scalar(value)
+    if name is None:
+        return [f"line {line + 1} names a toolchain the guard cannot read"]
+    lines, needs = _pin_context(workflow, line, parent)
+    return _pin_findings(line, [(name, True)], lambda: reasons.given(lines, needs))
+
+
+def _scalar_findings(workflow: Workflow, reasons: _Reasons, channel: str) -> list[str]:
+    """Copies of the version in any scalar; toolchains named in any scalar but a `run:` (the walk reads those)."""
+    channel_re = re.compile(r"(?<![\w.])" + re.escape(channel) + r"(?![\w.])")
+    found = []
+    for node, owner in _value_scalars(workflow.root):
+        in_run = owner is not None and _scalar(owner) == "run"
+        for line, text in _scalar_lines(node):
+            if RUST_VERSION_RE.search(text) or channel_re.search(text):
+                found.append(f"line {line + 1} copies the toolchain version: {text.strip()!r}")
+            if not in_run:
+                lines, needs = _pin_context(workflow, line, owner)
+                found += _pin_findings(line, _pins(text), lambda: reasons.given(lines, needs))
+    return found
+
+
+# --- shell ------------------------------------------------------------------------
+
+
+def _split(line: str) -> list[str]:
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    return list(lexer)
+
+
+def _read_line(lines: list[str], index: int) -> tuple[int, list[str] | None]:
+    """One shell line from `index`: `\\` continuations and open quotes joined; its last line and words."""
+    text = lines[index]
+    while True:
+        if text.rstrip().endswith("\\") and index + 1 < len(lines):
+            index += 1
+            text = text.rstrip()[:-1] + " " + lines[index]
+            continue
+        try:
+            return index, _split(text)
+        except ValueError:
+            if index + 1 >= len(lines):
+                return index, None
+            index += 1
+            text += "\n" + lines[index]
+
+
+def _heredoc(words: list[str]) -> str | None:
+    """The terminator of a heredoc the words open, if any."""
+    for index, word in enumerate(words[:-1]):
+        if word == "<<":
+            return words[index + 1].lstrip("-")
+    return None
+
+
+def _past(lines: list[str], index: int, terminator: str) -> int:
+    while index < len(lines) and lines[index].strip() != terminator:
+        index += 1
+    return index
+
+
+def _logical_lines(script: str) -> tuple[list[tuple[int, list[str]]], list[str]]:
+    """(offset, words) of each shell line, heredoc bodies skipped as data; what could not be read."""
+    lines, out, problems, index = script.splitlines(), [], [], 0
+    while index < len(lines):
+        start = index
+        index, words = _read_line(lines, index)
+        if words is None:
+            return out, [f"has a `run` the guard cannot tokenize from its line {start + 1}"]
+        out.append((start, words))
+        terminator = _heredoc(words)
+        if terminator is not None:
+            index = _past(lines, index + 1, terminator)
+            problems += [f"has a heredoc without its `{terminator}` line"] if index >= len(lines) else []
+        index += 1
+    return out, problems
+
+
+def _segments(words: list[str]) -> list[list[str]]:
+    """The commands of a shell line: words split at `&&`, `||`, `;`, `|`, `&` and parentheses."""
+    out, current = [], []
+    for word in words:
+        if word in SEPARATORS:
+            out += [current] if current else []
+            current = []
+        else:
+            current.append(word)
+    return out + ([current] if current else [])
+
+
+def _command(segment: list[str]) -> list[str]:
+    index = 0
+    while index < len(segment) and segment[index] in SHELL_KEYWORDS:
+        index += 1
+    return segment[index:]
+
+
+def _prefix_toolchain(command: list[str]) -> str | None:
+    """RUSTUP_TOOLCHAIN set for this command only, by a leading assignment word."""
+    for word in command:
+        if not ASSIGNMENT_WORD_RE.match(word):
+            return None
+        if word.startswith("RUSTUP_TOOLCHAIN="):
+            return word.partition("=")[2]
+    return None
+
+
+def _assigned(words: list[str]) -> str | None:
+    return next((word.partition("=")[2] for word in words if word.startswith("RUSTUP_TOOLCHAIN=")), None)
+
+
+@dataclass
+class _Shell:
+    """Where a shell is, and what it exported, within one step or RUN."""
+
+    directory: str
+    stack: list[str] = field(default_factory=list)
+    exported: str | None = None
+
+
+def _target(command: list[str]) -> str:
+    """Where `cd` or `pushd` goes: its first word that is not an option, else home."""
+    targets = [word for word in command[1:] if not word.startswith("-")]
+    return targets[0] if targets else "~"
+
+
+def _change_directory(command: list[str], shell: _Shell, join) -> str | None:
+    """Apply `cd`, `pushd` or `popd`; return a target the guard cannot resolve, if any."""
+    if command[0] == "popd":
+        shell.directory = shell.stack.pop() if shell.stack else UNKNOWN_DIR
+        return None
+    target = _target(command)
+    if command[0] == "pushd":
+        shell.stack.append(shell.directory)
+    unresolvable = "$" in target or "`" in target
+    shell.directory = UNKNOWN_DIR if unresolvable else join(shell.directory, target)
+    return target if unresolvable else None
 
 
 def _named(args: str) -> str | None:
@@ -293,93 +580,6 @@ def _installs(verb: str, named: str | None) -> bool:
     return verb in INSTALL_VERBS or (verb == "update" and named is not None)
 
 
-def _pins(line: str) -> list[tuple[str, bool]]:
-    """(toolchain, is a pin site that must say why) for each toolchain the line names."""
-    pins = [(match.group(1), False) for match in PLUS_RE.finditer(line)]
-    pins += [(name, True) for match in RUSTUP_RE.finditer(line) if (name := _named(match.group(2)))]
-    pins += [(_unquote(match.group(1)), True) for match in ASSIGN_RE.finditer(line)]
-    pins += [(_unquote(match.group(1)), True) for match in FLOW_KEYED_RE.finditer(line)]
-    keyed = KEYED_RE.match(line) or DOCKER_ENV_RE.match(line)
-    if keyed:
-        pins.append((_unquote(keyed.group(1)), True))
-    return pins
-
-
-def _needs(text: str) -> set[str]:
-    """What a text says needs nightly: `-Z` flags, miri, cargo fuzz, cargo careful."""
-    return {f"-z{m.group(1).lower()}" if m.group(1) else m.group(2).lower() for m in NIGHTLY_NEED_RE.finditer(text)}
-
-
-def _job_spans(raw: list[str]) -> list[tuple[int, int]]:
-    """Each job's lines; the whole text when there are no jobs (a Dockerfile, a composite action)."""
-    lines = [line.rstrip() for line in raw]
-    if "jobs:" not in lines:
-        return [(0, len(raw))]
-    start = lines.index("jobs:")
-    heads = [i for i in range(start + 1, len(raw)) if JOB_KEY_RE.match(raw[i])]
-    return list(zip(heads, heads[1:] + [len(raw)]))
-
-
-def _job_needs(raw: list[str], index: int, spans: list[tuple[int, int]]) -> set[str]:
-    """What the job holding line `index` runs on nightly, read from its lines, the pin's own included."""
-    start, end = next(((s, e) for s, e in spans if s <= index < e), (0, len(raw)))
-    return _needs(" ".join(line for line in raw[start:end] if not COMMENT_RE.match(line)))
-
-
-def _reason_block(raw: list[str], position: int) -> str:
-    block = []
-    while position >= 0 and COMMENT_RE.match(raw[position]):
-        block.append(raw[position])
-        position -= 1
-    return "\n".join(block)
-
-
-def _gives_a_reason(block: str, needs: set[str]) -> bool:
-    """A `# nightly:` line, and the block names something the job itself runs on nightly."""
-    return any(NIGHTLY_REASON_RE.match(line) for line in block.splitlines()) and bool(_needs(block) & needs)
-
-
-def _says_why(raw: list[str], index: int, needs: set[str]) -> bool:
-    """A reasoned `# nightly:` comment sits right above the pin, or above its own step or key."""
-    indent, passed_item = _depth(raw[index]), bool(ITEM_RE.match(raw[index]))
-    for position in range(index - 1, -1, -1):
-        line = raw[position]
-        if COMMENT_RE.match(line):
-            return _gives_a_reason(_reason_block(raw, position), needs)
-        if passed_item or not line.strip() or not (STRUCTURAL_RE.match(line) or _depth(line) >= indent):
-            return False
-        passed_item = bool(ITEM_RE.match(line))
-    return False
-
-
-def _unexplained_nightly(raw: list[str], index: int, pins: list[tuple[str, bool]], spans: list[tuple[int, int]]) -> bool:
-    if not any(site for name, site in pins if name == ALLOWED):
-        return False
-    return not _says_why(raw, index, _job_needs(raw, index, spans))
-
-
-def _line_findings(raw: list[str], index: int, channel_re: re.Pattern[str], spans: list[tuple[int, int]]) -> list[str]:
-    line, where = raw[index], f"line {index + 1}"
-    pins = _pins(line)
-    found = [f"{where} names toolchain {name!r}" for name, _ in pins if name != ALLOWED]
-    if _unexplained_nightly(raw, index, pins, spans):
-        found.append(f"{where} pins nightly without a comment `# nightly: <why>`")
-    if RUST_VERSION_RE.search(line) or channel_re.search(line):
-        found.append(f"{where} copies the toolchain version: {line.strip()!r}")
-    return found
-
-
-def _literal_findings(text: str, channel: str) -> list[str]:
-    raw = text.splitlines()
-    channel_re = re.compile(r"(?<![\w.])" + re.escape(channel) + r"(?![\w.])")
-    spans = _job_spans(raw)
-    found = []
-    for index, line in enumerate(raw):
-        if not COMMENT_RE.match(line):
-            found += _line_findings(raw, index, channel_re, spans)
-    return found
-
-
 def _installs_from_the_file(run: str) -> bool:
     return any(_verb(m) in INSTALL_VERBS and _named(m.group(2)) is None for m in RUSTUP_RE.finditer(run))
 
@@ -388,6 +588,8 @@ def _reach(needed: str | None) -> str:
     """What is wrong with a call that needs `needed` and finds it not installed."""
     if needed in REACH:
         return REACH[needed]
+    if needed.startswith(FOREIGN):
+        return f"reaches cargo in a checkout of {needed.removeprefix(FOREIGN)}, not of this repository"
     if needed.startswith("file:"):
         copy = needed.removeprefix("file:")
         prefix = "" if copy == "." or copy.startswith("/") else f"{copy}/"
@@ -402,7 +604,7 @@ def _norm(directory: str) -> str:
 def _resolve(directory: str) -> str:
     """A workspace-relative directory, or UNKNOWN_DIR when the guard cannot tell where it is."""
     normal = _norm(directory)
-    if "${{" in directory or normal.startswith(("/", "$", "~", "..")):
+    if "${{" in directory or normal.startswith(("/", "$", "~", "..")) or normal == "-":
         return UNKNOWN_DIR
     return normal
 
@@ -411,31 +613,20 @@ def _within(directory: str, copy: str) -> bool:
     return copy == "." or directory == copy or directory.startswith(copy + "/")
 
 
-def _cd(line: str, directory: str) -> str:
-    match = CD_RE.match(line)
-    if match is None:
-        return directory
-    return UNKNOWN_DIR if directory == UNKNOWN_DIR else _resolve(posixpath.join(directory, match.group(1)))
+def _cd(directory: str, target: str) -> str:
+    return UNKNOWN_DIR if directory == UNKNOWN_DIR else _resolve(posixpath.join(directory, target))
 
 
-def _assignments(line: str) -> tuple[str | None, str | None, str | None]:
-    """RUSTUP_TOOLCHAIN the line sets: (via $GITHUB_ENV, via export, for this command only)."""
-    match = ASSIGN_RE.search(line)
-    if match is None:
-        return None, None, None
-    if "GITHUB_ENV" in line:
-        return match.group(1), None, None
-    if EXPORT_RE.match(line):
-        return None, match.group(1), None
-    return None, None, match.group(1)
+# --- the walk: what each job installs, and what each call needs ------------------------
 
 
 class _Walk:
     """One job, step by step: its checkouts, the toolchains it installed, and what each call needs."""
 
-    def __init__(self, name: str, job: Job, workflow: Workflow) -> None:
-        self.name, self.job, self.workflow = name, job, workflow
-        self.copies: set[str] = set()  # checkouts so far, each with its own rust-toolchain.toml
+    def __init__(self, name: str, job: Job, workflow: Workflow, reasons: _Reasons) -> None:
+        self.name, self.job, self.workflow, self.reasons = name, job, workflow, reasons
+        self.needs = _job_needs(job, workflow)
+        self.copies: dict[str, str] = {}  # checkout path -> repository ("" for this one)
         self.installed: set[str] = set()
         self.override: str | None = None  # `rustup override set <toolchain>`
         self.exported: str | None = None  # RUSTUP_TOOLCHAIN written to $GITHUB_ENV
@@ -445,8 +636,11 @@ class _Walk:
         """The rust-toolchain.toml a call in `directory` resolves through."""
         if directory == UNKNOWN_DIR:
             return UNREADABLE
-        copy = max((copy for copy in self.copies if _within(directory, copy)), key=len, default=None)
-        return OUTSIDE if copy is None else f"file:{copy}"
+        owners = [copy for copy in self.copies if _within(directory, copy)]
+        if not owners:
+            return OUTSIDE
+        copy = max(owners, key=len)
+        return f"{FOREIGN}{self.copies[copy]}" if self.copies[copy] else f"file:{copy}"
 
     def toolchain(self, step: Step, directory: str, line_env: str | None = None) -> str:
         chosen = (
@@ -465,40 +659,60 @@ class _Walk:
     def visit(self, index: int, step: Step) -> None:
         where = f"{self.name}: step {index}"
         self._visit_uses(where, step)
-        directory = _resolve(step.directory or self.job.directory or self.workflow.directory)
-        exported: str | None = None
-        for line in step.run.splitlines():
-            if not COMMENT_RE.match(line):
-                directory, exported = self._visit_line(where, step, line, directory, exported)
+        shell = _Shell(directory=_resolve(step.directory or self.job.directory or self.workflow.directory))
+        lines, problems = _logical_lines(step.run)
+        self.found += [f"{where} {problem}" for problem in problems]
+        for offset, words in lines:
+            for segment in _segments(words):
+                self._visit_segment(where, step, step.run_line + offset, _command(segment), shell)
 
     def _visit_uses(self, where: str, step: Step) -> None:
         if step.uses.startswith(CHECKOUT_ACTION):
-            self.copies.add(_resolve(step.inputs.get("path", "")))
-        elif step.uses.startswith(TOOLCHAIN_ACTION) and "toolchain" in step.inputs:
-            self.installed.add(step.inputs["toolchain"])
+            self._checkout(step)
         elif step.uses.startswith(TOOLCHAIN_ACTION):
-            self.found.append(f"{where} installs the action's ref, not rust-toolchain.toml's toolchain")
+            self._toolchain_action(where, step)
         elif step.uses.startswith(RUST_CACHE_ACTION):
             self.require(where, self.toolchain(step, "."))
         elif step.uses.startswith(CACHE_ACTION) and TOOLCHAIN_PATHS_RE.search(step.inputs.get("path", "")):
             self.found.append(f"{where} caches a toolchain path: {step.inputs['path']!r}")
 
-    def _visit_line(self, where: str, step: Step, line: str, directory: str, exported: str | None):
-        directory = _cd(line, directory)
-        to_github_env, exported_here, inline = _assignments(line)
-        self.exported = to_github_env or self.exported
-        exported = exported_here or exported
-        line_env = self._rustup(where, line, directory) or inline or exported
-        for match in PLUS_RE.finditer(line):
-            self.require(where, match.group(1))
-        if BUILD_RE.search(line):
-            self.require(where, self.toolchain(step, directory, line_env))
-        return directory, exported
+    def _checkout(self, step: Step) -> None:
+        """A checkout of this repository carries its rust-toolchain.toml; one of another repository does not."""
+        repository = step.inputs.get("repository", "")
+        self.copies[_resolve(step.inputs.get("path", ""))] = "" if repository in THIS_REPOSITORY else repository
 
-    def _rustup(self, where: str, line: str, directory: str) -> str | None:
-        """Record what the line installs or overrides; return the toolchain `rustup run` names."""
+    def _toolchain_action(self, where: str, step: Step) -> None:
+        if "toolchain" in step.inputs:
+            self.installed.add(step.inputs["toolchain"])
+        else:
+            self.found.append(f"{where} installs the action's ref, not rust-toolchain.toml's toolchain")
+
+    def _visit_segment(self, where: str, step: Step, line: int, command: list[str], shell: _Shell) -> None:
+        if command and command[0] in DIRECTORY_COMMANDS:
+            target = _change_directory(command, shell, _cd)
+            self.found += [f"{where} changes to a directory the guard cannot resolve: {target!r}"] if target else []
+            return
+        text = " ".join(command)
+        explained = range(step.first, step.last)
+        self.found += _pin_findings(line, _pins(text), lambda: self.reasons.given(explained, self.needs))
+        line_env = self._rustup(where, text, shell.directory) or self._environment(command, text, shell) or shell.exported
+        for match in PLUS_RE.finditer(text):
+            self.require(where, match.group(1))
+        if BUILD_RE.search(text):
+            self.require(where, self.toolchain(step, shell.directory, line_env))
+
+    def _environment(self, command: list[str], text: str, shell: _Shell) -> str | None:
+        """RUSTUP_TOOLCHAIN set for this command; record what `export` and $GITHUB_ENV set for later."""
+        if "GITHUB_ENV" in text:
+            self.exported = _assigned(command) or self.exported
+        elif command[:1] == ["export"]:
+            shell.exported = _assigned(command) or shell.exported
+        return _prefix_toolchain(command)
+
+    def _rustup(self, where: str, text: str, directory: str) -> str | None:
+        """Record what the command installs or overrides; return the toolchain `rustup run` names."""
         ran = None
-        for match in RUSTUP_RE.finditer(line):
+        for match in RUSTUP_RE.finditer(text):
             verb, named = _verb(match), _named(match.group(2))
             if _installs(verb, named):
                 self._install(where, named or self.file(directory))
@@ -511,37 +725,29 @@ class _Walk:
     def _install(self, where: str, target: str) -> None:
         if target in INSTALL_ELSEWHERE:
             self.found.append(f"{where} {INSTALL_ELSEWHERE[target]}")
+        elif target.startswith(FOREIGN):
+            self.found.append(f"{where} installs in a checkout of {target.removeprefix(FOREIGN)}, not from this repository's rust-toolchain.toml")
         else:
             self.installed.add(target)
 
 
-def _job_findings(name: str, job: Job, workflow: Workflow) -> list[str]:
-    walk = _Walk(name, job, workflow)
+def _job_findings(name: str, job: Job, workflow: Workflow, reasons: _Reasons) -> list[str]:
+    walk = _Walk(name, job, workflow, reasons)
     for index, step in enumerate(job.steps):
         walk.visit(index, step)
     return walk.found
 
 
-def _is_rust(step: Step) -> bool:
-    return step.uses.startswith(RUST_ACTIONS) or any(regex.search(step.run) for regex in (BUILD_RE, PLUS_RE, RUSTUP_RE))
-
-
-def _flow_findings(name: str, job: Job, workflow: Workflow) -> list[str]:
-    """In a Rust job, an `env`/`with` the parser cannot read is a finding, never a pass."""
-    if not any(_is_rust(step) for step in job.steps):
-        return []
-    unreadable = "in flow style, which the guard cannot read"
-    found = [f"{name}: step {i} writes `{key}` {unreadable}" for i, step in enumerate(job.steps) for key in step.flow]
-    found += [f"{name}: job `{key}` {unreadable}" for key in job.flow]
-    return found + [f"{name}: workflow `{key}` {unreadable}" for key in workflow.flow]
-
-
 def findings(text: str, channel: str) -> list[str]:
     workflow = parse(text)
-    found = _literal_findings(text, channel)
+    reasons = _Reasons(workflow.raw)
+    found = workflow.problems + _key_findings(workflow, reasons) + _scalar_findings(workflow, reasons, channel)
     for name, job in workflow.jobs.items():
-        found += _job_findings(name, job, workflow) + _flow_findings(name, job, workflow)
+        found += job.problems + _job_findings(name, job, workflow, reasons)
     return found
+
+
+# --- Dockerfiles, which have no parser at hand: fail closed -------------------------
 
 
 @dataclass
@@ -556,27 +762,88 @@ class _Stage:
     installed: set[str] = field(default_factory=set)
 
 
-def _instructions(text: str) -> list[tuple[int, str, str]]:
-    """(0-based line, INSTRUCTION, arguments), `\\` continuations joined."""
-    out: list[tuple[int, str, str]] = []
-    start, body = None, ""
-    for number, line in enumerate(text.splitlines()):
-        if start is None and (not line.strip() or COMMENT_RE.match(line)):
-            continue
-        start = number if start is None else start
-        body += " " + line.strip().removesuffix("\\")
-        if not line.rstrip().endswith("\\"):
-            word, _, args = body.strip().partition(" ")
-            out.append((start, word.upper(), args))
-            start, body = None, ""
+@dataclass
+class _Dockerfile:
+    """A Dockerfile being read: its build arguments, and the stage so far."""
+
+    args: dict[str, str | None] = field(default_factory=dict)
+    stage: _Stage = field(default_factory=_Stage)
+
+
+def _instruction(lines: list[str], index: int) -> tuple[int, str]:
+    """The instruction starting at `index`, `\\` continuations joined, and its last line."""
+    body = ""
+    while True:
+        body += " " + lines[index].strip().removesuffix("\\")
+        if not lines[index].rstrip().endswith("\\") or index + 1 >= len(lines):
+            return index, body.strip()
+        index += 1
+
+
+def _instructions(text: str) -> list[tuple[int, str, str, bool]]:
+    """(0-based line, INSTRUCTION, arguments, opens a heredoc), heredoc bodies skipped."""
+    lines, out, index = text.splitlines(), [], 0
+    while index < len(lines):
+        if lines[index].strip() and not COMMENT_RE.match(lines[index]):
+            start = index
+            index, body = _instruction(lines, index)
+            word, _, args = body.partition(" ")
+            heredoc = HEREDOC_RE.search(args)
+            if heredoc:
+                index = _past(lines, index + 1, heredoc.group(2))
+            out.append((start, word.upper(), args, heredoc is not None))
+        index += 1
     return out
+
+
+def _options(args: str) -> tuple[list[str], str]:
+    """An instruction's leading `--opt` words, and the rest."""
+    options, rest = [], args.lstrip()
+    while rest.startswith("--"):
+        option, _, rest = rest.partition(" ")
+        options.append(option)
+        rest = rest.lstrip()
+    return options, rest
 
 
 def _docker_path(base: str, path: str) -> str:
     """`path` resolved against `base` inside the image, or UNKNOWN_DIR when it cannot be."""
-    if base == UNKNOWN_DIR or "$" in path:
+    if base == UNKNOWN_DIR or "$" in path or path.startswith("~"):
         return UNKNOWN_DIR
     return posixpath.normpath(posixpath.join(base, path))
+
+
+def _expand(text: str, args: dict[str, str | None]) -> str:
+    """`${NAME}`, `${NAME:-default}` and `$NAME` replaced by build-argument defaults; others left as written."""
+
+    def value(match: re.Match[str]) -> str:
+        known = args.get(match.group(1) or match.group(3))
+        if known is not None:
+            return known
+        return match.group(2) if match.group(2) is not None else match.group(0)
+
+    return ARG_REF_RE.sub(value, text)
+
+
+def _docker_from(where: str, args: str, build_args: dict[str, str | None]) -> list[str]:
+    words = _options(args)[1].split()
+    image = words[0] if words else ""
+    expanded = _expand(image, build_args)
+    if "$" in expanded:
+        return [f"{where} FROM the guard cannot resolve: {image!r}"]
+    match = FROM_VERSION_RE.match(expanded)
+    return [f"{where} names a Rust image by version (rust:{match.group(1)}); rust-toolchain.toml owns the version"] if match else []
+
+
+def _docker_arg(dockerfile: _Dockerfile, where: str, word: str, args: str, heredoc: bool) -> list[str]:
+    try:
+        words = shlex.split(args)
+    except ValueError:
+        return [f"{where} ARG the guard cannot tokenize"]
+    for arg in words:
+        name, sep, default = arg.partition("=")
+        dockerfile.args[name] = default if sep else dockerfile.args.get(name)
+    return []
 
 
 def _copy_landing(stage: _Stage, sources: list[str], dest: str) -> str:
@@ -589,21 +856,33 @@ def _copy_landing(stage: _Stage, sources: list[str], dest: str) -> str:
     return UNKNOWN_DIR  # one file copied to a path that may be a directory or a new name
 
 
-def _docker_copy(stage: _Stage, where: str, args: str) -> list[str]:
-    if args.lstrip().startswith("["):
-        return [f"{where} COPY in exec (JSON) form, which the guard cannot read"]
-    parts = [part for part in args.split() if not part.startswith("--")]
+def _docker_copy(dockerfile: _Dockerfile, where: str, word: str, args: str, heredoc: bool) -> list[str]:
+    options, rest = _options(args)
+    if any(option.startswith("--from") for option in options):
+        return []
+    if heredoc:
+        return [f"{where} {word} uses a heredoc, which the guard cannot read"]
+    if rest.startswith("["):
+        return [f"{where} {word} in exec (JSON) form, which the guard cannot read"]
+    parts = rest.split()
     sources, dest = parts[:-1], (parts[-1] if parts else ".")
     names = {posixpath.basename(posixpath.normpath(source)) for source in sources}
+    stage = dockerfile.stage
     if names & {"rust-toolchain.toml", "."}:
         stage.toolchain_dirs.add(_copy_landing(stage, sources, dest))
     stage.repository |= bool(names & {".", "Cargo.toml", "Cargo.lock", "crates"})
     return []
 
 
-def _docker_env(args: str) -> str | None:
+def _docker_workdir(dockerfile: _Dockerfile, where: str, word: str, args: str, heredoc: bool) -> list[str]:
+    dockerfile.stage.workdir = _docker_path(dockerfile.stage.workdir, _unquote(args))
+    return []
+
+
+def _docker_env(dockerfile: _Dockerfile, where: str, word: str, args: str, heredoc: bool) -> list[str]:
     match = ASSIGN_RE.search(args) or re.search(r"\bRUSTUP_TOOLCHAIN\s+([^\s=]+)", args)
-    return _unquote(match.group(1)) if match else None
+    dockerfile.stage.env = _unquote(match.group(1)) if match else dockerfile.stage.env
+    return []
 
 
 def _governing(stage: _Stage, directory: str) -> str | None:
@@ -621,9 +900,9 @@ def _docker_file_install(stage: _Stage, where: str, owner: str | None) -> list[s
     return []
 
 
-def _docker_rustup(stage: _Stage, where: str, args: str, owner: str | None) -> list[str]:
+def _docker_rustup(stage: _Stage, where: str, text: str, owner: str | None) -> list[str]:
     found: list[str] = []
-    for match in RUSTUP_RE.finditer(args):
+    for match in RUSTUP_RE.finditer(text):
         verb, named = _verb(match), _named(match.group(2))
         if verb == "default" and named:
             stage.default = named
@@ -634,9 +913,9 @@ def _docker_rustup(stage: _Stage, where: str, args: str, owner: str | None) -> l
     return found
 
 
-def _docker_plus(stage: _Stage, where: str, args: str) -> list[str]:
+def _docker_plus(stage: _Stage, where: str, text: str) -> list[str]:
     return [f"{where} reaches cargo on {m.group(1)!r} before installing it"
-            for m in PLUS_RE.finditer(args) if m.group(1) not in stage.installed]
+            for m in PLUS_RE.finditer(text) if m.group(1) not in stage.installed]
 
 
 def _docker_needed(stage: _Stage, owner: str | None) -> str | None:
@@ -647,57 +926,86 @@ def _docker_needed(stage: _Stage, owner: str | None) -> str | None:
     return f"file:{owner}" if owner else stage.default
 
 
-def _docker_build(stage: _Stage, where: str, args: str, owner: str | None) -> list[str]:
-    if not (stage.repository and BUILD_RE.search(args)):
+def _docker_build(stage: _Stage, where: str, text: str, owner: str | None) -> list[str]:
+    if not (stage.repository and BUILD_RE.search(text)):
         return []
     needed = _docker_needed(stage, owner)
     return [] if needed in stage.installed else [f"{where} {_reach(needed)}"]
 
 
-def _touches_rust(args: str) -> bool:
-    return any(regex.search(args) for regex in (BUILD_RE, PLUS_RE, RUSTUP_RE))
+def _touches_rust(text: str) -> bool:
+    return any(regex.search(text) for regex in (BUILD_RE, PLUS_RE, RUSTUP_RE))
 
 
-def _docker_run(stage: _Stage, where: str, args: str) -> list[str]:
-    if args.lstrip().startswith("["):
-        return [f"{where} RUN in exec (JSON) form, which the guard cannot read"] if _touches_rust(args) else []
-    cd = CD_RE.match(args)
-    owner = _governing(stage, _docker_path(stage.workdir, cd.group(1)) if cd else stage.workdir)
-    found = _docker_rustup(stage, where, args, owner)
-    return found + _docker_plus(stage, where, args) + _docker_build(stage, where, args, owner)
+def _docker_segment(stage: _Stage, where: str, command: list[str], shell: _Shell) -> list[str]:
+    if command and command[0] in DIRECTORY_COMMANDS:
+        target = _change_directory(command, shell, _docker_path)
+        return [f"{where} changes to a directory the guard cannot resolve: {target!r}"] if target else []
+    text, owner = " ".join(command), _governing(stage, shell.directory)
+    found = _docker_rustup(stage, where, text, owner)
+    return found + _docker_plus(stage, where, text) + _docker_build(stage, where, text, owner)
 
 
-def _docker_from(where: str, args: str) -> list[str]:
-    match = FROM_VERSION_RE.match(args.strip())
-    if match is None:
-        return []
-    return [f"{where} names a Rust image by version (rust:{match.group(1)}); rust-toolchain.toml owns the version"]
+def _docker_run(dockerfile: _Dockerfile, where: str, word: str, args: str, heredoc: bool) -> list[str]:
+    rest = _options(args)[1]
+    if heredoc:
+        return [f"{where} RUN uses a heredoc, which the guard cannot read"]
+    if rest.startswith("["):
+        return [f"{where} RUN in exec (JSON) form, which the guard cannot read"] if _touches_rust(rest) else []
+    try:
+        words = _split(rest)
+    except ValueError:
+        return [f"{where} RUN the guard cannot tokenize"]
+    stage, shell, found = dockerfile.stage, _Shell(directory=dockerfile.stage.workdir), []
+    for segment in _segments(words):
+        found += _docker_segment(stage, where, _command(segment), shell)
+    return found
 
 
-def _docker_instruction(stage: _Stage, where: str, word: str, args: str) -> list[str]:
-    """Apply one instruction to its stage (FROM is the caller's); what it gets wrong."""
-    if word in ("COPY", "ADD") and "--from" not in args:
-        return _docker_copy(stage, where, args)
-    if word == "WORKDIR":
-        stage.workdir = _docker_path(stage.workdir, _unquote(args))
-    elif word == "ENV":
-        stage.env = _docker_env(args) or stage.env
-    elif word == "RUN":
-        return _docker_run(stage, where, args)
-    return []
+DOCKER_INSTRUCTIONS = {
+    "ARG": _docker_arg,
+    "COPY": _docker_copy,
+    "ADD": _docker_copy,
+    "WORKDIR": _docker_workdir,
+    "ENV": _docker_env,
+    "RUN": _docker_run,
+}
+
+
+def _dockerfile_literals(text: str, channel: str) -> list[str]:
+    """Toolchains named, and version copies, on any line but a comment."""
+    raw, reasons = text.splitlines(), _Reasons(text.splitlines())
+    needs = _needs("\n".join(args for _, word, args, _ in _instructions(text) if word == "RUN" or "FLAGS" in args))
+    channel_re = re.compile(r"(?<![\w.])" + re.escape(channel) + r"(?![\w.])")
+    found = []
+    for index, line in enumerate(raw):
+        if not COMMENT_RE.match(line):
+            found += _dockerfile_line(index, line, lambda i=index: reasons.given([i], needs), channel_re)
+    return found
+
+
+def _dockerfile_line(index: int, line: str, explained, channel_re: re.Pattern[str]) -> list[str]:
+    keyed = DOCKER_ENV_RE.match(line)
+    found = _pin_findings(index, _pins(line) + ([(_unquote(keyed.group(1)), True)] if keyed else []), explained)
+    if RUST_VERSION_RE.search(line) or channel_re.search(line):
+        found.append(f"line {index + 1} copies the toolchain version: {line.strip()!r}")
+    return found
 
 
 def dockerfile_findings(text: str, channel: str) -> list[str]:
-    found = _literal_findings(text, channel)
-    stage = _Stage()
-    for number, word, args in _instructions(text):
+    found = _dockerfile_literals(text, channel)
+    dockerfile = _Dockerfile()
+    for number, word, args, heredoc in _instructions(text):
         where = f"line {number + 1}"
         if word == "FROM":
-            stage = _Stage()
-            found += _docker_from(where, args)
-        else:
-            found += _docker_instruction(stage, where, word, args)
+            dockerfile.stage = _Stage()
+            found += _docker_from(where, args, dockerfile.args)
+        elif word in DOCKER_INSTRUCTIONS:
+            found += DOCKER_INSTRUCTIONS[word](dockerfile, where, word, args, heredoc)
     return found
+
+
+# --- the tree ----------------------------------------------------------------------
 
 
 def workflow_files(root: Path = REPO_ROOT) -> list[Path]:
@@ -910,6 +1218,59 @@ def _documented_loom_command(path: str) -> list[str]:
         if "cargo test" in line and "--cfg loom" in line:
             return shlex.split(line.split("`")[1] if "`" in line else line.split("//!", 1)[-1])
     raise AssertionError(f"{path} documents no loom command")
+
+
+CHECKOUT = "      - uses: actions/checkout@v7\n"
+INSTALL_STEP = "      - run: rustup toolchain install --no-self-update --profile minimal\n"
+DOCKER_HEAD = "FROM rust:bookworm AS builder\nWORKDIR /app\n"
+# Round 4, finding 1: a reasoned nightly, set through a form the hand parser read as empty.
+YAML_FORMS = {
+    "flow mapping on the next line": ("      # nightly: -Zbuild-std rebuilds std\n      - env:\n          { RUSTUP_TOOLCHAIN: nightly }\n"
+                                      "        run: cargo build -Zbuild-std\n"),
+    "alias": ("        env: &nightly\n          # nightly: -Zbuild-std rebuilds std\n          RUSTUP_TOOLCHAIN: nightly\n"
+              "      - env: *nightly\n        run: cargo build -Zbuild-std\n"),
+    "quoted key": ("      # nightly: -Zbuild-std rebuilds std\n      - env:\n          \"RUSTUP_TOOLCHAIN\": nightly\n"
+                   "        run: cargo build -Zbuild-std\n"),
+}
+UNEXPLAINED = "pins nightly without a comment `# nightly: <why>`"
+# Round 4, finding 4: a reason naming what only a key or a step name says.
+NEEDS_CASES = {
+    "job keyed miri": ("jobs:\n  miri:\n    runs-on: ubuntu-latest\n    env:\n      # nightly: miri\n      RUSTUP_TOOLCHAIN: nightly\n"
+                       "    steps:\n      - uses: dtolnay/rust-toolchain@abc\n        with:\n          # nightly: miri\n"
+                       "          toolchain: nightly\n      - run: cargo build\n",
+                       [f"line 6 {UNEXPLAINED}", f"line 11 {UNEXPLAINED}"]),
+    "step named miri": ("jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      # nightly: miri\n      - name: Run miri\n"
+                        "        uses: dtolnay/rust-toolchain@abc\n        with:\n          toolchain: nightly\n"
+                        "      - run: cargo +nightly test\n",
+                        [f"line 9 {UNEXPLAINED}"]),
+}
+# Round 4, finding 5: after a `cd` the guard cannot resolve, no file governs the call.
+CD_FORMS = {
+    'cd "/tmp"': ('      - run: |\n          cd "/tmp"\n          cargo build\n', []),
+    "&& cd /tmp": ("      - run: true && cd /tmp && cargo build\n", []),
+    "pushd /tmp": ("      - run: |\n          pushd /tmp\n          cargo build\n", []),
+    "cd /tmp;cargo build": ("      - run: cd /tmp;cargo build\n", []),
+    'cd "$HOME"': ('      - run: |\n          cd "$HOME"\n          cargo build\n',
+                   ["j: step 2 changes to a directory the guard cannot resolve: '$HOME'"]),
+}
+# A documented loom command: a line that starts, past a comment marker or a
+# `Run with:` label, with optional VAR=value words and then `cargo test`.
+DOC_COMMAND_RE = re.compile(r"^\s*(?://[!/]?\s*|##\s+Run with:\s*`)?((?:[A-Z_]+=(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*cargo test\b.*)$")
+PYYAML_RE = re.compile(r"pip\s+install\b[^\n]*\bpyyaml==([\w.]+)", re.IGNORECASE)
+RUNS_THIS_GUARD_RE = re.compile(r"test_ci_toolchain_pin|unittest\s+discover\s+-s\s+scripts/tests")
+
+
+def _documented_loom_commands() -> list[tuple[str, int, list[str]]]:
+    """Every loom `cargo test` a tracked doc tells a reader to run, as tokens."""
+    found = []
+    for name in _tracked(REPO_ROOT):
+        if Path(name).suffix not in (".md", ".rs", ".toml") or name.startswith("scripts/tests/"):
+            continue
+        for number, line in enumerate((REPO_ROOT / name).read_text(encoding="utf-8").splitlines(), 1):
+            match = DOC_COMMAND_RE.match(line)
+            if match and "loom" in match.group(1):
+                found.append((name, number, shlex.split(match.group(1).split("`")[0])))
+    return found
 
 
 def _variant(old: str, new: str, text: str = GOOD) -> list[str]:
@@ -1141,14 +1502,83 @@ class FindingsTests(unittest.TestCase):
             with self.subTest(case=case):
                 self.assertTrue(_has(found, "pins nightly without a comment"), found)
 
-    # Round 3, finding 4: what the guard cannot read exactly is a finding.
-    def test_flow_style_env_or_with_in_a_rust_job_is_refused(self) -> None:
-        for snippet in ("      - env: { RUSTUP_TOOLCHAIN: stable }\n        run: cargo build\n",
-                        "      - uses: PyO3/maturin-action@v1\n        with: { rust-toolchain: stable }\n"):
-            with self.subTest(snippet=snippet):
-                found = _add_step(snippet)
-                self.assertTrue(_has(found, "names toolchain 'stable'"), found)
-                self.assertTrue(_has(found, "flow style"), found)
+    # Round 4: PyYAML reads a flow mapping like a block one, so it is judged, not refused.
+    def test_flow_style_env_or_with_is_read_like_block_style(self) -> None:
+        found = _add_step("      - env: { RUSTUP_TOOLCHAIN: stable }\n        run: cargo build\n")
+        self.assertTrue(_has(found, "names toolchain 'stable'"), found)
+        self.assertTrue(_has(found, "py: step 2 reaches cargo on 'stable' before installing it"), found)
+        self.assertFalse(_has(found, "flow style"), found)
+        found = _add_step("      - uses: PyO3/maturin-action@v1\n        with: { rust-toolchain: stable }\n")
+        self.assertTrue(_has(found, "names toolchain 'stable'"), found)
+        self.assertFalse(_has(found, "flow style"), found)
+
+    # Round 4, finding 1: YAML forms the hand parser read as empty.
+    def test_yaml_forms_the_hand_parser_missed_are_read(self) -> None:
+        for form, steps in YAML_FORMS.items():
+            with self.subTest(form=form):
+                self.assertEqual(["j: step 1 reaches cargo on 'nightly' before installing it"], _channel(steps))
+
+    def test_a_workflow_the_yaml_loader_rejects_is_a_finding(self) -> None:
+        found = findings("jobs: [\n", "1.90")
+        self.assertTrue(found and found[0].startswith("the workflow is not valid YAML: "), found)
+
+    def test_an_env_that_is_not_a_mapping_is_a_finding(self) -> None:
+        text = ONE_JOB + CHECKOUT + INSTALL_STEP + "      - env: ${{ fromJSON(inputs.env) }}\n        run: cargo build\n"
+        self.assertEqual(["j: step 2 writes `env` as something other than a mapping, which the guard cannot read"],
+                         findings(text, "1.90"))
+
+    # Round 4, finding 2: exec form behind options, and heredocs.
+    def test_dockerfile_exec_form_behind_options_and_heredocs_are_refused(self) -> None:
+        linked = DOCKER_HEAD + 'COPY --link ["rust-toolchain.toml", "./"]\n'
+        self.assertEqual(["line 3 COPY in exec (JSON) form, which the guard cannot read"], dockerfile_findings(linked, "1.90"))
+        heredoc = DOCKER_HEAD + "RUN <<EOF\ncargo build\nEOF\n"
+        self.assertEqual(["line 3 RUN uses a heredoc, which the guard cannot read"], dockerfile_findings(heredoc, "1.90"))
+
+    # Round 4, finding 3: each fail-closed rule, by its exact message.
+    def test_an_unresolvable_working_directory_is_named(self) -> None:
+        text = ONE_JOB + CHECKOUT + "      - working-directory: ${{ matrix.dir }}\n        run: cargo build\n"
+        self.assertEqual(["j: step 1 reaches cargo where the guard cannot tell which rust-toolchain.toml governs"],
+                         findings(text, "1.90"))
+
+    def test_an_exec_form_copy_is_named(self) -> None:
+        text = DOCKER_HEAD + 'COPY ["rust-toolchain.toml", "./"]\n'
+        self.assertEqual(["line 3 COPY in exec (JSON) form, which the guard cannot read"], dockerfile_findings(text, "1.90"))
+
+    def test_an_exec_form_run_is_named(self) -> None:
+        text = DOCKER_HEAD + 'RUN ["cargo", "build"]\n'
+        self.assertEqual(["line 3 RUN in exec (JSON) form, which the guard cannot read"], dockerfile_findings(text, "1.90"))
+
+    # Round 4, finding 4: what a job runs comes from its `run:` values and flags, never its keys or names.
+    def test_a_nightly_reason_is_read_against_run_values_only(self) -> None:
+        for case, (text, expected) in NEEDS_CASES.items():
+            with self.subTest(case=case):
+                self.assertEqual(expected, findings(text, "1.90"))
+
+    # Round 4, finding 5: `cd` and `pushd`, tokenized, in workflows and in Dockerfiles.
+    def test_every_cd_form_moves_the_call(self) -> None:
+        reach = "j: step 2 reaches cargo where the guard cannot tell which rust-toolchain.toml governs"
+        for form, (snippet, before) in CD_FORMS.items():
+            with self.subTest(form=form):
+                self.assertEqual(before + [reach], findings(ONE_JOB + CHECKOUT + INSTALL_STEP + snippet, "1.90"))
+        docker = DOCKERFILE_FROM_THE_FILE.replace("RUN cargo build --release", 'RUN cd "/opt" && cargo build --release')
+        self.assertEqual(["line 7 builds the repository with the base image's toolchain, not rust-toolchain.toml's"],
+                         dockerfile_findings(docker, "1.90"))
+
+    # Round 4, finding 6: FROM through ARG is resolved, or refused.
+    def test_a_from_behind_an_arg_is_resolved_or_refused(self) -> None:
+        by_version = "line 2 names a Rust image by version (rust:1.89); rust-toolchain.toml owns the version"
+        self.assertEqual([by_version], dockerfile_findings("ARG TAG=1.89\nFROM rust:${TAG} AS builder\n", "1.90"))
+        self.assertEqual([by_version], dockerfile_findings("ARG BASE=rust:1.89\nFROM ${BASE} AS builder\n", "1.90"))
+        self.assertEqual(["line 1 FROM the guard cannot resolve: 'rust:${TAG}'"],
+                         dockerfile_findings("FROM rust:${TAG} AS builder\n", "1.90"))
+
+    # Round 4: a checkout of another repository carries its toolchain file, not this one's.
+    def test_a_checkout_of_another_repository_is_not_this_repositorys_file(self) -> None:
+        text = (ONE_JOB + "      - uses: actions/checkout@v7\n        with:\n          repository: someone/other-repo\n"
+                + INSTALL_STEP + "      - run: cargo build\n")
+        self.assertEqual(["j: step 1 installs in a checkout of someone/other-repo, not from this repository's rust-toolchain.toml",
+                          "j: step 2 reaches cargo in a checkout of someone/other-repo, not of this repository"],
+                         findings(text, "1.90"))
 
     def test_a_dockerfile_copy_counts_only_where_the_build_runs(self) -> None:
         cases = {
@@ -1170,16 +1600,43 @@ class FindingsTests(unittest.TestCase):
 
 
 class RealWorkflowTests(unittest.TestCase):
-    # Round 3, finding 6: the loom commands the docs give are the ones CI runs.
-    def test_the_documented_loom_commands_are_the_ones_ci_runs(self) -> None:
-        ci = _ci_loom_commands()
+    # Rounds 3 and 4 (finding 7): every loom command a doc gives is one CI runs.
+    def test_every_documented_loom_command_is_one_ci_runs(self) -> None:
+        ci = [sorted(command) for command in _ci_loom_commands()]
         self.assertEqual(2, len(ci), ci)
-        for path, marker in (("crates/velesdb-core/Cargo.toml", "loom_tests"),
-                             ("crates/velesdb-core/tests/loom_tests.rs", "loom_tests"),
-                             ("crates/velesdb-core/src/storage/loom_tests.rs", "storage::loom")):
-            with self.subTest(doc=path):
-                expected = next(command for command in ci if marker in command)
-                self.assertEqual(sorted(expected), sorted(_documented_loom_command(path)))
+        documented = _documented_loom_commands()
+        self.assertLessEqual({"crates/velesdb-core/Cargo.toml", "crates/velesdb-core/tests/loom_tests.rs",
+                              "crates/velesdb-core/src/storage/loom_tests.rs", "crates/velesdb-core/src/sync.rs",
+                              "docs/CONCURRENCY_MODEL.md"}, {path for path, _, _ in documented})
+        for path, number, command in documented:
+            with self.subTest(doc=f"{path}:{number}"):
+                self.assertIn(sorted(command), ci)
+
+    # Round 4, finding 8: the Dockerfile says what its base image carries.
+    def test_the_dockerfile_says_what_its_base_image_carries(self) -> None:
+        text = " ".join(line.lstrip("# ").strip() for line in (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines())
+        self.assertIn("carries rustup and a stable toolchain this build does not use", text)
+
+    # Round 4, finding 9: the dx-timing Dockerfile writes no toolchain version, comments included.
+    def test_dx_timing_writes_no_toolchain_version(self) -> None:
+        channel, _ = toolchain_file()
+        self.assertNotIn(channel, (REPO_ROOT / "scripts" / "dx-timing" / "Dockerfile.rust").read_text(encoding="utf-8"))
+
+    # Round 4: every job that runs this guard installs PyYAML first, at one pin.
+    def test_every_job_that_runs_this_guard_installs_pyyaml_at_one_pin(self) -> None:
+        pins, runners = set(), set()
+        for path in workflow_files():
+            for name, job in parse(path.read_text(encoding="utf-8")).jobs.items():
+                for index, step in enumerate(job.steps):
+                    if not RUNS_THIS_GUARD_RE.search(step.run):
+                        continue
+                    runners.add(f"{path.name}::{name}")
+                    found = [m.group(1) for s in job.steps[:index] if (m := PYYAML_RE.search(s.run))]
+                    with self.subTest(job=f"{path.name}::{name}"):
+                        self.assertTrue(found, "runs this guard without installing pyyaml==<pin> first")
+                    pins.update(found)
+        self.assertLessEqual({"gate-contracts.yml::script-gates", "ci.yml::mcp-doc-contract"}, runners)
+        self.assertEqual(1, len(pins), pins)
 
     def test_the_toolchain_file_names_a_channel_and_components(self) -> None:
         channel, components = toolchain_file()
