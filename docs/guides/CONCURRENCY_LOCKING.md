@@ -184,7 +184,24 @@ of AI/RAG applications:
 | Single upsert | Write | Not measured | Briefly |
 | Batch upsert (1000) | Write | Not measured | Briefly |
 | Collection create | Write (registry) | Not measured | No (different lock) |
-| HNSW rebuild | Write (index) | Seconds | Yes (rare) |
+| HNSW vacuum: snapshot | Read (index) | Copies every live vector | No |
+| HNSW vacuum: rebuild | None while inserting (at most two brief reads: the storage mode, and a quantized index's quantizer) | Inserts every live vector into a new graph, built with the index's own M, `ef_construction` and alpha: the bulk of a vacuum, seconds on a large index | No: searches and writes run on the old graph |
+| HNSW vacuum: catch-up | Read (index) while listing the writes made during the rebuild and copying their vectors out; none while inserting them | Copies those writes into the new graph, in at most four rounds, each taking the writes made during the one before, until a round sees 64 or fewer, or four have run | No: searches and writes run on the old graph |
+| HNSW vacuum: swap | Write (index) | Inserts, one at a time and never on rayon, every id mapped but not yet carried when the lock is granted — the catch-up's rounds and threshold say when it stopped trying, not how many are left, and a write in flight (a whole batch) maps its ids after the last round looked, so this has no upper bound (#2335) — then rebuilds the mapping of every live id, and drops the old graph | Yes |
+| HNSW `reorder_for_locality` | Write (index) | The whole pass: renumbers every node and moves every vector | Yes |
+| HNSW save | Save lock (per index) for the whole save; read (index) while it copies the mappings and writes the graph files | The graph files, then the mappings and meta files under the save lock only | No (see below) |
+
+`vacuum` and `reorder_for_locality` also hold a maintenance lock for their
+whole run, so each waits for the other; searches, writes and saves never take
+it. Saves of one index hold a save lock of their own for their whole run, so
+two saves wait for each other and never for a vacuum. `HnswIndex` and
+`NativeHnswIndex` each hold one: they are two wrappers over the same files,
+and a lock on only one of them leaves the other pair of saves reading one
+generation and stamping it twice. A save made during a vacuum's rebuild saves the old graph, and the swap
+waits for its dump like for any read. A save holds the graph's vector read
+lock from the start of its vectors file to the end of its graph file, so an
+insert waits for both files, and since `parking_lot` locks are task-fair, a
+search arriving after that insert waits too.
 
 ---
 

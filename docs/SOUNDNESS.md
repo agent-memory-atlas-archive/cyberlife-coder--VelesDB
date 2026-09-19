@@ -962,12 +962,71 @@ not compile. `reorder_for_locality` re-maps under the write guard by
 snapshotting the forward map, clearing both maps and reinserting: one
 overlapping a delete could map the deleted id again, and one between its
 two writes could erase the reverse entry of the id that took its slot.
-`vacuum` snapshots under a read guard it releases before rebuilding, then
-re-maps under the write guard, so a delete, insert or upsert made during the
-rebuild is still lost (#2262). As with `Placed`, the borrow proves a borrow
-of some graph (through its guard, for an index's own), not that it is this
-index's graph: each call site keeps an index's guard and its mappings
-together.
+`vacuum` re-maps under the write guard too, so no delete lands inside its
+re-map either. As with `Placed`, the borrow proves a borrow of some graph
+(through its guard, for an index's own), not that it is this index's graph:
+each call site keeps an index's guard and its mappings together.
+
+**Invariant**: a write made while `vacuum` rebuilds survives its swap
+(#2262). `vacuum` snapshots each live id with its slot under a read guard,
+rebuilds without one, copies the writes made meanwhile into the new graph in
+catch-up rounds that hold a read guard only to list them and copy their
+vectors out, then re-maps under the write guard from the mappings as they
+stand, not from the snapshot. An id still on the slot its vector was read
+from, by the snapshot or a catch-up round, takes the slot that vector got in
+the new graph. An id on any other slot was inserted or upserted since: its
+vector is copied from the old graph into the new one, one insert at a time,
+before the old graph is dropped. No rayon work runs under the write guard: a
+rayon worker parked on the index lock by a batch search cannot run it, and a
+vacuum that waited on one hung. A snapshot id no longer mapped was
+deleted since, and stays deleted; its node in the new graph is a tombstone,
+and counted as one: the re-map sets `next_idx` to the new graph's slot count,
+so `tombstone_count`, which is what triggers a vacuum, counts every slot no id
+names, wherever it falls. "Still on its snapshot slot" means "untouched"
+because the arena never hands a slot out twice and nothing renumbers
+meanwhile: `vacuum` and `reorder_for_locality` share a maintenance lock, taken
+before the index lock and never by a writer or a save. The rebuild reads M,
+`ef_construction` and alpha from the graph it replaces, so a vacuum keeps the
+parameters the index was built with, and a save after it persists them.
+With no live id the rebuild still runs, into an empty graph, so an index
+whose ids are all deleted is left with no tombstone. Tests:
+`writes_racing_a_vacuum_survive_it`,
+`writes_racing_a_vacuum_of_an_sq8_index_survive_it`,
+`deletes_racing_a_vacuum_keep_the_tombstone_count_exact`,
+`vacuum_keeps_the_index_parameters` and
+`vacuum_of_an_index_with_no_live_id_empties_it` in
+`index/hnsw/index_tests.rs`, and
+`a_vacuum_carrying_writes_finishes_beside_batch_searches` in
+`tests/vacuum_beside_batch_search.rs`.
+
+**Invariant**: a save persists mappings that name only slots of the graph it
+persists, each holding the vector of the id that names it (#2262). `save`
+copies the mappings under the read guard it dumps the graph under, before the
+dump (`persistence::dump_graph`): every slot they name already holds its
+vector, the arena only grows while the guard is held, and a renumber needs the
+write guard. That ordering is not left to timing to test: the dump carries a
+window on its far side, and
+`a_write_in_the_save_window_never_names_a_slot_the_graph_lacks` writes into
+it. With the copy first the write is named by nobody; with the copy moved
+after the dump the same write is named by the mappings and absent from the
+graph, and the reload refuses it. The copy reads the forward map once and derives the reverse map
+from it, so the two agree while writers run. The persisted `next_idx` is the
+slot count the dump wrote, so a slot placed after the copy, which no saved id
+names, reloads as a tombstone. The graph's own dump holds the arena's read
+guard across its vectors file and its graph file, in the declared order
+(vectors, then layers): no node is pushed in between, so the graph file names
+no node the vectors file lacks. Saves of one index run one at a time, under
+a lock of their own that `vacuum` never takes: two at once into one
+directory read the same generation and stamped it over each other's files.
+`HnswIndex` and `NativeHnswIndex` each hold that lock -- the second was
+missed at first, and the invariant is stated of saves, not of one of the two
+wrappers over the same files. Tests:
+`writes_racing_a_save_reload_consistent`,
+`a_write_in_the_save_window_never_names_a_slot_the_graph_lacks`,
+`batch_inserts_racing_a_save_reload_consistent`,
+`a_save_racing_a_vacuum_reloads_consistent`,
+`saves_racing_into_one_directory_reload_consistent` and
+`native_saves_racing_into_one_directory_reload_consistent`.
 
 **Invariant**: a refused vector or batch maps nothing, so there is nothing
 to roll back. A batch the graph refuses part-way leaves the nodes it already

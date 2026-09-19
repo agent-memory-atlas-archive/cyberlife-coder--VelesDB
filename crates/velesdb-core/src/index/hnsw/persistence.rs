@@ -27,6 +27,8 @@
 //!   then its payload is discarded. [`save_sidecars`] deletes the file so
 //!   a stale copy can never shadow newer graph data.
 
+use super::native_inner::NativeHnswInner;
+use super::sharded_mappings::ShardedMappings;
 use crate::distance::DistanceMetric;
 use crate::storage::atomic_write::atomic_write;
 use std::collections::HashMap;
@@ -361,6 +363,69 @@ pub(crate) fn load_graph_generation(path: &Path) -> std::io::Result<u64> {
     }
 }
 
+/// Dumps the graph, then runs the test window if one is installed for `path`.
+///
+/// The window sits **after** the dump, and attached to it rather than written
+/// as a line of `dump_graph`. That position is what makes the ordering
+/// testable at all. With the copy first, as it is, a write landing here is
+/// after both: no saved id names its slot and the saved graph does not hold
+/// it, which is consistent. Move the copy after the dump and the very same
+/// write lands *between* the two: the copy then names a slot the dump never
+/// wrote, which is the torn directory the order exists to prevent. A window
+/// placed before the dump cannot tell the two arrangements apart -- the
+/// injected write is visible to both operations either way -- which is why
+/// there is none there (#2262).
+fn dump_counted_through_the_window(
+    graph: &NativeHnswInner,
+    path: &Path,
+    basename: &str,
+) -> std::io::Result<usize> {
+    let next_idx = graph.file_dump_counted(path, basename)?;
+    #[cfg(test)]
+    save_window::pause(path);
+    Ok(next_idx)
+}
+
+/// Dumps `graph` into `path` as `basename`, and returns what a save writes
+/// beside it: the mappings, and the graph's storage mode.
+///
+/// `graph` is borrowed through the caller's read guard on its index, and the
+/// mappings are copied under that guard, before the dump. Every slot they
+/// name then already holds its vector, the arena only grows while the guard
+/// is held, and nothing renumbers under it: the saved mappings name slots of
+/// the saved graph only, each holding the vector it held when named (#2262).
+/// Copied after the dump, as they were, an insert or upsert landing in
+/// between named a slot the saved graph never held, which the next load
+/// refused.
+///
+/// The copy reads the forward map once and derives the reverse map from it,
+/// so the two agree although writers run meanwhile: each id is read once,
+/// with a slot it held during the copy. `next_idx` is the slot count the dump
+/// wrote, so a slot placed after the copy, which no saved id names, reloads
+/// as a tombstone like any other.
+///
+/// # Errors
+///
+/// As [`NativeHnswInner::file_dump_counted`].
+pub(crate) fn dump_graph(
+    graph: &NativeHnswInner,
+    mappings: &ShardedMappings,
+    path: &Path,
+    basename: &str,
+) -> std::io::Result<(HnswMappingsData, crate::StorageMode)> {
+    let id_to_idx: HashMap<u64, usize> = mappings.iter().collect();
+    let idx_to_id = id_to_idx.iter().map(|(&id, &idx)| (idx, id)).collect();
+    let next_idx = dump_counted_through_the_window(graph, path, basename)?;
+    let mappings = HnswMappingsData {
+        id_to_idx,
+        idx_to_id,
+        next_idx,
+        // `save_sidecars` stamps the save's generation.
+        generation: 0,
+    };
+    Ok((mappings, graph.storage_mode()))
+}
+
 /// Persists every non-graph sidecar (mappings, meta) for an HNSW index in
 /// one call.
 ///
@@ -369,9 +434,8 @@ pub(crate) fn load_graph_generation(path: &Path) -> std::io::Result<u64> {
 /// drift risk (the two call sites previously had identical code but could
 /// silently diverge on the next field addition to `HnswMeta`).
 ///
-/// The HNSW graph itself is dumped by the caller, because the two index
-/// types use different inner types (`NativeHnswInner` directly vs
-/// `ManuallyDrop<HnswInner>`) that would otherwise require a trait object.
+/// The graph is dumped before, by [`dump_graph`], which also copies the
+/// `mappings` written here: see there for why the copy is taken first.
 /// Vector data lives inside the graph dump (`native_hnsw.vectors`) — the
 /// legacy `native_vectors.bin` duplicate is no longer written and any stale
 /// copy from an older binary is deleted here (PERF1).
@@ -392,26 +456,24 @@ pub(crate) fn load_graph_generation(path: &Path) -> std::io::Result<u64> {
 /// pass the same value to [`save_graph_generation`] and this function, so
 /// the graph file and the sidecars land on the same generation stamp.
 ///
-/// The caller-provided [`HnswMeta::generation`] is ignored; this function
-/// overwrites it with `new_gen`.
+/// The caller-provided [`HnswMeta::generation`] and
+/// [`HnswMappingsData::generation`] are ignored; this function overwrites
+/// both with `new_gen`.
 ///
 /// # Errors
 ///
 /// Returns `io::Error` if any of the file operations fail.
 pub(crate) fn save_sidecars(
     path: &Path,
-    mappings: &super::sharded_mappings::ShardedMappings,
+    mappings: HnswMappingsData,
     meta: &HnswMeta,
     new_gen: u64,
 ) -> std::io::Result<()> {
-    let (id_to_idx, idx_to_id, next_idx) = mappings.as_parts();
     save_mappings(
         path,
         &HnswMappingsData {
-            id_to_idx,
-            idx_to_id,
-            next_idx,
             generation: new_gen,
+            ..mappings
         },
     )?;
     // A leftover legacy vectors file would carry an older generation and
@@ -641,3 +703,13 @@ const fn storage_mode_from_u8(value: u8) -> crate::StorageMode {
         _ => crate::StorageMode::Full,
     }
 }
+
+/// A seam in the window between a save's mappings copy and its graph dump,
+/// so a test can put a write there instead of hoping one lands by timing.
+///
+/// Keyed by the directory being saved into: the hook fires only for that
+/// path, so a save any other test makes meanwhile runs untouched and this
+/// needs no process-wide serialization.
+#[cfg(test)]
+#[path = "persistence_save_window_tests.rs"]
+pub(crate) mod save_window;

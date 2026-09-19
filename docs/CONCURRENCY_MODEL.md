@@ -628,9 +628,38 @@ for neighbor in neighbors {
    - BFS/DFS with many nodes may hold locks longer
    - Mitigation: Read-Copy-Drop pattern releases locks quickly
 
-3. **HNSW rebuild is single-threaded**:
-   - Index rebuild blocks all writes
-   - Mitigation: Incremental updates preferred over full rebuild
+3. **An HNSW vacuum holds the index write lock for its swap** (#2262):
+   - The rebuild runs beside searches and writes, which carry on against the
+     old graph. The writes made meanwhile are then copied into the new graph
+     without the write lock, in at most four rounds, each taking the writes
+     made during the one before, until 64 or fewer are left or four have run
+   - Under the write lock, searches and writes wait while the swap copies,
+     one insert at a time, every id mapped but not yet carried when the lock
+     is granted, rebuilds the mapping of every live id and drops the old
+     graph. The rounds and their threshold say when the catch-up stops
+     trying, not how much is left: a write in flight — a whole batch —
+     maps its ids after the last round looked and before the lock is
+     granted, so what the swap copies has no upper bound. #2335 tracks
+     bounding it
+   - Nothing runs on rayon under that write lock: rayon workers running batch
+     searches park on the index lock, so a parallel insert waiting for them
+     there never finishes. The swap once did, and the vacuum hung with every
+     search
+   - `reorder_for_locality` and a running vacuum wait for each other: one
+     maintenance lock, which writers and saves never take, serializes the two.
+     A save made during the rebuild saves the old graph; the swap waits for its
+     dump like for any read guard
+   - Saves of one index wait for each other on a lock of their own, never on
+     the maintenance lock: two saves into one directory rewrote the same
+     files under one generation
+   - The rebuild uses the index's own M, `ef_construction` and alpha, read
+     from its graph, not the defaults for its dimension
+   - A save holds the graph's vector read lock across its vectors file and its
+     graph file, so an insert waits for both to be written: released between
+     the two, a node pushed in between and linked into saved nodes left a
+     save the next load refused
+   - Mitigation: vacuum while writes are light; incremental updates remain
+     preferred over a full rebuild
 
 4. **No transactional semantics**:
    - Operations are atomic per-operation, not per-batch

@@ -150,6 +150,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load call alone reports the cost as gone when it has only moved.
 
 ### Fixed
+- **`NativeHnswIndex::save` now serializes with itself, as `HnswIndex::save`
+  already did (#2262).** A save stamps every artefact with the generation
+  after the one it reads from the directory, so two into one directory read
+  that generation together and stamped it twice over each other's files, and
+  a crash between two renames stopped being detectable. `HnswIndex` took a
+  `saving` lock for exactly this; the other public wrapper over the same
+  files did not. Measured before the fix: twelve rounds of two concurrent
+  saves advanced the directory's generation by one each time instead of two.
 - **Every velesdb-core feature that gates code is now linted and mutated
   (#2348).** `cargo clippy --features a,b` lints what those features switch
   on and nothing else, and the two workspace passes between them named four
@@ -234,6 +242,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is refused instead of acted on. The Windsurf hook reads them the same way, so
   its reminder names the project of the repository it runs in instead of the
   parent directory's when that repository's directory name ends in a newline.
+
+- **Writes made while `vacuum` rebuilds an HNSW index survive it, the
+  rebuilt graph keeps the index's parameters and an exact tombstone count,
+  and a save made beside writes, another save or a vacuum reloads
+  consistent (#2262).** `vacuum` snapshots the live vectors,
+  rebuilds a graph from them without holding the index lock, then swapped the
+  graph in and re-mapped the snapshot's ids, so every insert, upsert and
+  delete made during the rebuild was undone: new ids missing from every
+  search, even an exhaustive one, and deleted ids back in results, until the
+  next open's recovery. The swap now re-maps the ids mapped at that moment:
+  an id written since the snapshot has its vector copied from the old graph
+  into the new one, and an id deleted since stays deleted. Its node stays in
+  the new graph, and `tombstone_count`, which is what triggers a vacuum,
+  missed it whenever it fell above the highest slot still mapped; the swap
+  now counts every slot of the new graph that no id names. `save` dumped the
+  graph, released the index lock, then read the mappings, one map after the
+  other, so a write in between saved an id on a slot the saved graph did not
+  hold, or two maps that disagree, and the next load refused the save. The
+  mappings are now copied under the lock the graph is dumped under, before
+  the dump, with the reverse map derived from the forward one, and the
+  persisted `next_idx` is the slot count the dump wrote. The graph's own
+  dump wrote its vectors file, released the arena's lock, then wrote its
+  graph file, so a batch inserted in between could push nodes the vectors
+  file lacked and link them into saved nodes, which the load refused; one
+  arena read guard now spans both files, so an insert waits for the whole
+  dump. Measured on a shared machine with a release build, a save of a
+  100 000 x 128 index kept a single insert waiting 35 to 48 ms before and 37
+  to 42 ms after, apart from one first save at 165 ms: a single insert
+  already waited on the layers lock the graph file's writer holds. A vacuum
+  also rebuilt every graph with `HnswParams::auto` for its
+  dimension, whatever M, `ef_construction` and alpha the index was built
+  with, and a save then persisted those; it now rebuilds with the graph's
+  own. A vacuum of an index with no live id returned before rebuilding, so
+  its dead slots stayed and `needs_vacuum` kept asking; it now rebuilds into
+  an empty graph. Nothing in the tree vacuums from that count — the two
+  endpoints below are what reach a vacuum, and neither reads it — but a
+  caller polling `needs_vacuum` looped.
+  Two saves of one index into one directory rewrote its graph file in place
+  under one generation; saves of one index now take a lock of their own,
+  never the maintenance lock. `vacuum` and
+  `reorder_for_locality` share a maintenance lock that writers and saves
+  never take; a save made during a rebuild saves the old graph. The writes
+  made during the rebuild are copied into the new graph before the write
+  lock, in at most four rounds, each taking the writes made during the one
+  before; the rounds stop once 64 or fewer are left, or once four have run.
+  Those two describe when the catch-up stops trying, not how much the swap
+  copies: the swap copies every id mapped but not yet carried when the write
+  lock is granted, and a write in flight — a whole batch — joins that set
+  after the last round looked, so its size has no upper bound (#2335 tracks
+  bounding it). The write lock also covers rebuilding the mapping of every
+  live id and dropping the old graph. Nothing runs on rayon under that
+  lock, whose batch searches park rayon's workers on it. Two routes reach
+  it, `POST /collections/{name}/index/rebuild` and
+  `POST /collections/{name}/vacuum`, both through `Collection::rebuild_index`,
+  and both accept writes and flushes meanwhile. Eight tests race a vacuum or
+  saves, and two vacuum an index: one
+  built with its own parameters, one whose ids are all deleted.
+  `writes_racing_a_vacuum_survive_it` fails on the old re-map: 300 of 300
+  inserts lost, 300 of 300 upserts still on their old vector, 297 of 300
+  deletes back in an exhaustive scan.
+  `writes_racing_a_vacuum_of_an_sq8_index_survive_it` runs the same race on a
+  trained SQ8 index; with the copy of the writes reverted, 300 of 300
+  inserts were lost and 300 of 300 upserts left on their old vector.
+  `a_vacuum_carrying_writes_finishes_beside_batch_searches`, a test binary of
+  its own on a two-thread rayon pool, races batches of 256 ids against the
+  swap, so that the copy made under the write lock carries a whole batch:
+  it fails by its watchdog — forty times one unraced vacuum of that index,
+  timed by the test itself, since the cost of a vacuum is the machine's and
+  the profile's — when that copy runs on rayon, the first vacuum never
+  finishing. Raced one id at a time, the copy stayed under the
+  hundred vectors at which it would reach rayon, and proved nothing.
+  `deletes_racing_a_vacuum_keep_the_tombstone_count_exact` failed while the
+  swap left `next_idx` at the highest slot mapped: `tombstone_count` read 0
+  over 1 229 to 1 361 dead slots, in 5 rounds of 5.
+  `writes_racing_a_save_reload_consistent` failed on the old save: 30 of 31
+  saves made beside writes were refused on load, 21 for maps of different
+  sizes and 9 for an id on a slot the saved graph did not hold; with
+  `next_idx` read at the copy instead of the dump, 31 of 32 saves reloaded
+  one tombstone short. `batch_inserts_racing_a_save_reload_consistent`
+  failed 3 runs of 3 on the old graph dump: 13 of 173 saves refused on load
+  for a neighbor id out of range. `vacuum_keeps_the_index_parameters` failed
+  on the old rebuild: M 24, `ef_construction` 300 and alpha 1.2 after a
+  vacuum of an index built with 12, 90 and 1.0.
+  `vacuum_of_an_index_with_no_live_id_empties_it` failed on the old early
+  return: (tombstones, slots, live ids) (200, 200, 0) after the vacuum.
+  `saves_racing_into_one_directory_reload_consistent` failed without the
+  save lock in 2 runs of 3: 10 of 60 rounds left a directory the load
+  refused ("layer num_nodes 9152575309965 exceeds file capacity 296548", or
+  a truncated file).
+  `a_save_racing_a_vacuum_reloads_consistent` failed 5 runs of 5 on the old
+  save taking no lock: 3 to 6 of some 40 saves each reloaded 997 to 1 000 of
+  1 000 ids onto other ids' vectors, or was refused as corrupt.
 
 - **The TypeScript SDK's WASM backend refuses what it cannot honour
   instead of dropping it (#2095).** `textSearch` never passed the caller's
@@ -613,8 +713,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holding no graph guard, so a renumber running at the same time could map
   the deleted id again, or erase the reverse entry of the id that had taken
   its slot. `remove` now holds the index's read guard across both writes. A
-  delete made while `vacuum` rebuilds, before it takes its write guard, is
-  still lost (#2262).
+  delete made while `vacuum` rebuilds is covered by the #2262 entry above.
 
 - **`reorder_for_locality` could leave a collection whose graph and vectors
   disagree.** Since `.vectors` became the graph's arena, the permutation lands

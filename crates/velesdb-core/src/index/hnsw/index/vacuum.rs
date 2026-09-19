@@ -2,7 +2,7 @@
 
 use super::{HnswIndex, HnswInner};
 use crate::index::hnsw::native_inner::Placed;
-use crate::index::hnsw::params::HnswParams;
+use rustc_hash::FxHashMap;
 use std::mem::ManuallyDrop;
 
 /// Errors that can occur during vacuum operations.
@@ -17,6 +17,79 @@ pub enum VacuumError {
     /// whose slot count differs from its id count.
     #[error("Vacuum rebuild failed: {0}")]
     RebuildFailed(String),
+}
+
+/// A live id as `vacuum`'s snapshot saw it: the slot it held in the old graph
+/// and the vector stored there.
+struct Live {
+    id: u64,
+    slot: usize,
+    vector: Vec<f32>,
+}
+
+/// `slots`, if the placement gave each of its `vectors` vectors one: a short
+/// placement, once installed, would leave ids with no slot and nothing to fall
+/// back to.
+fn one_slot_each(slots: Vec<usize>, vectors: usize) -> Result<Vec<usize>, VacuumError> {
+    if slots.len() == vectors {
+        Ok(slots)
+    } else {
+        Err(VacuumError::RebuildFailed(format!(
+            "the rebuild placed {} vectors for {vectors} ids",
+            slots.len()
+        )))
+    }
+}
+
+/// Each id whose vector `vacuum` has put in the new graph, with the slot it held
+/// in the old graph when that vector was read there and the slot the vector
+/// got in the new one.
+type Carried = FxHashMap<u64, (usize, usize)>;
+
+/// Most catch-up rounds [`HnswIndex::vacuum`] runs before it takes the write
+/// guard. Each round copies the writes made during the one before, so under a
+/// steady write rate the rounds shrink as long as copying is faster than
+/// writing; the bound ends a vacuum that writes outpace, which then copies
+/// what is left under the write guard (see [`CATCH_UP_REMAINDER`]).
+const MAX_CATCH_UP_ROUNDS: usize = 4;
+
+/// Writes left at or under which `vacuum` stops catching up and takes the
+/// write guard, where it copies them one by one while every search waits.
+///
+/// This is when the catch-up stops trying, not a bound on what it leaves.
+/// [`HnswIndex::reconcile`] copies every id mapped but not carried when the guard
+/// is granted, and a write in flight joins that set after this check: a batch
+/// assigns its ids between the last round and the guard, so a round that saw
+/// nothing left can still be followed by a copy of the whole batch. Bounding
+/// it — adaptive rounds, or a sealed watermark as velesdb-memory's online
+/// migration uses — is tracked in #2335.
+const CATCH_UP_REMAINDER: usize = 64;
+
+/// The slot `id` got in the new graph, if `carried` holds its vector as it is
+/// now: the id still sits on the old slot its vector was read from. The old
+/// graph's arena never hands a slot out twice, and the maintenance lock keeps
+/// anything from renumbering, so that slot still holds that vector.
+fn carried_slot(carried: &Carried, id: u64, slot: usize) -> Option<usize> {
+    carried
+        .get(&id)
+        .and_then(|&(seen, new_slot)| (seen == slot).then_some(new_slot))
+}
+
+/// The vector at each slot of `written` in `old`, in order.
+///
+/// # Errors
+///
+/// [`VacuumError::RebuildFailed`] if a slot holds no vector in `old`.
+fn copy_vectors(old: &HnswInner, written: &[(u64, usize)]) -> Result<Vec<Vec<f32>>, VacuumError> {
+    let vectors: Option<Vec<Vec<f32>>> = old.with_contiguous_vectors(|arena| {
+        written
+            .iter()
+            .map(|&(_, slot)| arena.get(slot).map(<[f32]>::to_vec))
+            .collect()
+    });
+    vectors.ok_or_else(|| {
+        VacuumError::RebuildFailed("a mapped slot holds no vector in the old graph".into())
+    })
 }
 
 impl HnswIndex {
@@ -76,12 +149,29 @@ impl HnswIndex {
     /// # Important
     ///
     /// - This operation is **blocking** and may take significant time for large indices
-    /// - **Writes during a vacuum are lost to the index** (#2262): an insert or
-    ///   delete that lands after step 1's snapshot reaches the old graph, which
-    ///   the swap drops, and the mapping rebuild re-creates the snapshot — so a
-    ///   new id stays out of search and a deleted one comes back until the next
-    ///   open's recovery. Searches themselves are safe: the swap and the mapping
-    ///   rebuild happen under one write lock.
+    /// - **Writes made during a vacuum survive it** (#2262). The rebuild works
+    ///   from a snapshot and does not hold the graph lock while it inserts, so
+    ///   searches and writes carry on against the old graph. The vectors of
+    ///   the ids inserted or upserted since the snapshot are then copied from
+    ///   the old graph into the new one, still without the write lock, in a
+    ///   bounded number of rounds, each copying the writes made during the one
+    ///   before. The swap re-maps the ids mapped at that moment, not the
+    ///   snapshot's: it copies, one at a time, every id mapped but not yet
+    ///   carried when the guard is granted, and an id deleted since stays
+    ///   deleted. The rounds stop once few writes are left, or after a fixed
+    ///   number of them; that is when the catch-up stops trying, and bounds
+    ///   nothing. A write in flight, a whole batch, maps its ids after the
+    ///   last round looked and before the guard is granted, so the swap can
+    ///   copy them all (#2335). One write lock covers
+    ///   those last copies, the re-map of every live id and dropping the old
+    ///   graph, so a search never sees a half-built mapping, and waits for all
+    ///   three.
+    /// - [`Self::reorder_for_locality`] waits for a running vacuum, and a
+    ///   vacuum for a running reorder: the two share one maintenance lock.
+    ///   [`Self::save`] takes no part in it: during the rebuild it saves the
+    ///   old graph, and the swap waits for its dump like for any read guard.
+    /// - An index with no live id is rebuilt empty: every dead slot is
+    ///   reclaimed, and the tombstone count reads 0.
     /// - Requires exact-distance features (`enable_vector_storage = true`); the
     ///   graph stores vectors either way
     ///
@@ -111,44 +201,38 @@ impl HnswIndex {
             return Err(VacuumError::VectorStorageDisabled);
         }
 
-        // 1. Collect all active vectors: snapshot live mappings and read each
-        // vector from the graph's ContiguousVectors (single source of truth).
-        // For cosine indices these are the pre-normalized vectors; re-insertion
-        // re-normalizes, which is idempotent up to f32 rounding.
-        let active_vectors: Vec<(u64, Vec<f32>)> = {
-            let inner = self.inner.read();
-            inner.with_contiguous_vectors(|vectors| {
-                self.mappings
-                    .iter()
-                    .filter_map(|(id, idx)| vectors.get(idx).map(|vec| (id, vec.to_vec())))
-                    .collect()
-            })
-        };
+        // Held to the end, and taken before any graph guard: nothing renumbers
+        // a slot until the swap, so an id still on the slot the snapshot saw
+        // has not been written since (the arena never hands a slot out twice).
+        let _maintenance = self.maintenance.lock();
 
-        let count = active_vectors.len();
-
-        if count == 0 {
+        // 1. Snapshot the live ids, each with its slot and its vector.
+        let live = self.snapshot_live();
+        // Nothing to reclaim only when the graph holds no slot at all. With no
+        // live id but dead slots, the rebuild still runs, into an empty graph:
+        // returning here left every dead slot in place, and the tombstone
+        // count asking for a vacuum that reclaimed none (#2262).
+        if live.is_empty() && self.graph_vector_count() == 0 {
             return Ok(0);
         }
 
-        // 2-4. Rebuild a fresh inner index from the active vectors,
-        // preserving the backend storage mode and trained quantizer.
-        let (new_inner, slots) = self.build_vacuum_replacement(&active_vectors)?;
-        // Checked before the swap: once the new graph is installed, a short
-        // rebuild would leave ids with no slot and nothing to fall back to.
-        if slots.len() != count {
-            return Err(VacuumError::RebuildFailed(format!(
-                "the rebuild placed {} vectors for {count} ids",
-                slots.len()
-            )));
-        }
+        // 2-4. Rebuild a fresh inner index from the snapshot, preserving the
+        // backend storage mode and trained quantizer. No graph guard is held:
+        // writers carry on against the old graph meanwhile.
+        let (new_inner, slots) = self.build_vacuum_replacement(&live)?;
 
-        // 5-6. Swap in the new graph and rebuild the mappings under one write
+        // 5. Copy the writes made during the rebuild into the new graph, still
+        // without the write guard, until few are left (#2262).
+        let carried = self.catch_up(&new_inner, live, slots)?;
+
+        // 6-7. Swap in the new graph and rebuild the mappings under one write
         // lock: until the rebuild they name the old graph's slots, and a
         // search in between would resolve ids against the wrong vectors
-        // (#2246).
-        {
+        // (#2246). They are rebuilt from what is mapped now, not from the
+        // snapshot, or every write made during the rebuild would be lost (#2262).
+        let placed = {
             let mut inner_guard = self.inner.write();
+            let placed = self.reconcile(&inner_guard, &new_inner, &carried)?;
             // SAFETY: ManuallyDrop::drop is safe when exclusive ownership is guaranteed.
             // - Condition 1: We hold exclusive write lock on inner_guard (no other access possible)
             // - Condition 2: This is called exactly once before replacement (no double-drop)
@@ -160,36 +244,160 @@ impl HnswIndex {
             // Replace with new
             *inner_guard = ManuallyDrop::new(new_inner);
 
-            // Each id follows the slot its vector was given in the new graph.
+            // Each id follows the slot its vector has in the new graph, and
+            // every slot of it no id comes to name counts as a tombstone: the
+            // rebuild placed every snapshot id, and `reconcile` left out the
+            // ones deleted since, wherever their slots fall (#2262).
             // ShardedMappings uses interior mutability, so we clear and
             // repopulate in place.
-            self.mappings.clear();
-            for ((id, _vec), slot) in active_vectors.iter().zip(slots) {
+            let slots = inner_guard
+                .with_contiguous_vectors(crate::perf_optimizations::ContiguousVectors::len);
+            self.mappings.clear_for(slots);
+            for &(id, slot) in &placed {
                 let previous = self
                     .mappings
-                    .assign(*id, Placed::installed(&inner_guard, slot));
+                    .assign(id, Placed::installed(&inner_guard, slot));
                 debug_assert!(
                     previous.is_none(),
                     "Vacuum invariant violated: duplicate id {id} while rebuilding mappings"
                 );
             }
             drop(inner_guard);
-        }
+            placed.len()
+        };
 
-        Ok(count)
+        Ok(placed)
     }
 
-    /// Builds the replacement inner index for [`Self::vacuum`].
+    /// Step 1 of [`Self::vacuum`]: every live id, with its slot and the vector
+    /// stored there, read from the graph's `ContiguousVectors` (single source
+    /// of truth). For cosine indices these are the pre-normalized vectors;
+    /// re-insertion re-normalizes, which is idempotent up to f32 rounding.
     ///
-    /// Returns it with the slot each of `active_vectors` was given, in order.
+    /// Writers hold the same read side and may run meanwhile, so the snapshot
+    /// is not one instant: [`Self::reconcile`] settles whatever they change.
+    fn snapshot_live(&self) -> Vec<Live> {
+        let inner = self.inner.read();
+        inner.with_contiguous_vectors(|vectors| {
+            self.mappings
+                .iter()
+                .filter_map(|(id, slot)| {
+                    let vector = vectors.get(slot)?.to_vec();
+                    Some(Live { id, slot, vector })
+                })
+                .collect()
+        })
+    }
+
+    /// Step 5 of [`Self::vacuum`]: where each id's vector is in `new`, which
+    /// the rebuild filled with `live`, giving each the slot of `slots` at the
+    /// same position.
     ///
-    /// Creates a new graph with auto-tuned parameters, **preserving the
-    /// current backend storage mode** (a RaBitQ index must not silently
-    /// downgrade to the Standard f32 backend on vacuum), inserts the active
-    /// vectors, and re-installs the trained RaBitQ quantizer when present
-    /// (re-encodes the compacted vectors in NodeId order — without this, a
-    /// vacuumed RaBitQ index would fall back to f32 search until the next
-    /// collection open).
+    /// Starting from that, it copies into `new` the vectors of the ids written
+    /// since they were last read, and records where each went, round after
+    /// round, until a round sees [`CATCH_UP_REMAINDER`] or fewer, or
+    /// [`MAX_CATCH_UP_ROUNDS`] have run. Neither bounds what is left: a write
+    /// in flight maps its ids after the round that stopped looked, and
+    /// [`Self::reconcile`] copies them all (see [`CATCH_UP_REMAINDER`]).
+    ///
+    /// No write guard is held, so this may run on rayon: `new` is this
+    /// vacuum's own graph, and each round holds a read guard only while it
+    /// lists the written ids and copies their vectors out, never while it
+    /// inserts them. Under the write guard, a batch insert waited on rayon
+    /// workers that were parked on that very guard by batch searches, and the
+    /// vacuum hung for ever. What this leaves, [`Self::reconcile`] copies one
+    /// by one under the write guard.
+    ///
+    /// # Errors
+    ///
+    /// [`VacuumError::RebuildFailed`] if the rebuild did not give each of
+    /// `live` one slot, if a written slot holds no vector in the old graph, or
+    /// if `new` refuses one.
+    fn catch_up(
+        &self,
+        new: &HnswInner,
+        live: Vec<Live>,
+        slots: Vec<usize>,
+    ) -> Result<Carried, VacuumError> {
+        let slots = one_slot_each(slots, live.len())?;
+        let mut carried: Carried = live
+            .into_iter()
+            .zip(slots)
+            .map(|(live, slot)| (live.id, (live.slot, slot)))
+            .collect();
+        for _ in 0..MAX_CATCH_UP_ROUNDS {
+            let old = self.inner.read();
+            let written = self.written_since(&carried);
+            if written.len() <= CATCH_UP_REMAINDER {
+                return Ok(carried);
+            }
+            let vectors = copy_vectors(&old, &written)?;
+            drop(old);
+            let refs: Vec<&[f32]> = vectors.iter().map(Vec::as_slice).collect();
+            let slots = new
+                .parallel_insert(&refs)
+                .map_err(|e| VacuumError::RebuildFailed(e.to_string()))?;
+            let slots = one_slot_each(slots, refs.len())?;
+            carried.extend(
+                written
+                    .into_iter()
+                    .zip(slots)
+                    .map(|((id, seen), slot)| (id, (seen, slot))),
+            );
+        }
+        Ok(carried)
+    }
+
+    /// Each id mapped now whose vector `carried` does not hold as it is now,
+    /// with its slot: inserted since, or upserted onto another slot.
+    fn written_since(&self, carried: &Carried) -> Vec<(u64, usize)> {
+        self.mappings
+            .iter()
+            .filter(|&(id, slot)| carried_slot(carried, id, slot).is_none())
+            .collect()
+    }
+
+    /// Where each id mapped now goes in `new`, the rebuilt graph: the last step
+    /// of [`Self::vacuum`], run under the write guard, so the mappings hold
+    /// still.
+    ///
+    /// `carried` gives each id whose vector is already in `new` the slot it
+    /// held in `old` when that vector was read, and the slot it got in `new`.
+    /// An id still on that slot takes its slot in `new` (see [`carried_slot`]).
+    /// An id on any other slot was written since, and its vector is copied
+    /// from `old` into `new` here, one insert at a time: rayon must not run
+    /// under the write guard (see [`Self::catch_up`]). An id of `carried` no
+    /// longer mapped was deleted since: it is left out, and its node in `new`
+    /// stays a tombstone, which `vacuum` counts by setting `next_idx` to the
+    /// slot count of `new`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::catch_up`].
+    fn reconcile(
+        &self,
+        old: &HnswInner,
+        new: &HnswInner,
+        carried: &Carried,
+    ) -> Result<Vec<(u64, usize)>, VacuumError> {
+        let mut placed = Vec::with_capacity(self.mappings.len());
+        let mut written = Vec::new();
+        for (id, slot) in self.mappings.iter() {
+            match carried_slot(carried, id, slot) {
+                Some(new_slot) => placed.push((id, new_slot)),
+                None => written.push((id, slot)),
+            }
+        }
+        let vectors = copy_vectors(old, &written)?;
+        for ((id, _), vector) in written.into_iter().zip(&vectors) {
+            let slot = new
+                .insert(vector)
+                .map_err(|e| VacuumError::RebuildFailed(e.to_string()))?;
+            placed.push((id, slot));
+        }
+        Ok(placed)
+    }
+
     /// Where the replacement graph's f32 arena belongs, given what it will
     /// become.
     ///
@@ -205,12 +413,34 @@ impl HnswIndex {
         }
     }
 
+    /// Builds the replacement inner index for [`Self::vacuum`].
+    ///
+    /// Returns it with the slot each of `live` was given, in order.
+    ///
+    /// Creates a new graph with the index's own parameters, **preserving the
+    /// current backend storage mode** (a RaBitQ index must not silently
+    /// downgrade to the Standard f32 backend on vacuum), inserts the active
+    /// vectors, and re-installs the trained RaBitQ quantizer when present
+    /// (re-encodes the compacted vectors in NodeId order — without this, a
+    /// vacuumed RaBitQ index would fall back to f32 search until the next
+    /// collection open).
     fn build_vacuum_replacement(
         &self,
-        active_vectors: &[(u64, Vec<f32>)],
+        live: &[Live],
     ) -> Result<(HnswInner, Vec<usize>), VacuumError> {
-        let params = HnswParams::auto(self.dimension);
-        let target_mode = self.inner.read().storage_mode();
+        // The index's own parameters, read from its graph, which is what
+        // holds them and what a save persists: `HnswParams::auto` rebuilt
+        // every index as if built for its dimension alone, whatever M,
+        // ef_construction and alpha it had been given (#2262).
+        let (max_connections, ef_construction, alpha, target_mode) = {
+            let graph = self.inner.read();
+            (
+                graph.max_connections(),
+                graph.ef_construction(),
+                graph.alpha(),
+                graph.storage_mode(),
+            )
+        };
         // Always rebuild through a Standard backend: inserting via a RaBitQ
         // backend would lazily train a throwaway quantizer at the sample
         // threshold (then re-encode everything a second time on install) —
@@ -226,20 +456,17 @@ impl HnswIndex {
         // its own file, and the two never contend.
         let new_inner = HnswInner::build(&crate::index::hnsw::native_inner::InnerBuild {
             metric: self.metric,
-            max_connections: params.max_connections,
-            max_elements: active_vectors.len().max(1000),
-            ef_construction: params.ef_construction,
+            max_connections,
+            max_elements: live.len().max(1000),
+            ef_construction,
             dimension: self.dimension,
             storage_mode: crate::StorageMode::Full,
-            alpha: params.alpha,
+            alpha,
             arena_dir: self.arena_dir_for(target_mode),
         })
         .map_err(|e| VacuumError::RebuildFailed(e.to_string()))?;
 
-        let vectors: Vec<&[f32]> = active_vectors
-            .iter()
-            .map(|(_id, vec)| vec.as_slice())
-            .collect();
+        let vectors: Vec<&[f32]> = live.iter().map(|live| live.vector.as_slice()).collect();
         let slots = new_inner
             .parallel_insert(&vectors)
             .map_err(|e| VacuumError::RebuildFailed(e.to_string()))?;

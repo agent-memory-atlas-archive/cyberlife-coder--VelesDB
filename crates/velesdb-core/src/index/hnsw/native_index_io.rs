@@ -18,6 +18,8 @@ impl NativeHnswIndex {
     ///
     /// Returns an error if file operations fail.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+        // Held to the end: see `saving`.
+        let _saving = self.saving.lock();
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
 
@@ -28,11 +30,11 @@ impl NativeHnswIndex {
         // follow-up).
         let new_gen = persistence::next_generation(path)?;
 
-        // Dump the HNSW graph itself (caller-specific — see persistence::save_sidecars).
-        let storage_mode = {
+        // Dump the HNSW graph, with the mappings copied under the same guard,
+        // before it (see `persistence::dump_graph`).
+        let (mappings, storage_mode) = {
             let inner = self.inner.read();
-            inner.file_dump(path, "native_hnsw")?;
-            inner.storage_mode()
+            persistence::dump_graph(&inner, &self.mappings, path, "native_hnsw")?
         };
 
         // Graph-generation marker is written IMMEDIATELY after the graph dump
@@ -43,7 +45,7 @@ impl NativeHnswIndex {
         // Mappings + meta in one shared call (RF-DEDUP #448 Group C).
         persistence::save_sidecars(
             path,
-            &self.mappings,
+            mappings,
             &HnswMeta {
                 dimension: self.dimension,
                 metric: self.metric,
@@ -100,6 +102,7 @@ impl NativeHnswIndex {
             mappings,
             enable_vector_storage: meta.enable_vector_storage,
             params: HnswParams::auto(meta.dimension),
+            saving: parking_lot::Mutex::new(()),
         })
     }
 }
