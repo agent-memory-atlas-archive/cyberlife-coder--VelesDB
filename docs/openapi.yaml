@@ -88,6 +88,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}:
     get:
       tags:
@@ -397,6 +399,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -440,6 +444,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -694,6 +700,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -737,6 +745,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -780,6 +790,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -823,6 +835,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/graph/traverse/stream:
     get:
       tags:
@@ -988,6 +1002,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/indexes/{label}/{property}:
     delete:
       tags:
@@ -1131,6 +1147,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -1181,6 +1199,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/points/delete:
     post:
       tags:
@@ -1238,6 +1258,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Delete failed
           content:
@@ -1327,6 +1349,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/points/stream:
     post:
       tags:
@@ -1520,6 +1544,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -1567,6 +1593,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -1765,6 +1793,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/search/ids:
     post:
       tags:
@@ -1846,6 +1876,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '500':
           description: Internal server error
           content:
@@ -1894,6 +1926,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/search/text:
     post:
       tags:
@@ -1926,6 +1960,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/stats:
     get:
       tags:
@@ -1999,6 +2035,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /collections/{name}/stream/insert:
     post:
       tags:
@@ -2040,6 +2078,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
         '429':
           description: Streaming buffer full — retry after 1 second
           content:
@@ -2123,6 +2163,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GuardRailsConfigResponse'
+        '422':
+          $ref: '#/components/responses/MalformedBody'
   /health:
     get:
       tags:
@@ -4384,6 +4426,13 @@ components:
         error:
           $ref: '#/components/schemas/VelesqlErrorDetail'
           description: Error details.
+  responses:
+    MalformedBody:
+      description: 'A body the server cannot deserialise: a field of the wrong type, or JSON that does not match the request schema.'
+      content:
+        text/plain:
+          schema:
+            type: string
   securitySchemes:
     bearer_auth:
       type: http

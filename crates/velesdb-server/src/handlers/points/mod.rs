@@ -108,7 +108,8 @@ const MAX_UPSERT_BATCH_SIZE: usize = 100_000;
     responses(
         (status = 200, description = "Points upserted", body = Object),
         (status = 404, description = "Collection not found", body = ErrorResponse),
-        (status = 400, description = "Invalid request or batch too large", body = ErrorResponse)
+        (status = 400, description = "Invalid request or batch too large", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn upsert_points(
@@ -283,7 +284,8 @@ const MAX_SCROLL_BATCH_SIZE: u32 = 10_000;
     responses(
         (status = 200, description = "Scroll batch", body = ScrollResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 404, description = "Collection not found", body = ErrorResponse)
+        (status = 404, description = "Collection not found", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn scroll_points(
@@ -402,7 +404,8 @@ pub struct BulkDeleteRequest {
         (status = 200, description = "Points deleted", body = Object),
         (status = 400, description = "Batch too large", body = ErrorResponse),
         (status = 404, description = "Collection not found", body = ErrorResponse),
-        (status = 500, description = "Delete failed", body = ErrorResponse)
+        (status = 500, description = "Delete failed", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn bulk_delete_points(

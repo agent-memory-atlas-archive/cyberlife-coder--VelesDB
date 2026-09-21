@@ -39,7 +39,8 @@ pub async fn list_collections(State(state): State<Arc<AppState>>) -> impl IntoRe
     request_body = CreateCollectionRequest,
     responses(
         (status = 201, description = "Collection created", body = Object),
-        (status = 400, description = "Invalid request", body = ErrorResponse)
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn create_collection(

@@ -138,6 +138,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -631,6 +634,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -701,6 +707,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           },
           "500": {
             "description": "Internal server error",
@@ -1103,6 +1112,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -1173,6 +1185,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           },
           "500": {
             "description": "Internal server error",
@@ -1245,6 +1260,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -1315,6 +1333,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -1553,6 +1574,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -1730,6 +1754,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -1811,6 +1838,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -1874,6 +1904,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           },
           "500": {
             "description": "Delete failed",
@@ -2010,6 +2043,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -2295,6 +2331,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2367,6 +2406,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           },
           "500": {
             "description": "Internal server error",
@@ -2681,6 +2723,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -2807,6 +2852,9 @@
               }
             }
           },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2879,6 +2927,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -2931,6 +2982,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -3036,6 +3090,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -3092,6 +3149,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           },
           "429": {
             "description": "Streaming buffer full — retry after 1 second",
@@ -3215,6 +3275,9 @@
                 }
               }
             }
+          },
+          "422": {
+            "$ref": "#/components/responses/MalformedBody"
           }
         }
       }
@@ -6150,6 +6213,18 @@
           "error": {
             "$ref": "#/components/schemas/VelesqlErrorDetail",
             "description": "Error details."
+          }
+        }
+      }
+    },
+    "responses": {
+      "MalformedBody": {
+        "description": "A body the server cannot deserialise: a field of the wrong type, or JSON that does not match the request schema.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
           }
         }
       }

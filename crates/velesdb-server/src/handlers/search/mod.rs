@@ -232,7 +232,8 @@ fn execute_search_ids_with_cb_owned(
     request_body = TextSearchRequest,
     responses(
         (status = 200, description = "Text search results", body = SearchResponse),
-        (status = 404, description = "Collection not found", body = crate::types::ErrorResponse)
+        (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 #[allow(clippy::result_large_err)]
@@ -313,7 +314,8 @@ pub async fn text_search(
     responses(
         (status = 200, description = "Hybrid search results", body = SearchResponse),
         (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
-        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse)
+        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 #[allow(clippy::result_large_err)]

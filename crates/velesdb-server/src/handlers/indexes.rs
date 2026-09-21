@@ -27,7 +27,8 @@ use super::helpers::{
     responses(
         (status = 201, description = "Index created", body = IndexResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 404, description = "Collection not found", body = ErrorResponse)
+        (status = 404, description = "Collection not found", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn create_index(
