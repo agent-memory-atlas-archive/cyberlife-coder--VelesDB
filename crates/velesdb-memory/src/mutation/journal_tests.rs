@@ -104,6 +104,29 @@ fn preexisting_broken_symlink_is_refused_without_touching_its_target() {
     assert!(!target.exists());
 }
 
+/// Finalization: dropping `prepare_journal`'s redundant pre-check (this PR)
+/// means a directory at the journal path now reaches `load_journal`'s
+/// `open_regular_file` directly, which opens it read-write and gets
+/// `EISDIR` — mapped in `open_error` to the same refusal a symlink gets,
+/// rather than leaking the raw OS error text. Unix-only: opening a
+/// directory needs no special flag here, but on Windows `OpenOptions`
+/// needs `FILE_FLAG_BACKUP_SEMANTICS` to open one at all (std's own
+/// `lstat` sets it for the same reason) — `open_regular_file` does not,
+/// tracked as a documented gap in the "Windows" section of this PR rather
+/// than asserted here for a platform this suite cannot run on.
+#[cfg(unix)]
+#[test]
+fn preexisting_directory_at_the_journal_path_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join(JOURNAL_FILE)).expect("directory");
+    let identity = epoch(dir.path(), "00112233445566778899aabbccddeeff");
+
+    let error = DirtyJournal::open(dir.path(), &identity, CAPACITY)
+        .err()
+        .expect("directory refusal");
+    assert!(error.to_string().contains("regular file"), "{error}");
+}
+
 #[test]
 fn torn_tail_is_truncated_to_the_complete_valid_prefix() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -223,6 +246,33 @@ fn every_append_boundary_fails_closed_and_recovers_a_valid_prefix() {
             .before_mutation(DirtyKey::Fact(100))
             .expect("resume");
     }
+}
+
+/// #2404 follow-up: compaction's own reopen of the journal, right after
+/// `promote` and the directory sync, used to be a plain `OpenOptions::open`
+/// — a second, separate step after the file was already checked, so a link
+/// swapped in between the two was followed. `swap_once_at` performs that
+/// exact swap at the exact point production code reaches it (no test could
+/// otherwise land a real race there deterministically), so this fails
+/// against the pre-fix code and passes once the reopen goes through
+/// `open_regular_file`.
+#[cfg(unix)]
+#[test]
+fn compaction_refuses_a_path_swapped_in_between_the_directory_sync_and_the_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let identity = epoch(dir.path(), "00112233445566778899aabbccddeeff");
+    let journal = DirtyJournal::open(dir.path(), &identity, CAPACITY).expect("open");
+    journal.before_mutation(DirtyKey::Fact(1)).expect("append");
+
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, b"untouched").expect("victim");
+    journal.swap_once_at(FaultPoint::AfterDirectorySync, victim.clone());
+
+    let error = journal
+        .compact_through(1)
+        .expect_err("swapped-in symlink must be refused");
+    assert!(error.to_string().contains("regular file"), "{error}");
+    assert_eq!(std::fs::read(&victim).expect("victim"), b"untouched");
 }
 
 #[test]

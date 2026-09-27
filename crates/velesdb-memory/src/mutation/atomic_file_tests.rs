@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use super::{path_exists, promote, validate_regular_file, validate_workspace};
+use super::{open_regular_file, path_exists, promote, validate_regular_file, validate_workspace};
 
 /// The two stores that share these primitives each name themselves in every
 /// message, so each check runs under both names.
@@ -93,6 +93,225 @@ fn a_symlink_is_refused_as_a_workspace_and_as_a_file() {
         );
     }
     assert_eq!(fs::read(&victim).expect("victim"), b"untouched");
+}
+
+#[test]
+fn open_regular_file_reads_and_writes_a_real_file() {
+    let root = tempfile::tempdir().expect("root");
+    let path = root.path().join("state");
+    fs::write(&path, b"first").expect("seed");
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    let mut file = open_regular_file(&path, "test", options).expect("a regular file opens");
+    let mut read = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut read).expect("read");
+    assert_eq!(read, b"first");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_regular_file_refuses_a_symlink_and_says_so_under_each_stores_name() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("root");
+    let victim = root.path().join("victim");
+    fs::write(&victim, b"untouched").expect("victim");
+    let link = root.path().join("link");
+    symlink(&victim, &link).expect("link");
+
+    for entity in ENTITIES {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        let refused = open_regular_file(&link, entity, options).expect_err("a symlink");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("{entity} path must be a regular file")),
+            "{refused}"
+        );
+    }
+    assert_eq!(fs::read(&victim).expect("victim"), b"untouched");
+}
+
+/// #2404: `validate_regular_file` followed by a plain `open` were two
+/// separate syscalls against the *path*, with a window between them for a
+/// symlink to be swapped in. This test does not, and cannot, exercise that
+/// window from a single thread — it swaps the link in before calling
+/// `open_regular_file` at all, which the old two-step code would have caught
+/// too if the swap landed before its own first step. What it does pin: a
+/// symlink present at call time is refused, and, unlike the two-step code,
+/// `open_regular_file` has no separate first step for a check to pass and a
+/// later step to race against — the one check it makes is `fstat` on the
+/// file descriptor `open(O_NOFOLLOW)` already returned, not a second `stat`
+/// of the path, so there is no second syscall left to land a swap between.
+/// A mutant that reverts this function to `validate_regular_file(path,
+/// entity)?; options.open(path)` still passes this specific test (the swap
+/// is already in place before either step runs), and no other test in this
+/// file catches it either — two attempts at a concurrent swap-under-load
+/// test were tried and dropped: neither reliably won a kernel-level race
+/// that is only a couple of syscalls wide (measured kill rates from ~3% to
+/// ~55% across designs and runs, nowhere near a bound a CI gate could rely
+/// on). That mutant is refused by construction, not by a test: `stat` then
+/// `open` are two operations on the *path*, so anything can happen to the
+/// path between them; `open(O_NOFOLLOW)` then `fstat` on the file
+/// descriptor it returns are two operations on the *same already-opened
+/// file*, and nothing done to the path afterward can change which file
+/// that descriptor points to. Forcing and observing the first kind of race
+/// deterministically from a plain unit test — reliably enough to gate a
+/// merge on it — needs syscall-level interposition (`ptrace`, a seccomp
+/// user-space notifier, or an `LD_PRELOAD` shim), which is out of
+/// proportion for this fix.
+#[cfg(unix)]
+#[test]
+fn open_regular_file_refuses_a_symlink_present_at_call_time_with_no_check_step_of_its_own() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("root");
+    let victim = root.path().join("victim");
+    fs::write(&victim, b"untouched").expect("victim");
+    let path = root.path().join("state");
+    fs::write(&path, b"regular").expect("a real file first");
+
+    // What a prior `validate_regular_file(&path, ..)` check would have seen:
+    // a regular file. The swap happens right after, before the only
+    // remaining step (open_regular_file's single open+fstat).
+    fs::remove_file(&path).expect("remove the regular file");
+    symlink(&victim, &path).expect("swap in a link to the victim");
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    let refused = open_regular_file(&path, "test", options).expect_err("swapped-in symlink");
+    assert!(
+        refused
+            .to_string()
+            .contains("test path must be a regular file"),
+        "{refused}"
+    );
+    assert_eq!(fs::read(&victim).expect("victim"), b"untouched");
+}
+
+/// A planted FIFO must be refused promptly, not hang the caller. Opening a
+/// FIFO for read blocks until a writer opens the other end; without
+/// `O_NONBLOCK` this call would wait forever instead of reaching the
+/// "not a regular file" refusal below (a mutant that drops `O_NONBLOCK`
+/// times out this test rather than failing it cleanly).
+#[cfg(unix)]
+#[test]
+fn open_regular_file_refuses_a_fifo_without_blocking() {
+    let root = tempfile::tempdir().expect("root");
+    let fifo = root.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("test: run mkfifo");
+    assert!(status.success(), "mkfifo failed: {status}");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        let result = open_regular_file(&path, "test", options).map(|_| ());
+        let _ = tx.send(result.map_err(|err| err.to_string()));
+    });
+
+    let refused = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("open_regular_file must return instead of blocking on the FIFO")
+        .expect_err("a FIFO is not a regular file");
+    assert!(
+        refused.contains("test path must be a regular file"),
+        "{refused}"
+    );
+}
+
+/// #2407 (round 5): a hard link to a file outside the store is,
+/// structurally, an ordinary regular file, so `is_file` alone accepts it —
+/// but `fstat` also reports `nlink`, which a legitimate file this helper
+/// ever opens will not have above 1.
+#[cfg(unix)]
+#[test]
+fn open_regular_file_refuses_a_hard_link() {
+    let root = tempfile::tempdir().expect("root");
+    let victim = root.path().join("victim");
+    fs::write(&victim, b"untouched").expect("victim");
+    let path = root.path().join("state");
+    fs::hard_link(&victim, &path).expect("hard link");
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    let refused = open_regular_file(&path, "test", options).expect_err("a hard link");
+    assert!(
+        refused
+            .to_string()
+            .contains("test path must be a regular file"),
+        "{refused}"
+    );
+    assert_eq!(fs::read(&victim).expect("victim"), b"untouched");
+}
+
+/// A Unix domain socket is refused the same way a FIFO is, and with the
+/// same clean message rather than a raw, platform-specific `open` errno —
+/// `open_error` falls back to a `symlink_metadata` lookup, purely to choose
+/// the message, once `open` has already failed and the refusal is decided.
+#[cfg(unix)]
+#[test]
+fn open_regular_file_refuses_a_socket_with_the_clean_message() {
+    use std::os::unix::net::UnixListener;
+
+    let root = tempfile::tempdir().expect("root");
+    let path = root.path().join("state");
+    let _listener = UnixListener::bind(&path).expect("bind a unix socket");
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    let refused = open_regular_file(&path, "test", options).expect_err("a socket");
+    assert!(
+        refused
+            .to_string()
+            .contains("test path must be a regular file"),
+        "{refused}"
+    );
+}
+
+/// The round-5 `open_error` fallback must not relabel a genuine regular
+/// file that failed to open for an unrelated reason (permissions, here) as
+/// "must be a regular file" — that message is reserved for a file that
+/// really is the wrong kind. Skipped wherever permission bits aren't
+/// enforced (running as root, some container/CI filesystems): checked
+/// directly, by trying the same open the assertion depends on.
+#[cfg(unix)]
+#[test]
+fn open_regular_file_keeps_the_raw_message_for_a_permission_denied_regular_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("root");
+    let path = root.path().join("state");
+    fs::write(&path, b"regular").expect("a real file");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+    if fs::File::open(&path).is_ok() {
+        eprintln!("test: skipped, permission bits are not enforced here");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore");
+        return;
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    let refused = open_regular_file(&path, "test", options).expect_err("permission denied");
+    let message = refused.to_string();
+    assert!(
+        message.contains("cannot open test file"),
+        "a permission error must keep the raw message, got: {message}"
+    );
+    assert!(
+        !message.contains("must be a regular file"),
+        "a real regular file must never be relabeled as the wrong kind, got: {message}"
+    );
+
+    // Restore permissions so the tempdir can clean itself up.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore permissions");
 }
 
 #[test]
