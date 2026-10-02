@@ -191,6 +191,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the directory is ignored.
 
 ### Fixed
+
+- **core: a search that sets only `rerank` ran at `Balanced`, not the configured
+  `[search]` default (#2399, 2026-10-02).** `QuerySearchOptions::resolved_quality`
+  ended in a hard-coded `Balanced`, so `WITH (rerank = true)` skipped the
+  collection's runtime quality that a plain `SELECT … NEAR …` honours. It now
+  takes that runtime quality as its fallback, on both the plain and the
+  filtered vector path.
 - **The CLI REPL leaves the `[search]` of its `--config`/`VELESDB_CONFIG`
   file in force until a `\set` (`./velesdb.toml` is not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that
