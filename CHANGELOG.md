@@ -198,14 +198,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collection's runtime quality that a plain `SELECT … NEAR …` honours. It now
   takes that runtime quality as its fallback, on both the plain and the
   filtered vector path. The batch and multi-query entry points
-  (`search_batch_parallel`, `search_batch_with_filters`, `multi_query_search`)
-  had the identical `Balanced` hard-code, unreached by that fix since they
-  take no per-call quality of their own; they now read the same runtime
-  quality too. Other entry points are not wired to `[search]` yet (a
-  metadata-filtered `NEAR` query without a `WITH` clause, hybrid search, the
-  graph-anchored `NEAR` prefilter, `search_by_embedding` on graph
-  collections), tracked in #2430; `docs/guides/CONFIGURATION.md` lists what
-  does follow it.
+  (`search_batch_parallel`, `search_batch_with_filters`, `multi_query_search`
+  and `multi_query_search_ids`) had the identical `Balanced` hard-code,
+  unreached by that fix since they take no per-call quality of their own;
+  they now read the same runtime quality too, so with a non-default
+  `[search]` their results change, on every surface built on them (REST
+  batch and multi-query, the Python binding, `NEAR_FUSED`). No other entry
+  point is guaranteed to follow `[search]` yet; #2430 tracks the audit and
+  `docs/guides/CONFIGURATION.md` lists what does.
 - **The CLI REPL leaves the `[search]` of its `--config`/`VELESDB_CONFIG`
   file in force until a `\set` (`./velesdb.toml` is not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that

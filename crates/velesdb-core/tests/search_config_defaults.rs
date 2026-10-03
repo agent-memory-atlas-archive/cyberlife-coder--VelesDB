@@ -21,13 +21,15 @@ const POINTS: usize = 3_000;
 // `WITH`, batch, multi-query). At `POINTS` that candidate pool recovers the
 // exact top-k at `LOW_EF` as reliably as at `HIGH_EF`, so comparing the two
 // configured defaults proves nothing. Even at this size a single query is not
-// enough: `HnswIndex` assigns graph levels from an unseeded RNG on every
-// build, so one query can land where `LOW_EF` is already exact on one run and
-// not on the next, with identical code and data (seen with `--test-threads=1`
-// too). Those tests therefore run `QUERIES` vectors and need only one to
-// disagree. For the batch test a reverted fix runs the same `Balanced` under
-// both configs, so every query agrees on every run. For the rerank-only tests
-// a revert answers at `Balanced`, which can equal the `LOW_EF` answer, so a
+// enough: the level RNG is seeded with a constant, but parallel insert
+// threads draw from it in a nondeterministic order, so each build is a
+// different graph and one query can land where `LOW_EF` is already exact on
+// one run and not on the next, with identical code and data (seen with
+// `--test-threads=1` too). Searches on one built graph are repeatable. Those
+// tests therefore run `QUERIES` vectors and need only one to disagree. For
+// the batch test a reverted fix runs the same `Balanced` under both configs,
+// so every query agrees on every run. For the rerank-only test a revert
+// answers at `Balanced`, which can equal the `LOW_EF` answer, so a
 // revert fails only where `Balanced` and `LOW_EF` differ on a query where
 // `LOW_EF` and `HIGH_EF` differ: measured to happen, not guaranteed by shape.
 const HARD_POINTS: usize = 60_000;
