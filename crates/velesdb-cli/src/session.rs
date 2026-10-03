@@ -8,10 +8,10 @@ use velesdb_core::SearchQuality;
 /// Session settings for the REPL.
 #[derive(Debug, Clone)]
 pub struct SessionSettings {
-    /// The search mode `\set` this session, if any. `None` leaves every
-    /// search at the configured default (the `[search]` of the `--config`
-    /// file, #2400), which a session that never ran `\set mode` must not
-    /// override (#2303).
+    /// The search mode `\set` this session, if any. `None` adds no quality, so
+    /// the configured default applies wherever the engine honours one (the
+    /// `[search]` of the `--config` file, #2400; see #2430), which a session
+    /// that never ran `\set mode` must not override (#2303).
     mode: Option<SearchQuality>,
     /// Override ef_search (None = use mode default).
     ef_search: Option<usize>,
