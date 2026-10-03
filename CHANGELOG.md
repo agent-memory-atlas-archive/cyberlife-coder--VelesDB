@@ -210,9 +210,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file in force until a `\set mode` or `\set ef_search` (`./velesdb.toml` is
   not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that
-  never ran `\set` injected `mode = 'balanced'` into every query, so the
-  configured `[search]` default never applied in the REPL, against the
-  priority order `docs/guides/CONFIGURATION.md` states. An untouched session
+  never ran `\set` injected `mode = 'balanced'` into every `SELECT` that
+  named no quality, so the configured `[search]` default never reached such a
+  `SELECT`, against the priority order `docs/guides/CONFIGURATION.md` states. An untouched session
   now adds no quality (the `max_results` `LIMIT` cap aside), and `\show`
   prints the configured default, marked
   `(configured default)`. `\reset mode` goes back to it rather than to
