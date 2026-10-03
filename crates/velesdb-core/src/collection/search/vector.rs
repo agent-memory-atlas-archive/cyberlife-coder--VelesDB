@@ -434,7 +434,8 @@ impl Collection {
     /// Routes vector search through `QuerySearchOptions` from a WITH clause.
     ///
     /// Priority: an explicit `ef_search` > `quality` (from `mode`) > default
-    /// `search()`, through `QuerySearchOptions::resolved_quality`, whose fallback is the collection's runtime quality.
+    /// `search()`, through `QuerySearchOptions::resolved_quality`, whose
+    /// fallback is the collection's runtime quality.
     /// When `force_rerank` is `Some(true)`, applies explicit SIMD reranking
     /// regardless of quality mode. When `Some(false)`, suppresses automatic
     /// reranking even if the quality mode would enable it.
