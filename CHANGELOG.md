@@ -201,9 +201,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`search_batch_parallel`, `search_batch_with_filters`, `multi_query_search`)
   had the identical `Balanced` hard-code, unreached by that fix since they
   take no per-call quality of their own; they now read the same runtime
-  quality too. Hybrid (text + vector) search, the graph-anchored `NEAR`
-  prefilter and `search_by_embedding` on graph collections still run at
-  `Balanced` (#2430); `docs/guides/CONFIGURATION.md` names them.
+  quality too. Other entry points are not wired to `[search]` yet (a
+  metadata-filtered `NEAR` query without a `WITH` clause, hybrid search, the
+  graph-anchored `NEAR` prefilter, `search_by_embedding` on graph
+  collections), tracked in #2430; `docs/guides/CONFIGURATION.md` lists what
+  does follow it.
 - **The CLI REPL leaves the `[search]` of its `--config`/`VELESDB_CONFIG`
   file in force until a `\set` (`./velesdb.toml` is not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that

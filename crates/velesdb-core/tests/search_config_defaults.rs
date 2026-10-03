@@ -25,7 +25,11 @@ const POINTS: usize = 3_000;
 // build, so one query can land where `LOW_EF` is already exact on one run and
 // not on the next, with identical code and data (seen with `--test-threads=1`
 // too). Those tests therefore run `QUERIES` vectors and need only one to
-// disagree: a reverted fix makes every query agree, on every run.
+// disagree. For the batch test a reverted fix runs the same `Balanced` under
+// both configs, so every query agrees on every run. For the rerank-only tests
+// a revert answers at `Balanced`, which can equal the `LOW_EF` answer, so a
+// revert fails only where `Balanced` and `LOW_EF` differ on a query where
+// `LOW_EF` and `HIGH_EF` differ: measured to happen, not guaranteed by shape.
 const HARD_POINTS: usize = 60_000;
 const K: usize = 10;
 // `k` for `search_batch_with_filters` and `multi_query_search`; see
@@ -297,21 +301,17 @@ fn assert_rerank_only_follows_the_configured_ef(
 }
 
 /// A rerank-only `WITH` option -- naming no `mode`/`ef_search` of its own --
-/// still reaches the configured `[search]` quality on the plain vector path
-/// (`vector.rs`'s `search_with_opts`, #2399).
+/// still reaches the configured `[search]` quality, on the plain vector path
+/// (`vector.rs`'s `search_with_opts`, #2399) and on the metadata-filtered one
+/// (`vector_filter.rs`'s `search_with_filter_and_opts`).
+///
+/// One test, one `HARD_POINTS` build: the two paths read the same fixture, and
+/// a second build would add about as much CI time again.
 #[test]
 fn a_configured_ef_search_reaches_a_rerank_only_with_clause() {
     let dir = tempfile::TempDir::new().expect("test: tempdir");
     let collection = seeded_hard(&dir, config_with_ef(LOW_EF));
     assert_rerank_only_follows_the_configured_ef(&collection, false);
-}
-
-/// Same proof through the metadata-filtered vector path
-/// (`vector_filter.rs`'s `search_with_filter_and_opts`).
-#[test]
-fn a_configured_ef_search_reaches_a_rerank_only_with_clause_filtered() {
-    let dir = tempfile::TempDir::new().expect("test: tempdir");
-    let collection = seeded_hard(&dir, config_with_ef(LOW_EF));
     assert_rerank_only_follows_the_configured_ef(&collection, true);
 }
 

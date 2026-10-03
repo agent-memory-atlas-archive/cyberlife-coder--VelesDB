@@ -49,11 +49,14 @@ To point at a file anywhere else, pass it explicitly:
 > collection and ingest boundaries, `[hnsw]`'s `m` / `ef_construction`
 > are applied when a collection's index is created (see the precedence chain
 > under [Section \[hnsw\]](#section-hnsw)), and `[search]`'s `default_mode` /
-> `ef_search` set the quality of every vector search that does not name its own
-> (issue #2087 — `default_mode = "perfect"` is applied as `accurate`, with a
-> warning: an exhaustive scan cannot be a global default), except hybrid
+> `ef_search` set the quality of a plain `search()`, of a `NEAR` query whose
+> `WITH` clause names no quality (for example only `rerank`), and of the batch
+> and multi-query searches (issues #2087, #2399 — `default_mode = "perfect"` is
+> applied as `accurate`, with a warning: an exhaustive scan cannot be a global
+> default). Other search entry points are not wired to it yet — a
+> metadata-filtered `NEAR` query without a `WITH` clause, hybrid
 > (text + vector) search, the graph-anchored `NEAR` prefilter and
-> `search_by_embedding` on graph collections, which still run at `balanced`
+> `search_by_embedding` on graph collections are the ones audited so far
 > (#2430). Everything else
 > below is parsed and validated but **not** wired: `search.max_results`,
 > `search.query_timeout_ms`, `[quantization]`, `hnsw.max_layers` and
