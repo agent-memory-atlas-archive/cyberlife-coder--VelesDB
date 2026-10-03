@@ -3052,9 +3052,9 @@ components:
       properties:
         actual_stats:
           oneOf:
-          - type: 'null'
           - $ref: '#/components/schemas/ActualStatsResponse'
             description: 'Actual execution statistics (only when `analyze: true`).'
+          - type: 'null'
         actual_time_ms:
           type:
           - number
@@ -3749,9 +3749,9 @@ components:
           description: Optional payload.
         sparse_vector:
           oneOf:
-          - type: 'null'
           - $ref: '#/components/schemas/SparseVectorInput'
             description: Single sparse vector (convenience, stored under default name `""`).
+          - type: 'null'
         sparse_vectors:
           type:
           - object
@@ -4052,9 +4052,9 @@ components:
               value: tech
         fusion:
           oneOf:
-          - type: 'null'
           - $ref: '#/components/schemas/FusionRequest'
             description: Fusion configuration for hybrid search.
+          - type: 'null'
         mode:
           type:
           - string
@@ -4074,9 +4074,9 @@ components:
           description: Which named sparse index to search.
         sparse_vector:
           oneOf:
-          - type: 'null'
           - $ref: '#/components/schemas/SparseVectorInput'
             description: Single sparse query vector.
+          - type: 'null'
         sparse_vectors:
           type:
           - object
