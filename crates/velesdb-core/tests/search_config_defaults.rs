@@ -17,8 +17,8 @@ use velesdb_core::{Database, DistanceMetric, Point, SearchMode, VelesConfig};
 
 const DIM: usize = 32;
 const POINTS: usize = 3_000;
-// The corpus for the tests whose paths overfetch candidates (rerank-only
-// `WITH`, batch, multi-query). At `POINTS` that candidate pool recovers the
+// The corpus for the tests whose paths overfetch candidates (the `NEAR`
+// query test, batch, multi-query). At `POINTS` that candidate pool recovers the
 // exact top-k at `LOW_EF` as reliably as at `HIGH_EF`, so comparing the two
 // configured defaults proves nothing. Even at this size a single query is not
 // enough: the level RNG is seeded with a constant, but parallel insert
@@ -28,7 +28,7 @@ const POINTS: usize = 3_000;
 // `--test-threads=1` too). Searches on one built graph are repeatable. Those
 // tests therefore run `QUERIES` vectors and need only one to disagree. For
 // the batch test a reverted fix runs the same `Balanced` under both configs,
-// so every query agrees on every run. For the rerank-only test a revert
+// so every query agrees on every run. For the `NEAR` query test a revert
 // answers at `Balanced`, which can equal the `LOW_EF` answer, so a
 // revert fails only where `Balanced` and `LOW_EF` differ on a query where
 // `LOW_EF` and `HIGH_EF` differ: measured to happen, not guaranteed by shape.
@@ -298,9 +298,10 @@ fn assert_follows_the_configured_ef(
             let high = run(&with_ef(HIGH_EF, option));
             if low != high {
                 control_held = true;
+                let shown = if option.is_empty() { "no WITH" } else { option };
                 assert_eq!(
                     configured, low,
-                    "a query with `{option}` and no ef_search must follow the configured \
+                    "a query with {shown} and no ef_search must follow the configured \
                      ef_search, not a hard-coded Balanced (query {qi}, filtered: {filtered})"
                 );
             }
