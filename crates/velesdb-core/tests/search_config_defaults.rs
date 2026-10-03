@@ -249,8 +249,8 @@ fn hard_queries() -> Vec<Vec<f32>> {
         .collect()
 }
 
-/// The ids a `WITH (...)` query returns, optionally through the `cat = 0`
-/// metadata filter the hard fixture carries.
+/// The ids a `NEAR` query returns, optionally through the `cat = 0` metadata
+/// filter the hard fixture carries. An empty `with_clause` omits `WITH`.
 fn with_query_ids(
     collection: &velesdb_core::VectorCollection,
     query: &[f32],
@@ -258,8 +258,12 @@ fn with_query_ids(
     with_clause: &str,
 ) -> Vec<u64> {
     let filter = if filtered { "AND cat = 0 " } else { "" };
-    let sql =
-        format!("SELECT * FROM docs WHERE vector NEAR $v {filter}LIMIT {K} WITH ({with_clause})");
+    let with = if with_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WITH ({with_clause})")
+    };
+    let sql = format!("SELECT * FROM docs WHERE vector NEAR $v {filter}LIMIT {K}{with}");
     let mut params = HashMap::new();
     params.insert("v".to_string(), serde_json::json!(query));
     ids(&collection
@@ -267,30 +271,37 @@ fn with_query_ids(
         .expect("test: WITH query"))
 }
 
-/// `WITH (rerank = ...)` alone answers exactly like `WITH (ef_search = N,
-/// rerank = ...)` where `N` is the configured `[search]` ef.
+/// `WITH ({option})` answers exactly like `WITH (ef_search = N, {option})`
+/// where `N` is the configured `[search]` ef; an empty `option` is a query
+/// with no `WITH` at all.
 ///
 /// The control is per query: the equality is asserted wherever `LOW_EF` and
-/// `HIGH_EF` answer differently, and at least one query must. A single query
-/// can sit where even `LOW_EF`'s narrow beam finds the exact answer (see
-/// `HARD_POINTS`), which would make the control vacuous for that query.
-fn assert_rerank_only_follows_the_configured_ef(
+/// `HIGH_EF` answer differently, and at least one query must, across all the
+/// `options` of a call. A single query can sit where even `LOW_EF`'s narrow
+/// beam finds the exact answer (see `HARD_POINTS`), which would make the
+/// control vacuous for that query.
+fn assert_follows_the_configured_ef(
     collection: &velesdb_core::VectorCollection,
     filtered: bool,
+    options: &[&str],
 ) {
+    let with_ef = |ef: usize, option: &str| match option {
+        "" => format!("ef_search={ef}"),
+        _ => format!("ef_search={ef}, {option}"),
+    };
     let mut control_held = false;
     for (qi, query) in hard_queries().iter().enumerate() {
-        for rerank in [true, false] {
+        for option in options {
             let run = |with: &str| with_query_ids(collection, query, filtered, with);
-            let rerank_only = run(&format!("rerank={rerank}"));
-            let low = run(&format!("ef_search={LOW_EF}, rerank={rerank}"));
-            let high = run(&format!("ef_search={HIGH_EF}, rerank={rerank}"));
+            let configured = run(option);
+            let low = run(&with_ef(LOW_EF, option));
+            let high = run(&with_ef(HIGH_EF, option));
             if low != high {
                 control_held = true;
                 assert_eq!(
-                    rerank_only, low,
-                    "WITH (rerank={rerank}) alone must follow the configured ef_search, \
-                     not a hard-coded Balanced (query {qi}, filtered: {filtered})"
+                    configured, low,
+                    "a query with `{option}` and no ef_search must follow the configured \
+                     ef_search, not a hard-coded Balanced (query {qi}, filtered: {filtered})"
                 );
             }
         }
@@ -298,23 +309,26 @@ fn assert_rerank_only_follows_the_configured_ef(
     assert!(
         control_held,
         "CONTROL: ef must change the answer for at least one of {QUERIES} queries \
-         (filtered: {filtered})"
+         (filtered: {filtered}, options: {options:?})"
     );
 }
 
-/// A rerank-only `WITH` option -- naming no `mode`/`ef_search` of its own --
-/// still reaches the configured `[search]` quality, on the plain vector path
-/// (`vector.rs`'s `search_with_opts`, #2399) and on the metadata-filtered one
-/// (`vector_filter.rs`'s `search_with_filter_and_opts`).
+/// A `NEAR` query naming no quality of its own reaches the configured
+/// `[search]` quality: with no `WITH` at all, and with a `WITH` that sets only
+/// `rerank` (#2399), the latter on the plain vector path (`vector.rs`'s
+/// `search_with_opts`) and on the metadata-filtered one (`vector_filter.rs`'s
+/// `search_with_filter_and_opts`; the fixture's `cat` field has no secondary
+/// index).
 ///
-/// One test, one `HARD_POINTS` build: the two paths read the same fixture, and
-/// a second build would add about as much CI time again.
+/// One test, one `HARD_POINTS` build: the cases read the same fixture, and a
+/// build per case would add about as much CI time each.
 #[test]
-fn a_configured_ef_search_reaches_a_rerank_only_with_clause() {
+fn a_configured_ef_search_reaches_a_near_query_naming_no_quality() {
     let dir = tempfile::TempDir::new().expect("test: tempdir");
     let collection = seeded_hard(&dir, config_with_ef(LOW_EF));
-    assert_rerank_only_follows_the_configured_ef(&collection, false);
-    assert_rerank_only_follows_the_configured_ef(&collection, true);
+    assert_follows_the_configured_ef(&collection, false, &[""]);
+    assert_follows_the_configured_ef(&collection, false, &["rerank=true", "rerank=false"]);
+    assert_follows_the_configured_ef(&collection, true, &["rerank=true", "rerank=false"]);
 }
 
 /// One answer per query, for each batch / multi-query entry point.
