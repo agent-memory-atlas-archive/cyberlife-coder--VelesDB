@@ -4393,11 +4393,11 @@
           "actual_stats": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ActualStatsResponse",
                 "description": "Actual execution statistics (only when `analyze: true`)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -5303,11 +5303,11 @@
           "sparse_vector": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SparseVectorInput",
                 "description": "Single sparse vector (convenience, stored under default name `\"\"`)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -5698,11 +5698,11 @@
           "fusion": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FusionRequest",
                 "description": "Fusion configuration for hybrid search."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -5724,11 +5724,11 @@
           "sparse_vector": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SparseVectorInput",
                 "description": "Single sparse query vector."
+              },
+              {
+                "type": "null"
               }
             ]
           },
