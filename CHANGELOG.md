@@ -207,12 +207,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry point is guaranteed to follow `[search]` yet; #2430 tracks the audit
   and `docs/guides/CONFIGURATION.md` states what is covered.
 - **The CLI REPL leaves the `[search]` of its `--config`/`VELESDB_CONFIG`
-  file in force until a `\set` (`./velesdb.toml` is not read without it,
+  file in force until a `\set mode` or `\set ef_search` (`./velesdb.toml` is
+  not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that
   never ran `\set` injected `mode = 'balanced'` into every query, so the
   configured `[search]` default never applied in the REPL, against the
   priority order `docs/guides/CONFIGURATION.md` states. An untouched session
-  now adds nothing, and `\show` prints the configured default, marked
+  now adds no quality (the `max_results` `LIMIT` cap aside), and `\show`
+  prints the configured default, marked
   `(configured default)`. `\reset mode` goes back to it rather than to
   `balanced`. `.bench` printed the session mode but searched with neither the
   mode nor `ef_search`, and dropped every failed query in silence, so a bench
