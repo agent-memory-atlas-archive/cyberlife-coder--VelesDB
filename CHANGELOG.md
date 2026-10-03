@@ -191,13 +191,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the directory is ignored.
 
 ### Fixed
+
+- **core: a search that sets only `rerank` ran at `Balanced`, not the configured
+  `[search]` default (#2399, 2026-10-02).** `QuerySearchOptions::resolved_quality`
+  ended in a hard-coded `Balanced`, so `WITH (rerank = true)` skipped the
+  collection's runtime quality that `SELECT * FROM c WHERE vector NEAR $v
+  LIMIT n` honours. It now takes that runtime quality as its fallback, on both
+  the plain and the filtered vector path. The batch and multi-query entry
+  points (`search_batch_parallel`, `search_batch_with_filters`,
+  `multi_query_search` and `multi_query_search_ids`) had the identical
+  `Balanced` hard-code, unreached by that fix since they take no per-call
+  quality of their own; they now read the same runtime quality too, so with
+  a non-default `[search]` their results change for every caller of these
+  four functions, whichever surface it comes through. No other query shape or
+  entry point is guaranteed to follow `[search]` yet; #2430 tracks the audit
+  and `docs/guides/CONFIGURATION.md` states what is covered.
 - **The CLI REPL leaves the `[search]` of its `--config`/`VELESDB_CONFIG`
-  file in force until a `\set` (`./velesdb.toml` is not read without it,
+  file in force until a `\set mode` or `\set ef_search` (`./velesdb.toml` is
+  not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that
-  never ran `\set` injected `mode = 'balanced'` into every query, so the
-  configured `[search]` default never applied in the REPL, against the
-  priority order `docs/guides/CONFIGURATION.md` states. An untouched session
-  now adds nothing, and `\show` prints the configured default, marked
+  never ran `\set` used to inject `mode = 'balanced'`, against the
+  priority order `docs/guides/CONFIGURATION.md` states. An untouched session now adds no quality (the `max_results` `LIMIT` cap aside), and `\show`
+  prints the configured default, marked
   `(configured default)`. `\reset mode` goes back to it rather than to
   `balanced`. `.bench` printed the session mode but searched with neither the
   mode nor `ef_search`, and dropped every failed query in silence, so a bench

@@ -49,9 +49,14 @@ To point at a file anywhere else, pass it explicitly:
 > collection and ingest boundaries, `[hnsw]`'s `m` / `ef_construction`
 > are applied when a collection's index is created (see the precedence chain
 > under [Section \[hnsw\]](#section-hnsw)), and `[search]`'s `default_mode` /
-> `ef_search` set the quality of every search that does not name its own
-> (issue #2087 — `default_mode = "perfect"` is applied as `accurate`, with a
-> warning: an exhaustive scan cannot be a global default). Everything else
+> `ef_search` set the quality of a plain `search()`, of the VelesQL query
+> `SELECT * FROM c WHERE vector NEAR $v LIMIT n` (with no `WITH` clause, or
+> with a `WITH` clause that sets only `rerank`), and of the core functions
+> `search_batch_parallel`, `search_batch_with_filters`, `multi_query_search`
+> and `multi_query_search_ids` (issues #2087, #2399 — `default_mode = "perfect"` is
+> applied as `accurate`, with a warning: an exhaustive scan cannot be a global
+> default). No other query shape or search entry point is guaranteed to follow
+> it yet; #2430 tracks the audit. Everything else
 > below is parsed and validated but **not** wired: `search.max_results`,
 > `search.query_timeout_ms`, `[quantization]`, `hnsw.max_layers` and
 > `storage.storage_mode` — each still pending its own decision. Setting any of
@@ -523,7 +528,8 @@ Within one query, an explicit `ef_search` wins over `mode` (or its alias
 `quality`) on every surface: VelesQL's `WITH`, a REST search body, and the
 REPL, which adds its session setting only to a query that names neither —
 its `\set ef_search` when set, else its `\set mode` (#2274). A session that
-set neither adds nothing, so `[search]` applies to it (#2303).
+set neither adds no quality, so `[search]` applies wherever the engine honours
+it (see the note under "What the engine actually applies", #2303).
 
 > Any `WITH (ef_search = N)` value is passed through as the requested budget —
 > `N` is sent to HNSW (clamped to at least `k`, and still subject to the
