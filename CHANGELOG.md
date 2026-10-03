@@ -211,8 +211,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not read without it,
   #2400), and `.bench` runs at the quality it prints (#2303).** A session that
   never ran `\set` injected `mode = 'balanced'` into each `SELECT`
-  statement it ran that named no quality, so the configured `[search]` default
-  did not apply to those statements, against the priority order
+  typed as a query that named no quality, so the configured `[search]` default
+  did not apply to those queries, against the priority order
   `docs/guides/CONFIGURATION.md` states. An untouched session now adds no quality (the `max_results` `LIMIT` cap aside), and `\show`
   prints the configured default, marked
   `(configured default)`. `\reset mode` goes back to it rather than to
