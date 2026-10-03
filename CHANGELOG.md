@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `custom:`/`adaptive:` mode — now fail instead of running at the default
 > quality or an uncapped traversal, and a collection's own `execute_aggregate` refuses a
 > query the validator rejects. It also removes a public module, the aarch64-only
-> `velesdb_core::simd_neon` (#1965, under `### Removed`). The declared SemVer policy (`docs/FAQ.md`)
+> `velesdb_core::simd_neon` (#1965, under `### Removed`). It also bumps `utoipa`
+> to 6.0.0 behind velesdb-core's `openapi` feature (#2429, under `### Changed`):
+> a downstream crate enabling that feature with its own `utoipa 5` dependency no
+> longer compiles. The declared SemVer policy (`docs/FAQ.md`)
 > makes a breaking change a major bump: tag the next release accordingly.
 
 ### Security
@@ -1040,6 +1043,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NotFound`, matching every sibling accessor.
 
 ### Changed
+- **BREAKING (Rust API, `openapi` feature) — velesdb-core's `utoipa` dependency
+  moves 5.3.0 → 6.0.0, and velesdb-server's `utoipa`/`utoipa-swagger-ui` move
+  5.3.0 → 6.0.0 and 9 → 10 with it (#2429).** `utoipa-swagger-ui` 9.0.2
+  requires `utoipa ^5`; 10.0.1 requires `utoipa ^6.0.0`, so the two bump
+  together or the build breaks on two incompatible `utoipa` crate instances.
+  Any downstream crate enabling velesdb-core's `openapi` feature while
+  depending on `utoipa 5` itself (e.g. to implement `ToSchema` on its own
+  types alongside velesdb-core's) no longer compiles; it must move to
+  `utoipa 6` too. `docs/openapi.json`/`docs/openapi.yaml` are regenerated:
+  utoipa 6.0.0 changed the variant order it emits for an `Option<T>` field's
+  `oneOf` schema (the `null` variant now comes after the `$ref` instead of
+  before it) — same schema, same semantics, nothing added or removed.
 - **velesdb-server checks its OpenAPI descriptions for rustdoc links with
   pulldown-cmark, through the guard velesdb-memory already used (#2330).**
   Its hand-written raw-text scan passed an autolink to a path

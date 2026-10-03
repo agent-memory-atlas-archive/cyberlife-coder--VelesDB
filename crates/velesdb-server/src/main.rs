@@ -476,3 +476,7 @@ async fn main() -> anyhow::Result<()> {
         serve(&cfg.host, cfg.port, app, state, cfg.shutdown_timeout_secs).await
     }
 }
+
+#[cfg(all(test, feature = "swagger-ui"))]
+#[path = "swagger_ui_tests.rs"]
+mod swagger_ui_tests;
