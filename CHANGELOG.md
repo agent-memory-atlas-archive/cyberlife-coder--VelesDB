@@ -212,6 +212,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **core (Windows): a failed backup restore in the compaction replace is
+  logged, not dropped.** When `atomic_replace` could neither move the
+  compacted file over `vectors.dat` nor put the backup back, `vectors.dat` was
+  missing and the backup was its only copy, and the restore error was
+  discarded with no trace. It is now logged at error level with both paths,
+  and the `.bak` file is left in place for the next open to recover. The swap
+  itself is unchanged.
 - **CI: `Python Integrations` failed on every PR once nltk 3.10.4 shipped
   (2026-10-21) (#2463).** That release refuses to read NLTK data from, or download it
   into, a directory another account can write to, and the runner's copy of
