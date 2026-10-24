@@ -186,6 +186,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MCP tool and field descriptions condensed (#2442).** The descriptions
+  served in `tools/list` are shorter: the compact JSON drops from 142,211 to
+  122,740 bytes (about 14%). No tool name, schema, type, default, `required`
+  flag or wire format changes; only the prose an agent reads does. The
+  `recall_where` description now says that `ne` also matches facts lacking
+  the field.
 - **HTTP session limiter: the live-session map uses `parking_lot::Mutex`.**
   It was the crate's one `std::sync::Mutex`. `parking_lot`
   does not poison, so the poison-recovery shim is gone; behavior is unchanged.
