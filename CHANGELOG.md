@@ -24,7 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `utoipa 5` dependency no longer compiles. The on-disk format stays readable
 > both ways: `.vectors` v2 opens under 6.0.0. velesdb-migrate's public
 > `Error::Yaml` variant changes its payload from `serde_yaml::Error` to `String`
-> (RUSTSEC-2024-0449, under `### Changed`).
+> (RUSTSEC-2024-0449, under `### Changed`). Not breaking, but worth a line in an
+> upgrade note: the update check's install hash is derived from a stored random
+> id from now on, so every existing install is counted as new once, and the
+> `[update_check]` table of `velesdb.toml` is read at last (the migration guide's
+> section 6 has the details).
 
 ### Security
 
