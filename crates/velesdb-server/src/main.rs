@@ -448,14 +448,15 @@ async fn main() -> anyhow::Result<()> {
 
     log_startup(&cfg);
 
-    // Non-blocking update check (background thread, 2s timeout).
+    // Non-blocking update check (background thread, 2s timeout), repeated
+    // every 24h while the server runs so an install's lifetime is measurable.
     // Disable: VELESDB_NO_UPDATE_CHECK=1 or [update_check] enabled=false in config.
     #[cfg(feature = "update-check")]
-    velesdb_core::spawn_update_check(
-        velesdb_core::UpdateCheckConfig::default(),
-        std::path::PathBuf::from(&cfg.data_dir),
-        "core".to_string(),
-    );
+    {
+        let (check_config, check_context) =
+            velesdb_server::config::update_check_plan(config_path.as_deref(), &cfg.data_dir);
+        velesdb_core::spawn_update_heartbeat(check_config, check_context);
+    }
 
     let state = init_app_state(&cfg.data_dir, core_config)?;
     let auth_state = AuthState::new(cfg.api_keys.clone());

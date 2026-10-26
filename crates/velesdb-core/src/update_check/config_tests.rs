@@ -127,3 +127,128 @@ fn test_default_timeout() {
     let config = UpdateCheckConfig::default();
     assert_eq!(config.timeout_ms, 2000);
 }
+
+#[test]
+fn test_toml_table_overrides_defaults() {
+    let config = UpdateCheckConfig::from_toml_str(
+        "[search]\ndefault_mode = \"fast\"\n\n[update_check]\nenabled = false\nendpoint = \"http://127.0.0.1:9/x\"\ntimeout_ms = 50\n",
+    );
+    assert!(!config.enabled);
+    assert_eq!(config.endpoint, "http://127.0.0.1:9/x");
+    assert_eq!(config.timeout_ms, 50);
+}
+
+#[test]
+fn test_toml_partial_table_keeps_other_defaults() {
+    let config = UpdateCheckConfig::from_toml_str("[update_check]\nenabled = false\n");
+    assert!(!config.enabled);
+    assert_eq!(config.endpoint, UpdateCheckConfig::default().endpoint);
+    assert_eq!(config.timeout_ms, UpdateCheckConfig::default().timeout_ms);
+}
+
+#[test]
+fn test_toml_without_the_table_gives_defaults() {
+    for document in ["", "[search]\ndefault_mode = \"fast\"\n"] {
+        let config = UpdateCheckConfig::from_toml_str(document);
+        assert!(config.enabled, "document {document:?}");
+        assert_eq!(config.timeout_ms, 2000, "document {document:?}");
+    }
+}
+
+/// A file that cannot be parsed may well have held `enabled = false`: the
+/// CLI spawns the check before anything else reads the file, so guessing
+/// "on" here would send what the user asked not to send.
+#[test]
+fn test_unparsable_document_fails_closed() {
+    for document in [
+        "this is = = not toml",
+        "[update_check]\nenabled = no\n",
+        "[update_check]\nenabled = False\n",
+        "[update_check]\nenabled = false\n[update_check]\nenabled = true\n",
+    ] {
+        let config = UpdateCheckConfig::from_toml_str(document);
+        assert!(!config.enabled, "document {document:?}");
+    }
+}
+
+#[test]
+fn test_unreadable_config_file_fails_closed() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    // A directory where a file is expected: it exists and cannot be read.
+    assert!(!UpdateCheckConfig::from_config_file(Some(dir.path())).enabled);
+}
+
+/// A table that exists but cannot be read must never switch the check on:
+/// a wrong type next to `enabled = false` used to replace the whole table by
+/// the defaults, so the opt-out was silently ignored.
+#[test]
+fn test_unreadable_update_check_table_fails_closed() {
+    for document in [
+        "[update_check]\nenabled = \"maybe\"\n",
+        "[update_check]\nenabled = false\ntimeout_ms = \"fast\"\n",
+        "[update_check]\ntimeout_ms = \"fast\"\n",
+        "[update_check]\nendpoint = 3\n",
+        "update_check = 3\n",
+    ] {
+        let config = UpdateCheckConfig::from_toml_str(document);
+        assert!(!config.enabled, "document {document:?}");
+    }
+}
+
+#[test]
+fn test_is_enabled_with_reads_only_the_lookup() {
+    let on = UpdateCheckConfig::default();
+    let off = UpdateCheckConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_string())
+        }
+    };
+    assert!(on.is_enabled_with(env(&[])));
+    assert!(!off.is_enabled_with(env(&[])));
+    assert!(!on.is_enabled_with(env(&[("VELESDB_NO_UPDATE_CHECK", "1")])));
+    assert!(!on.is_enabled_with(env(&[("VELESDB_UPDATE_CHECK", "0")])));
+    assert!(off.is_enabled_with(env(&[("VELESDB_UPDATE_CHECK", "1")])));
+}
+
+#[test]
+fn test_falsy_words_are_shared_and_case_insensitive() {
+    for word in ["0", "false", "FALSE", "No", "off", "OFF"] {
+        assert!(is_falsy(word), "{word}");
+    }
+    for word in ["1", "true", "yes", "on", "anything", ""] {
+        assert!(!is_falsy(word), "{word:?}");
+    }
+}
+
+#[test]
+fn test_config_file_is_read_from_an_explicit_path() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("custom.toml");
+    std::fs::write(&path, "[update_check]\nenabled = false\n").expect("write config");
+    assert!(!UpdateCheckConfig::from_config_file(Some(&path)).enabled);
+}
+
+/// Only the implicit `./velesdb.toml` may be absent; a path the user gave
+/// (`--config`, `VELESDB_CONFIG`) that does not exist is a mistake the CLI
+/// refuses elsewhere, and a mistake must not leave the check on.
+#[test]
+fn test_missing_implicit_file_gives_defaults_but_a_missing_explicit_one_does_not() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let absent = dir.path().join("absent.toml");
+
+    assert!(UpdateCheckConfig::load(&absent, false).enabled);
+    assert!(!UpdateCheckConfig::load(&absent, true).enabled);
+    assert!(!UpdateCheckConfig::from_config_file(Some(&absent)).enabled);
+}
+
+#[test]
+fn test_implicit_file_name_is_velesdb_toml() {
+    assert_eq!(DEFAULT_CONFIG_FILE, "velesdb.toml");
+}
