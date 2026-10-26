@@ -9,99 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **CodeQL no longer reports the `#[napi]` glue of `velesdb-node` as
-  `rust/access-invalid-pointer`.** The class `MemoryService` in
-  `crates/velesdb-node/src/lib.rs` is expanded by napi-derive, and the code it
-  generates was reported at the struct as a high-severity alert with no source
-  to fix: the crate forbids `unsafe` (`#![deny(unsafe_code)]`) and holds no
-  pointer code of its own. `.github/codeql/codeql-config.yml` now excludes that
-  one file from the analysis, with the reason beside it; the rule keeps running
-  over `velesdb-core` and every other crate. `test_codeql_config.py` fails if an
-  excluded file stops forbidding `unsafe`, so the exclusion cannot outlive its
-  justification.
+- **The `Code Coverage` job gets 90 minutes instead of 45.** Its single-threaded
+  `cargo llvm-cov` run of the whole workspace took 23 minutes in July and 39 to
+  40 on 6.0.0, then passed 45 on both `main` pushes of the 7.0.0 cycle, so the
+  job was cancelled by its own timeout and reported no coverage. It runs on
+  `main` only and is not part of `CI Success`; the 78% line threshold has not
+  been checked since 6.0.0 and will be again on the next push to `main`.
 
-- **The update check measures installs and how long they stay in use, and no
-  longer reads anything about the machine.** The payload gains `entry`
-  (`"server"` or `"cli"`, declared by each binary) and `ci` (true when a CI
-  system's environment variables are present), next to `version`, `os`, `arch`,
-  `instance_hash` and `edition`. `instance_hash` is now the SHA-256 of a random
-  id generated once and kept in the per-user configuration directory
-  (`~/.config/velesdb/install-id`, `~/Library/Application Support/velesdb/`,
-  `%APPDATA%\velesdb\`), then in the server's data directory, then for the
-  process only. It used to hash the machine id and the data directory path,
-  which gave one machine many ids (the CLI passed `.`) and many machines one id
-  (a baked image); the `ioreg`/`reg`/`/etc/machine-id` reads and the `hostname`
-  and `whoami` dependencies of the `update-check` feature are gone. The
-  **server** now repeats the check every 24 hours while it runs; the CLI still
-  checks once. `docs/guides/CONFIGURATION.md` lists every field sent, what the
-  receiving worker stores, and every opt-out. Hashes change once, at upgrade:
-  an existing install is counted as new. Two processes starting together agree
-  on one id: the file is written under an exclusive advisory lock on
-  `.install-id.lock` (`File::try_lock`, which the kernel releases when its holder
-  dies), and a start that cannot get the lock or whose filesystem has no locking
-  falls through to the next location, or to an id of its own for that run. On a
-  filesystem without locking, such as a network home, that last case happens
-  only when no location supports locking (always for `velesdb-cli`, which has no
-  data directory, if its config directory cannot lock), and each such run counts
-  as a new install.
-
-- **`[update_check]` in `velesdb.toml` is now read.** `enabled = false`,
-  `endpoint` and `timeout_ms` were documented but neither binary loaded the
-  section, so the config-file opt-out never worked; only the environment
-  variables did. Both binaries now read it from `--config`/`VELESDB_CONFIG`,
-  else `./velesdb.toml`, through `UpdateCheckConfig::from_config_file`. A
-  config file that exists but cannot be read, or an `[update_check]` table that
-  cannot be understood (a wrong type under any key), switches the check off
-  instead of falling back to the defaults and ignoring an `enabled = false`
-  that may be in it; a `--config` / `VELESDB_CONFIG` path that does not exist
-  does the same, and only a missing implicit `./velesdb.toml` gives the
-  defaults. `velesdb-server` refuses to start on a file that is not valid TOML,
-  so it never reaches the check; the unreadable-table case is logged there as a
-  warning. `velesdb-cli` spawns the check before its own config loader runs, so
-  this is what keeps an invalid file from leaving the check on in that window.
-
-- **The pinned third-party actions move to their latest patch and minor
-  releases (#2507).** `actions/upload-artifact` 7.0.2, `actions/download-artifact`
-  8.0.2, `Swatinem/rust-cache` 2.9.3, `actions/setup-python` 7.1.0,
-  `taiki-e/install-action` 2.87.31, `github/codeql-action` 4.39.1,
-  `pypa/gh-action-pypi-publish` 1.14.3 (a security release) and
-  `dtolnay/rust-toolchain`, whose pin follows `master` to the commit that
-  passes its inputs to the shell through `env:` instead of expanding them into
-  the script. Every use stays pinned by full commit SHA; none of the releases
-  removes an input this repository passes. The diffs of the two dependency-bot
-  pull requests (#2500, #2503) were taken as one maintainer commit.
-
-- **TypeScript SDK dev tooling: `typescript-eslint` 8.72.0 and `eslint` 10.13.0
-  (#2506).** `@typescript-eslint/eslint-plugin`, `@typescript-eslint/parser` and
-  `typescript-eslint` move from 8.71.2 to 8.72.0, `eslint` from 10.12.0 to
-  10.13.0, in `sdks/typescript/package-lock.json` only. Dev dependencies; the
-  published package and its behaviour are unchanged.
-
-- **Cargo.lock: non-major dependency updates, `pyo3` 0.29.3 (#2511).** `arc-swap`
-  1.9.2 to 1.9.3, `libc` 0.2.190 to 0.2.191, `memmap2` 0.9.11 to 0.9.12,
-  `napi` 3.14.2 to 3.15.0 (with `napi-sys` 3.4.0 to 3.4.1), `napi-derive` 3.6.12
-  to 3.6.13 (with `napi-derive-backend` 6.1.5 to 6.1.6), `pulldown-cmark`
-  0.13.4 to 0.13.5, `redis` 1.7.1 to 1.8.0 (`velesdb-migrate`) and `rmcp` 3.6.0
-  to 3.7.0 (`velesdb-memory`); `pyo3`, `pyo3-ffi`, `pyo3-macros`,
-  `pyo3-macros-backend` and `pyo3-build-config` 0.29.2 to 0.29.3
-  (`velesdb-python`). Lockfile only, no manifest or source change.
-  `pyo3-build-config` stays on 0.29.x: 0.30 does not match `pyo3` 0.29.
-
-### Deprecated
-
-- **`velesdb_core::{check_for_updates, spawn_update_check, compute_instance_hash}`
-  carry `#[deprecated]`.** None of them can say which binary calls it, and the
-  hash no longer depends on the machine or the data directory. Use
-  `check_for_updates_with` and `spawn_update_check_with` (one check) or
-  `spawn_update_heartbeat` (start-up check, then every 24 hours), each taking an
-  `UpdateCheckContext::new(entry, edition)`. The deprecated pair keeps working
-  and reports the entry `"library"`; `compute_instance_hash` now returns the
-  hash of the stored install id (`data_dir` is only a fallback place to look
-  for it) and never creates the id file, so calling it cannot write on behalf of
-  an install that opted out. With no stored id it returns the hash of a fresh
-  random id on every call, so two calls then differ.
-
-## [7.0.0] - 2026-10-25
+## [7.0.0] - 2026-10-26
 
 > **MAJOR release.** The breaking changes are listed in
 > [`docs/guides/MIGRATION_v7.0.0.md`](docs/guides/MIGRATION_v7.0.0.md):
@@ -118,7 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `utoipa 5` dependency no longer compiles. The on-disk format stays readable
 > both ways: `.vectors` v2 opens under 6.0.0. velesdb-migrate's public
 > `Error::Yaml` variant changes its payload from `serde_yaml::Error` to `String`
-> (RUSTSEC-2024-0449, under `### Changed`).
+> (RUSTSEC-2024-0449, under `### Changed`). Not breaking, but worth a line in an
+> upgrade note: the update check's install hash is derived from a stored random
+> id from now on, so every existing install is counted as new once, and the
+> `[update_check]` table of `velesdb.toml` is read at last (the migration guide's
+> section 6 has the details).
 
 ### Security
 
@@ -1728,6 +1647,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paragraph is not prose anybody has to trust. `.vectors` had no version-compat mechanism at all before this, so
   the v1 read path was written here rather than inherited.
 
+- **CodeQL no longer reports the `#[napi]` glue of `velesdb-node` as
+  `rust/access-invalid-pointer`.** The class `MemoryService` in
+  `crates/velesdb-node/src/lib.rs` is expanded by napi-derive, and the code it
+  generates was reported at the struct as a high-severity alert with no source
+  to fix: the crate forbids `unsafe` (`#![deny(unsafe_code)]`) and holds no
+  pointer code of its own. `.github/codeql/codeql-config.yml` now excludes that
+  one file from the analysis, with the reason beside it; the rule keeps running
+  over `velesdb-core` and every other crate. `test_codeql_config.py` fails if an
+  excluded file stops forbidding `unsafe`, so the exclusion cannot outlive its
+  justification.
+
+- **The update check measures installs and how long they stay in use, and no
+  longer reads anything about the machine.** The payload gains `entry`
+  (`"server"` or `"cli"`, declared by each binary) and `ci` (true when a CI
+  system's environment variables are present), next to `version`, `os`, `arch`,
+  `instance_hash` and `edition`. `instance_hash` is now the SHA-256 of a random
+  id generated once and kept in the per-user configuration directory
+  (`~/.config/velesdb/install-id`, `~/Library/Application Support/velesdb/`,
+  `%APPDATA%\velesdb\`), then in the server's data directory, then for the
+  process only. It used to hash the machine id and the data directory path,
+  which gave one machine many ids (the CLI passed `.`) and many machines one id
+  (a baked image); the `ioreg`/`reg`/`/etc/machine-id` reads and the `hostname`
+  and `whoami` dependencies of the `update-check` feature are gone. The
+  **server** now repeats the check every 24 hours while it runs; the CLI still
+  checks once. `docs/guides/CONFIGURATION.md` lists every field sent, what the
+  receiving worker stores, and every opt-out. Hashes change once, at upgrade:
+  an existing install is counted as new. Two processes starting together agree
+  on one id: the file is written under an exclusive advisory lock on
+  `.install-id.lock` (`File::try_lock`, which the kernel releases when its holder
+  dies), and a start that cannot get the lock or whose filesystem has no locking
+  falls through to the next location, or to an id of its own for that run. On a
+  filesystem without locking, such as a network home, that last case happens
+  only when no location supports locking (always for `velesdb-cli`, which has no
+  data directory, if its config directory cannot lock), and each such run counts
+  as a new install.
+
+- **`[update_check]` in `velesdb.toml` is now read.** `enabled = false`,
+  `endpoint` and `timeout_ms` were documented but neither binary loaded the
+  section, so the config-file opt-out never worked; only the environment
+  variables did. Both binaries now read it from `--config`/`VELESDB_CONFIG`,
+  else `./velesdb.toml`, through `UpdateCheckConfig::from_config_file`. A
+  config file that exists but cannot be read, or an `[update_check]` table that
+  cannot be understood (a wrong type under any key), switches the check off
+  instead of falling back to the defaults and ignoring an `enabled = false`
+  that may be in it; a `--config` / `VELESDB_CONFIG` path that does not exist
+  does the same, and only a missing implicit `./velesdb.toml` gives the
+  defaults. `velesdb-server` refuses to start on a file that is not valid TOML,
+  so it never reaches the check; the unreadable-table case is logged there as a
+  warning. `velesdb-cli` spawns the check before its own config loader runs, so
+  this is what keeps an invalid file from leaving the check on in that window.
+
+- **The pinned third-party actions move to their latest patch and minor
+  releases (#2507).** `actions/upload-artifact` 7.0.2, `actions/download-artifact`
+  8.0.2, `Swatinem/rust-cache` 2.9.3, `actions/setup-python` 7.1.0,
+  `taiki-e/install-action` 2.87.31, `github/codeql-action` 4.39.1,
+  `pypa/gh-action-pypi-publish` 1.14.3 (a security release) and
+  `dtolnay/rust-toolchain`, whose pin follows `master` to the commit that
+  passes its inputs to the shell through `env:` instead of expanding them into
+  the script. Every use stays pinned by full commit SHA; none of the releases
+  removes an input this repository passes. The diffs of the two dependency-bot
+  pull requests (#2500, #2503) were taken as one maintainer commit.
+
+- **TypeScript SDK dev tooling: `typescript-eslint` 8.72.0 and `eslint` 10.13.0
+  (#2506).** `@typescript-eslint/eslint-plugin`, `@typescript-eslint/parser` and
+  `typescript-eslint` move from 8.71.2 to 8.72.0, `eslint` from 10.12.0 to
+  10.13.0, in `sdks/typescript/package-lock.json` only. Dev dependencies; the
+  published package and its behaviour are unchanged.
+
+- **Cargo.lock: non-major dependency updates, `pyo3` 0.29.3 (#2511).** `arc-swap`
+  1.9.2 to 1.9.3, `libc` 0.2.190 to 0.2.191, `memmap2` 0.9.11 to 0.9.12,
+  `napi` 3.14.2 to 3.15.0 (with `napi-sys` 3.4.0 to 3.4.1), `napi-derive` 3.6.12
+  to 3.6.13 (with `napi-derive-backend` 6.1.5 to 6.1.6), `pulldown-cmark`
+  0.13.4 to 0.13.5, `redis` 1.7.1 to 1.8.0 (`velesdb-migrate`) and `rmcp` 3.6.0
+  to 3.7.0 (`velesdb-memory`); `pyo3`, `pyo3-ffi`, `pyo3-macros`,
+  `pyo3-macros-backend` and `pyo3-build-config` 0.29.2 to 0.29.3
+  (`velesdb-python`). Lockfile only, no manifest or source change.
+  `pyo3-build-config` stays on 0.29.x: 0.30 does not match `pyo3` 0.29.
+
+
 ### Deprecated
 
 - **`StorageConfig::{data_dir, mmap_cache_mb, vector_alignment}` carry
@@ -1749,6 +1747,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   major (tracked by `scripts/check-deferred-removals.py`). No behavior
   changes — a config file setting them today keeps loading exactly as
   before.
+
+- **`velesdb_core::{check_for_updates, spawn_update_check, compute_instance_hash}`
+  carry `#[deprecated]`.** None of them can say which binary calls it, and the
+  hash no longer depends on the machine or the data directory. Use
+  `check_for_updates_with` and `spawn_update_check_with` (one check) or
+  `spawn_update_heartbeat` (start-up check, then every 24 hours), each taking an
+  `UpdateCheckContext::new(entry, edition)`. The deprecated pair keeps working
+  and reports the entry `"library"`; `compute_instance_hash` now returns the
+  hash of the stored install id (`data_dir` is only a fallback place to look
+  for it) and never creates the id file, so calling it cannot write on behalf of
+  an install that opted out. With no stored id it returns the hash of a fresh
+  random id on every call, so two calls then differ.
+
 
 ### Performance
 
