@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use pyo3::exceptions::{PyDeprecationWarning, PyValueError};
+use pyo3::exceptions::{PyDeprecationWarning, PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 use velesdb_core::FusionStrategy as CoreFusionStrategy;
 use velesdb_core::{GatedRead, QueryOperationKind, SearchResult};
@@ -151,13 +151,17 @@ impl Collection {
     }
 
     /// Search for similar vectors with custom HNSW ef_search parameter.
+    ///
+    /// `ef_search` must be in `[16, 4096]` (`docs/VELESQL_SPEC.md`); any `int`
+    /// outside it, a negative one or one no `i64` holds included, raises
+    /// `ValueError` rather than running an uncapped graph traversal (#2274).
     #[pyo3(signature = (vector, top_k = 10, ef_search = 128, *, principal = None, tenant = None))]
     fn search_with_ef(
         &self,
         py: Python<'_>,
         vector: Py<PyAny>,
         top_k: usize,
-        ef_search: usize,
+        #[pyo3(from_py_with = ef_search_from_py)] ef_search: usize,
         principal: Option<String>,
         tenant: Option<String>,
     ) -> PyResult<Vec<Py<PyAny>>> {
@@ -678,65 +682,32 @@ impl Collection {
     }
 }
 
+/// Reads the `ef_search` Python passes into the documented range. An `int`
+/// no `i64` holds (`2**64`, say) is outside that range too, so pyo3's
+/// `OverflowError` for it becomes the `ValueError` every other out-of-range
+/// value raises, with the one message naming the value as Python prints it
+/// (#2274); a value that is not an `int` keeps its `TypeError`.
+fn ef_search_from_py(ef_search: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let ef = ef_search.extract::<i64>().map_err(|err| {
+        if err.is_instance_of::<PyOverflowError>(ef_search.py()) {
+            PyValueError::new_err(velesdb_core::api_types::ef_search_out_of_range(ef_search))
+        } else {
+            err
+        }
+    })?;
+    velesdb_core::api_types::parse_with_ef_search(ef).map_err(PyValueError::new_err)
+}
+
 /// Parse a Python quality mode string into [`SearchQuality`].
 ///
-/// Supports named modes (`fast`, `balanced`, `accurate`, `perfect`, `autotune`)
-/// plus advanced modes:
-/// - `"custom:<ef>"` for a custom `ef_search` value
-/// - `"adaptive:<min_ef>:<max_ef>"` for two-phase adaptive search
+/// Delegates to [`velesdb_core::api_types::parse_search_mode`], the parser
+/// REST, VelesQL, the CLI and Tauri use, so a mode means the same thing, and
+/// fails with the same message, on every surface: the named modes
+/// (`fast`, `balanced`, `accurate`, `perfect`, `autotune`), `custom:<ef>`
+/// and `adaptive:<min_ef>:<max_ef>`, each ef in the `ef_search` range
+/// (#2275). A copy of that parser lived here and answered differently.
 fn parse_search_quality(mode: &str) -> PyResult<velesdb_core::SearchQuality> {
-    let lower = mode.to_lowercase();
-    match lower.as_str() {
-        "fast" => Ok(velesdb_core::SearchQuality::Fast),
-        "balanced" => Ok(velesdb_core::SearchQuality::Balanced),
-        "accurate" => Ok(velesdb_core::SearchQuality::Accurate),
-        "perfect" => Ok(velesdb_core::SearchQuality::Perfect),
-        "autotune" | "auto_tune" | "auto" => Ok(velesdb_core::SearchQuality::AutoTune),
-        other => parse_advanced_quality(other),
-    }
-}
-
-/// Parse advanced quality modes: `custom:<ef>` and `adaptive:<min_ef>:<max_ef>`.
-fn parse_advanced_quality(mode: &str) -> PyResult<velesdb_core::SearchQuality> {
-    if let Some(ef_str) = mode.strip_prefix("custom:") {
-        let ef = ef_str.parse::<usize>().map_err(|_| {
-            PyValueError::new_err(format!(
-                "Invalid custom ef_search value: '{ef_str}'. Expected a positive integer, \
-                 e.g. 'custom:256'"
-            ))
-        })?;
-        return Ok(velesdb_core::SearchQuality::Custom(ef));
-    }
-    if let Some(params) = mode.strip_prefix("adaptive:") {
-        return parse_adaptive_params(params);
-    }
-    Err(PyValueError::new_err(format!(
-        "Unknown search quality: '{mode}'. Valid: fast, balanced, accurate, perfect, \
-         autotune, custom:<ef>, adaptive:<min_ef>:<max_ef>"
-    )))
-}
-
-/// Parse `<min_ef>:<max_ef>` for the adaptive quality mode.
-fn parse_adaptive_params(params: &str) -> PyResult<velesdb_core::SearchQuality> {
-    let parts: Vec<&str> = params.split(':').collect();
-    if parts.len() != 2 {
-        return Err(PyValueError::new_err(format!(
-            "Invalid adaptive format: 'adaptive:{params}'. \
-             Expected 'adaptive:<min_ef>:<max_ef>', e.g. 'adaptive:32:512'"
-        )));
-    }
-    let min_ef = parts[0]
-        .parse::<usize>()
-        .map_err(|_| PyValueError::new_err(format!("Invalid adaptive min_ef: '{}'", parts[0])))?;
-    let max_ef = parts[1]
-        .parse::<usize>()
-        .map_err(|_| PyValueError::new_err(format!("Invalid adaptive max_ef: '{}'", parts[1])))?;
-    if min_ef > max_ef {
-        return Err(PyValueError::new_err(format!(
-            "Adaptive min_ef ({min_ef}) must be <= max_ef ({max_ef})"
-        )));
-    }
-    Ok(velesdb_core::SearchQuality::Adaptive { min_ef, max_ef })
+    velesdb_core::api_types::parse_search_mode(mode).map_err(PyValueError::new_err)
 }
 
 #[cfg(test)]

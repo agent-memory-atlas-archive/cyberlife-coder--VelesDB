@@ -26,8 +26,8 @@ use crate::AppState;
 use super::helpers::{apply_pre_check, extract_client_id, get_vector_collection_or_404};
 use pipeline::{
     execute_dense_search_ids, execute_search_request, finish_search_ids_with_cb,
-    finish_search_with_cb, finish_search_with_status, ids_fast_path_eligible,
-    parse_optional_filter, timeout_response, validate_query_dimension,
+    finish_search_with_cb, finish_search_with_status, ids_fast_path_eligible, parse_mode_or_400,
+    parse_optional_filter, timeout_response, validate_ef_search_or_400, validate_query_dimension,
 };
 use workers::{run_blocking_search, run_search_with_optional_timeout};
 
@@ -42,9 +42,11 @@ pub use multi::{multi_query_search, multi_query_search_ids};
 
 /// Shared search preamble: record onboarding metric and resolve collection.
 ///
-/// Does NOT check guard rails — each handler inlines `apply_pre_check`
-/// after recording its query-type counter so that rate-limited requests
-/// are visible in metrics with `status="rate_limited"`.
+/// Does NOT check guard rails — `text_search` and `hybrid_search` inline
+/// `apply_pre_check` after recording their query-type counter so that
+/// rate-limited requests are visible in metrics with `status="rate_limited"`;
+/// `search` and `search_ids` get the same guard-rail check, plus the vector
+/// counter and `mode`/`ef_search` parsing, from [`search_request_pre_check`].
 ///
 /// Does NOT record the query-type counter (vector / hybrid / text) — each
 /// handler calls the appropriate `record_*_query()` method itself so that
@@ -60,17 +62,47 @@ fn search_preamble(
     get_vector_collection_or_404(state, name)
 }
 
+/// Shared pre-check for `/search` and `/search/ids` (both accept
+/// `SearchRequest`): resolves the collection, records the vector-query
+/// counter, applies guard rails, and parses `mode` and `ef_search`.
+///
+/// Returns `Ok((collection, quality_mode))` or `Err(response)` on failure.
+#[allow(clippy::result_large_err)]
+fn search_request_pre_check(
+    state: &AppState,
+    name: &str,
+    headers: &axum::http::HeaderMap,
+    req: &SearchRequest,
+) -> Result<(VectorCollection, Option<velesdb_core::SearchQuality>), axum::response::Response> {
+    let collection = search_preamble(state, name)?;
+    state.operational_metrics.record_vector_query();
+
+    let client_id = extract_client_id(headers);
+    if let Err(resp) = apply_pre_check(collection.guard_rails(), &client_id) {
+        state.operational_metrics.inc_rate_limited();
+        return Err(resp);
+    }
+    let quality_mode = parse_mode_or_400(state, req.mode.as_deref())?;
+    validate_ef_search_or_400(state, req.ef_search)?;
+
+    Ok((collection, quality_mode))
+}
+
 /// Executes the full search pipeline and records circuit-breaker on failure.
 ///
 /// Shared by `/search` and `/search/ids` (both accept `SearchRequest`).
+/// `quality_mode` is the request's `mode`, which the handler parsed with
+/// [`parse_mode_or_400`] before this point, so that a bad one is refused as
+/// the client's error and never counted as the collection's failure (#2267).
 #[allow(clippy::result_large_err)]
 fn execute_with_cb(
     state: &AppState,
     name: &str,
     collection: &VectorCollection,
     req: &mut SearchRequest,
+    quality_mode: Option<velesdb_core::SearchQuality>,
 ) -> Result<velesdb_core::Result<Vec<velesdb_core::SearchResult>>, axum::response::Response> {
-    execute_search_request(state, name, collection, req).inspect_err(|_| {
+    execute_search_request(state, name, collection, req, quality_mode).inspect_err(|_| {
         collection.guard_rails().circuit_breaker.record_failure();
     })
 }
@@ -92,7 +124,13 @@ fn execute_with_cb(
     responses(
         (status = 200, description = "Search results", body = SearchResponse),
         (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
-        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse)
+        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse),
+        (
+            status = 422,
+            description = "A field of the wrong type, such as a negative or non-integer ef_search",
+            body = String,
+            content_type = "text/plain"
+        )
     )
 )]
 #[allow(clippy::result_large_err)]
@@ -104,17 +142,10 @@ pub async fn search(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
 
-    let collection = match search_preamble(&state, &name) {
-        Ok(c) => c,
+    let (collection, quality_mode) = match search_request_pre_check(&state, &name, &headers, &req) {
+        Ok(v) => v,
         Err(resp) => return resp,
     };
-    state.operational_metrics.record_vector_query();
-
-    let client_id = extract_client_id(&headers);
-    if let Err(resp) = apply_pre_check(collection.guard_rails(), &client_id) {
-        state.operational_metrics.inc_rate_limited();
-        return resp;
-    }
 
     // F-03: honour the per-request `timeout_ms` budget. The synchronous
     // search runs on a blocking worker so the async runtime stays
@@ -132,6 +163,7 @@ pub async fn search(
             &name_for_work,
             &collection_for_work,
             &mut owned_req,
+            quality_mode,
         )
     })
     .await;
@@ -165,8 +197,9 @@ fn execute_search_with_cb_owned(
     name: &str,
     collection: &VectorCollection,
     req: &mut SearchRequest,
+    quality_mode: Option<velesdb_core::SearchQuality>,
 ) -> Result<velesdb_core::Result<Vec<velesdb_core::SearchResult>>, axum::response::Response> {
-    execute_with_cb(state, name, collection, req)
+    execute_with_cb(state, name, collection, req, quality_mode)
 }
 
 /// Owned-request variant for `/search/ids`: takes the `search_ids` fast path
@@ -179,12 +212,13 @@ fn execute_search_ids_with_cb_owned(
     name: &str,
     collection: &VectorCollection,
     req: &mut SearchRequest,
+    quality_mode: Option<velesdb_core::SearchQuality>,
 ) -> Result<velesdb_core::Result<Vec<velesdb_core::SearchResult>>, axum::response::Response> {
     if ids_fast_path_eligible(req) {
         return execute_dense_search_ids(state, name, collection, req)
             .inspect_err(|_| collection.guard_rails().circuit_breaker.record_failure());
     }
-    execute_with_cb(state, name, collection, req)
+    execute_with_cb(state, name, collection, req, quality_mode)
 }
 
 /// Search using BM25 full-text search.
@@ -198,7 +232,8 @@ fn execute_search_ids_with_cb_owned(
     request_body = TextSearchRequest,
     responses(
         (status = 200, description = "Text search results", body = SearchResponse),
-        (status = 404, description = "Collection not found", body = crate::types::ErrorResponse)
+        (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 #[allow(clippy::result_large_err)]
@@ -279,7 +314,8 @@ pub async fn text_search(
     responses(
         (status = 200, description = "Hybrid search results", body = SearchResponse),
         (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
-        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse)
+        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 #[allow(clippy::result_large_err)]
@@ -353,9 +389,10 @@ pub async fn hybrid_search(
 
 /// Lightweight search returning only IDs and scores (no payload hydration).
 ///
-/// Supports the same search modes as the standard `/search` endpoint:
-/// dense, sparse, and hybrid. Honors filter, ef_search, mode, fusion,
-/// and all other `SearchRequest` parameters.
+/// Accepts the same request body as the standard `/search` endpoint, for a
+/// dense, sparse or hybrid search. `mode` is checked on every shape but
+/// applied only to a dense search with neither a `filter` nor `ef_search`:
+/// `ef_search` wins over it, and a filtered search applies neither (#457).
 #[utoipa::path(
     post,
     path = "/collections/{name}/search/ids",
@@ -367,7 +404,13 @@ pub async fn hybrid_search(
     responses(
         (status = 200, description = "IDs-only search results", body = SearchIdsResponse),
         (status = 404, description = "Collection not found", body = crate::types::ErrorResponse),
-        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse)
+        (status = 400, description = "Invalid request", body = crate::types::ErrorResponse),
+        (
+            status = 422,
+            description = "A field of the wrong type, such as a negative or non-integer ef_search",
+            body = String,
+            content_type = "text/plain"
+        )
     )
 )]
 #[allow(clippy::result_large_err)]
@@ -379,17 +422,10 @@ pub async fn search_ids(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
 
-    let collection = match search_preamble(&state, &name) {
-        Ok(c) => c,
+    let (collection, quality_mode) = match search_request_pre_check(&state, &name, &headers, &req) {
+        Ok(v) => v,
         Err(resp) => return resp,
     };
-    state.operational_metrics.record_vector_query();
-
-    let client_id = extract_client_id(&headers);
-    if let Err(resp) = apply_pre_check(collection.guard_rails(), &client_id) {
-        state.operational_metrics.inc_rate_limited();
-        return resp;
-    }
 
     // F-03: honour the per-request `timeout_ms` budget and run the
     // CPU-bound search on a blocking worker so the async runtime stays
@@ -407,6 +443,7 @@ pub async fn search_ids(
             &name_for_work,
             &collection_for_work,
             &mut owned_req,
+            quality_mode,
         )
     })
     .await;

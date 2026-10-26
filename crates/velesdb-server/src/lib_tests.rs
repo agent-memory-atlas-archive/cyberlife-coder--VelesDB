@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::Value;
 
 #[test]
 fn test_openapi_spec_generation() {
@@ -79,6 +80,109 @@ fn test_openapi_has_schemas() {
     );
 }
 
+/// The published OpenAPI document, as JSON.
+fn openapi_json() -> Value {
+    let json = ApiDoc::openapi()
+        .to_json()
+        .expect("Failed to serialize OpenAPI spec");
+    serde_json::from_str(&json).expect("the spec is JSON")
+}
+
+/// Whether a request body `schema` carries an `ef_search`: as its own
+/// The bounds the document publishes for `ef_search`, in every schema that
+/// carries one, are the validator's. utoipa's `minimum` and `maximum` take
+/// only a literal, so this pins the literals to
+/// `velesdb_core::api_types::{MIN_EF_SEARCH, MAX_EF_SEARCH}` (#2274).
+#[test]
+fn test_openapi_ef_search_bounds_are_the_validators() {
+    let spec = openapi_json();
+    let carrying: Vec<(&String, &Value)> = spec["components"]["schemas"]
+        .as_object()
+        .expect("schemas")
+        .iter()
+        .filter_map(|(name, schema)| schema["properties"].get("ef_search").map(|ef| (name, ef)))
+        .collect();
+    assert!(
+        carrying
+            .iter()
+            .any(|(name, _)| name.as_str() == "SearchRequest"),
+        "SearchRequest carries an ef_search"
+    );
+    for (name, ef) in carrying {
+        assert_eq!(
+            ef["minimum"],
+            serde_json::json!(velesdb_core::api_types::MIN_EF_SEARCH),
+            "{name}: {ef}"
+        );
+        assert_eq!(
+            ef["maximum"],
+            serde_json::json!(velesdb_core::api_types::MAX_EF_SEARCH),
+            "{name}: {ef}"
+        );
+    }
+}
+
+/// Every path taking a JSON body documents the `422` axum answers for one it
+/// cannot deserialise.
+///
+/// The filter used to be "carries an `ef_search`", which was the right scope
+/// for #2274 and too narrow from the day it merged: axum's `Json<T>` extractor
+/// rejects a malformed body before the handler runs, whatever fields the body
+/// declares. Measured on develop@a5098d3bb, 21 of the 27 operations taking an
+/// `application/json` body documented no 422, so a generated client had no type
+/// for a response those endpoints can return (#2291).
+///
+/// Derived from the spec rather than from a list of paths: a list is what let
+/// twenty-one of them sit outside the check, and a new endpoint would have sat
+/// outside it too.
+#[test]
+fn test_openapi_paths_taking_a_json_body_document_422() {
+    let spec = openapi_json();
+    let taking: Vec<(&String, &Value)> = spec["paths"]
+        .as_object()
+        .expect("paths")
+        .iter()
+        .flat_map(|(path, ops)| {
+            let ops = ops.as_object().expect("operations");
+            ops.values().map(move |op| (path, op))
+        })
+        .filter(|(_, op)| {
+            op["requestBody"]["content"]
+                .get("application/json")
+                .is_some()
+        })
+        .collect();
+    assert!(
+        taking.len() > 20,
+        "only {} operations take a JSON body — the spec or this filter broke, \
+         not the declarations",
+        taking.len()
+    );
+    // The two #2274 pinned by name, kept so a filter that silently stopped
+    // matching would be caught by something other than a shrinking count.
+    for known in [
+        "/collections/{name}/search",
+        "/collections/{name}/search/batch",
+    ] {
+        assert!(
+            taking.iter().any(|(path, _)| path.as_str() == known),
+            "{known} takes a JSON body"
+        );
+    }
+    let undocumented: Vec<&str> = taking
+        .iter()
+        .filter(|(_, op)| op["responses"].get("422").is_none())
+        .map(|(path, _)| path.as_str())
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "{} of {} operations taking a JSON body document no 422: {undocumented:?}. \
+         A client generated from this document has no type for a response they answer.",
+        undocumented.len(),
+        taking.len()
+    );
+}
+
 /// Regenerates `docs/openapi.{json,yaml}` in place instead of only
 /// comparing against them. Opt-in via `UPDATE_OPENAPI_SNAPSHOT=1` so that
 /// a plain `cargo test` — including the default parallel test threads —
@@ -103,7 +207,15 @@ fn generate_openapi_spec_files() {
     let json = openapi
         .to_pretty_json()
         .expect("Failed to serialize OpenAPI JSON");
-    let yaml = serde_yaml::to_string(&openapi).expect("Failed to serialize OpenAPI YAML");
+    let yaml = serde_saphyr::to_string_with_options(
+        &openapi,
+        serde_saphyr::ser_options! {
+            prefer_block_scalars: false,
+            yaml_12: true,
+            no_lang_directive: true,
+        },
+    )
+    .expect("Failed to serialize OpenAPI YAML");
 
     // docs/ relative to workspace root
     let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -186,6 +298,26 @@ fn test_openapi_pretty_json() {
     assert!(
         pretty_json.len() > 1000,
         "OpenAPI spec should be substantial"
+    );
+}
+
+/// Regression guard for #2263. utoipa copies doc comments into the document
+/// as they are written, and only rustdoc resolves an intra-doc link: a
+/// client, or an SDK generated from the document, shows `` [`Point`] `` as
+/// literal brackets. The doc comment of an item the document exposes names it
+/// with a code span instead, and this test fails on any link syntax left in a
+/// published description or summary. It reads them with pulldown-cmark, as
+/// rustdoc does, through the guard velesdb-memory checks its MCP schemas
+/// with (`velesdb-rustdoc-guard`, #2330), not a hand-written scan.
+#[test]
+fn test_openapi_descriptions_carry_no_rustdoc_link() {
+    let doc = serde_json::to_value(ApiDoc::openapi()).expect("test: the document serializes");
+    let linked =
+        velesdb_rustdoc_guard::strings_with_rustdoc_links(&doc, &["description", "summary"]);
+    assert!(
+        linked.is_empty(),
+        "rustdoc link syntax published at {linked:?}: name the item with a code span in its \
+         doc comment instead"
     );
 }
 

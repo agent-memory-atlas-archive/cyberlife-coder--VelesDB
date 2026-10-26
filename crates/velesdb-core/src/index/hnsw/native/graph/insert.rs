@@ -6,6 +6,17 @@ use super::{NativeHnsw, NO_ENTRY_POINT};
 use crate::perf_optimizations::ContiguousVectors;
 use std::sync::atomic::Ordering;
 
+/// Headroom the slow path of `expand_layers` adds past the node that needs
+/// it, as a fraction of the capacity already covered: growing by an eighth
+/// keeps the number of `layers.write` growths logarithmic in the index size,
+/// and the slots it adds that no node uses yet to an eighth of them, or
+/// `MIN_CAPACITY_GROWTH`.
+const CAPACITY_GROWTH_DIVISOR: usize = 8;
+
+/// Floor of that headroom, so a small index does not take `layers.write`
+/// every few inserts.
+const MIN_CAPACITY_GROWTH: usize = 256;
+
 impl<D: DistanceEngine> NativeHnsw<D> {
     /// Allocates vector storage if needed and pushes the vector, returning its node ID.
     ///
@@ -23,7 +34,11 @@ impl<D: DistanceEngine> NativeHnsw<D> {
             // Through `new_arena`, not `ContiguousVectors::new`: a graph whose
             // arena belongs on disk must get a mapped one here too, or the
             // lazy path would silently hand back a heap arena (#2112).
-            *guard = Some(Self::new_arena(self.arena_home.as_ref(), vector.len(), 16)?);
+            *guard = Some(Self::new_arena(
+                self.arena_home.as_ref(),
+                vector.len(),
+                ContiguousVectors::MIN_ARENA_CAPACITY,
+            )?);
         }
         let storage = guard.as_mut().ok_or_else(|| {
             crate::error::Error::Internal("Vector storage missing after init".to_string())
@@ -53,17 +68,7 @@ impl<D: DistanceEngine> NativeHnsw<D> {
             15
         };
 
-        let mut layers = self.layers.write();
-        while layers.len() <= max_layer {
-            layers.push(Layer::new(total_nodes));
-        }
-        for layer in layers.iter_mut() {
-            layer.ensure_capacity(total_nodes.saturating_sub(1));
-        }
-        // The capacity counter is atomic and independent of the layer data.
-        drop(layers);
-        self.pre_allocated_capacity
-            .store(total_nodes, Ordering::Relaxed);
+        self.grow_layers(max_layer, total_nodes);
     }
 
     /// Ensures all layers up to `node_layer` exist and have capacity for `node_id`.
@@ -74,14 +79,46 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         {
             return;
         }
-        // Slow path: acquire write lock (rare after pre-allocation)
+        // Slow path: past the capacity, grow it with headroom, so the inserts
+        // that follow return to the fast path instead of each taking
+        // `layers.write` (#2306); a missing layer alone keeps the capacity.
+        let covered = self.pre_allocated_capacity.load(Ordering::Relaxed);
+        let capacity = if node_id < covered {
+            covered
+        } else {
+            node_id + 1 + (covered / CAPACITY_GROWTH_DIVISOR).max(MIN_CAPACITY_GROWTH)
+        };
+        self.grow_layers(node_layer, capacity);
+    }
+
+    /// Adds the layers up to `top_layer` and grows every layer to at least
+    /// `capacity` slots, then publishes the capacity to the fast path of
+    /// [`Self::expand_layers`].
+    ///
+    /// Keeps the invariant that fast path relies on: every layer holds at
+    /// least `pre_allocated_capacity` slots. A layer added here therefore
+    /// covers what the fast path already trusts, not only the node that
+    /// created it: `Layer`'s accessors skip an id past a layer's end in
+    /// silence, so a shorter layer would drop the neighbour writes of every
+    /// later node sent to it. The capacity only grows, whatever `capacity`
+    /// asks for.
+    fn grow_layers(&self, top_layer: usize, capacity: usize) {
         let mut layers = self.layers.write();
-        while layers.len() <= node_layer {
-            layers.push(Layer::new(node_id + 1));
+        let capacity = capacity.max(self.pre_allocated_capacity.load(Ordering::Relaxed));
+        while layers.len() <= top_layer {
+            let level = layers.len();
+            layers.push(Layer::at_level(level, capacity));
         }
-        for layer in layers.iter_mut() {
-            layer.ensure_capacity(node_id);
+        if let Some(last) = capacity.checked_sub(1) {
+            for layer in layers.iter_mut() {
+                layer.ensure_capacity(last);
+            }
         }
+        // Stored under the write guard: a fast-path reader that sees the new
+        // capacity takes `layers.read()` afterwards, which cannot be granted
+        // before this guard is released.
+        self.pre_allocated_capacity
+            .fetch_max(capacity, Ordering::Relaxed);
     }
 
     /// Inserts a vector into the index.
@@ -97,21 +134,12 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         let query = self.prepare_query(vector);
 
         let node_id = self.allocate_and_store_vector(&query)?;
-        let node_layer = self.random_layer();
-        self.expand_layers(node_id, node_layer);
-
-        let ep = self.entry_point.load(Ordering::Acquire);
-        if ep != NO_ENTRY_POINT {
-            self.insert_with_entry_point(node_id, &query, node_layer, ep);
-        }
-
-        self.promote_entry_point(node_id, node_layer);
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.link_node(node_id, &query);
 
         // Invalidate GPU caches — topology and vectors both changed.
-        // `vectors.write()` is already released at this point (the caller
-        // chain `allocate_and_store_vector → with_vectors_write` drops it
-        // before returning), so the `gpu_vectors_snapshot` acquisition
+        // `vectors.write()` is already released at this point
+        // (`allocate_and_store_vector` drops its own write guard before
+        // returning), so the `gpu_vectors_snapshot` acquisition
         // inside the helper does not nest inside the vectors lock and
         // respects the declared order
         // (`GpuVectorsSnapshot` rank 5 → `Vectors` rank 10).
@@ -121,57 +149,124 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         Ok(node_id)
     }
 
-    /// Atomically updates the entry point if the index is empty or the node
-    /// reaches a higher layer than the current maximum.
+    /// Links `node_id`, whose vector the arena already holds, with `query`,
+    /// the prepared form of that vector: draws the node's layer, makes room
+    /// for it in the layers, and connects it through the entry point.
+    pub(in crate::index::hnsw::native) fn link_node(&self, node_id: NodeId, query: &[f32]) {
+        let node_layer = self.random_layer();
+        self.expand_layers(node_id, node_layer);
+        let entry_point = self.entry_point.load(Ordering::Acquire);
+        self.link_new_node(node_id, query, node_layer, entry_point);
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Links a node just placed into the graph, given the entry point it saw.
     ///
-    /// Uses lock-free CAS loops instead of a mutex. Entry-point promotion is
-    /// extremely rare (O(log_M(N)) times per index lifetime), so the CAS loop
-    /// almost never retries. Two separate CAS operations handle the two cases:
+    /// A node that saw none claims the empty graph's entry point. Losing that
+    /// claim means another node won it in between: this one then connects
+    /// through the winner like any other insert, instead of staying with no
+    /// edge at all (#2259).
+    fn link_new_node(&self, node_id: NodeId, query: &[f32], node_layer: usize, seen: NodeId) {
+        let entry_point = if seen == NO_ENTRY_POINT {
+            match self.claim_first_entry_point(node_id, node_layer) {
+                None => return,
+                Some(winner) => winner,
+            }
+        } else {
+            seen
+        };
+        self.insert_with_entry_point(node_id, query, node_layer, entry_point);
+        self.anchor_one(node_id);
+        self.promote_entry_point(node_id, node_layer);
+    }
+
+    /// Claims an empty graph's entry point for `node_id`.
     ///
-    /// 1. **Empty index**: CAS on `entry_point` from `NO_ENTRY_POINT` to `node_id`.
-    /// 2. **Layer promotion**: CAS on `max_layer` from `current_max` to `node_layer`.
-    ///    Only the CAS winner updates `entry_point`, ensuring consistency.
+    /// Returns `None` when `node_id` is now the entry point, or the node
+    /// that claimed it first. The claim and `max_layer` move together under
+    /// the promotion lock, so no promotion lands between them; a graph that
+    /// already has an entry point returns before taking the lock.
+    pub(in crate::index::hnsw::native) fn claim_first_entry_point(
+        &self,
+        node_id: NodeId,
+        node_layer: usize,
+    ) -> Option<NodeId> {
+        let seen = self.entry_point.load(Ordering::Acquire);
+        if seen != NO_ENTRY_POINT {
+            return Some(seen);
+        }
+        self.with_promotion_lock(|| {
+            match self.entry_point.compare_exchange(
+                NO_ENTRY_POINT,
+                node_id,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // An empty graph's `max_layer` is 0, and only this lock
+                    // writes it.
+                    self.max_layer.store(node_layer, Ordering::Release);
+                    None
+                }
+                Err(winner) => Some(winner),
+            }
+        })
+    }
+
+    /// `insert` for a node that saw an empty graph although another node has
+    /// claimed its entry point since: the losing side of the first-insert
+    /// race, which no schedule reproduces on demand.
+    #[cfg(test)]
+    pub(in crate::index::hnsw::native) fn insert_seeing_no_entry_point(
+        &self,
+        vector: &[f32],
+    ) -> crate::error::Result<NodeId> {
+        let query = self.prepare_query(vector);
+        let node_id = self.allocate_and_store_vector(&query)?;
+        let node_layer = self.random_layer();
+        self.expand_layers(node_id, node_layer);
+        self.link_new_node(node_id, &query, node_layer, NO_ENTRY_POINT);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        Ok(node_id)
+    }
+
+    /// Makes `node_id` the entry point when the index is empty, or when the
+    /// node reaches a higher layer than the current maximum.
     ///
-    /// Between `max_layer` CAS success and `entry_point` store, a concurrent
-    /// reader may see the new `max_layer` with the old `entry_point`. This is
-    /// safe: `search_layer_single` returns `None` (via `with_neighbors`) for
-    /// layers where the old EP has no edges, causing a no-op greedy descent.
+    /// Readers load `entry_point` and `max_layer` without a lock. Writers take
+    /// the promotion lock, and the check, the two stores and
+    /// [`Self::reparent_entry_point`] run in it as one step: two promotions
+    /// that overlapped could reparent in the wrong order, the later one's
+    /// clearing the anchor the earlier one had just given its node, and strand
+    /// the tree below it (#2259). Promotion is rare (O(log_M(N)) times per
+    /// index lifetime), and a node at or below the maximum layer, the common
+    /// case, returns before taking the lock.
+    ///
+    /// Between the `max_layer` store and the swap, a concurrent reader may see
+    /// the new `max_layer` with the old `entry_point`. This is safe:
+    /// `search_layer_single` finds no neighbour of the old EP at a layer where
+    /// it has no edges, and returns it unchanged: a no-op greedy descent.
     pub(in crate::index::hnsw::native) fn promote_entry_point(
         &self,
         node_id: NodeId,
         node_layer: usize,
     ) {
-        // Case 1: First insert — race to set entry_point from NO_ENTRY_POINT.
-        if self.entry_point.load(Ordering::Acquire) == NO_ENTRY_POINT {
-            // CAS: only one thread wins the first-insert race.
-            if self
-                .entry_point
-                .compare_exchange(NO_ENTRY_POINT, node_id, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.max_layer.store(node_layer, Ordering::Release);
+        if self.entry_point.load(Ordering::Acquire) == NO_ENTRY_POINT
+            && self.claim_first_entry_point(node_id, node_layer).is_none()
+        {
+            return;
+        }
+        if node_layer <= self.max_layer.load(Ordering::Acquire) {
+            return;
+        }
+        self.with_promotion_lock(|| {
+            if node_layer <= self.max_layer.load(Ordering::Acquire) {
                 return;
             }
-            // Another thread won — fall through to layer promotion check.
-        }
-
-        // Case 2: Layer promotion — CAS loop on max_layer.
-        loop {
-            let current_max = self.max_layer.load(Ordering::Acquire);
-            if node_layer <= current_max {
-                break; // No promotion needed — most common case.
-            }
-            // Try to atomically claim the new max_layer. Only the CAS
-            // winner updates entry_point; losers retry the loop.
-            if self
-                .max_layer
-                .compare_exchange(current_max, node_layer, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.entry_point.store(node_id, Ordering::Release);
-                break;
-            }
-        }
+            self.max_layer.store(node_layer, Ordering::Release);
+            let previous = self.entry_point.swap(node_id, Ordering::AcqRel);
+            self.reparent_entry_point(previous, node_id);
+        });
     }
 
     /// Batch-allocates vectors and assigns random layers.
@@ -236,6 +331,20 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         Ok(assignments)
     }
 
+    /// Phase A of a batch insert for nodes the arena already holds: makes room
+    /// for every slot in the layers, as [`Self::allocate_batch`] does, and
+    /// draws each node's layer, in input order.
+    pub(in crate::index::hnsw::native) fn assign_layers(
+        &self,
+        nodes: &[NodeId],
+    ) -> Vec<(NodeId, usize)> {
+        self.pre_expand_layers(self.with_vectors_read(ContiguousVectors::len));
+        nodes
+            .iter()
+            .map(|&node| (node, self.random_layer()))
+            .collect()
+    }
+
     /// Initializes vector storage if needed and pre-reserves capacity.
     ///
     /// Cold path: the write lock may be held during a buffer resize.
@@ -252,7 +361,7 @@ impl<D: DistanceEngine> NativeHnsw<D> {
             *guard = Some(Self::new_arena(
                 self.arena_home.as_ref(),
                 dimension,
-                batch_size.max(16),
+                batch_size,
             )?);
         }
         let storage = guard.as_mut().ok_or_else(|| {
@@ -285,11 +394,38 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         let storage = guard.as_mut().ok_or_else(|| {
             crate::error::Error::Internal("Vector storage missing after reserve".to_string())
         })?;
+        self.push_stored_form(storage, vectors)
+    }
+
+    /// Pushes `vectors` into the arena without linking them into the graph,
+    /// and returns the first slot: the direct writer's placement, which
+    /// [`Self::link_placed`] links later, where it is. Each vector is stored
+    /// as [`Self::allocate_batch`] stores it, under one write lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the arena is not initialized or cannot grow.
+    pub(in crate::index::hnsw) fn push_unlinked(
+        &self,
+        vectors: &[&[f32]],
+    ) -> crate::error::Result<NodeId> {
+        self.with_vectors_write(|storage| self.push_stored_form(storage, vectors))
+    }
+
+    /// Appends `vectors` to `storage` in the form this arena stores, and
+    /// returns the first slot: unit-norm when [`Self::stores_unit_norm`], as
+    /// given otherwise. The graph's batch insert and the direct writer both
+    /// push through here, so neither leaves a raw slot in an arena whose
+    /// `.vectors` declares unit-norm (#2246). The caller holds the vectors
+    /// write lock across the call.
+    fn push_stored_form(
+        &self,
+        storage: &mut ContiguousVectors,
+        vectors: &[&[f32]],
+    ) -> crate::error::Result<NodeId> {
         let first = storage.len();
         storage.push_batch(vectors)?;
-        if self.distance.is_pre_normalized()
-            && self.distance.metric() == crate::DistanceMetric::Cosine
-        {
+        if self.stores_unit_norm() {
             for i in first..storage.len() {
                 // `i` is in `first..storage.len()`, i.e. a slot we just pushed,
                 // so `get_mut` is always `Some`. Assert it: a `None` here would
@@ -395,3 +531,7 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         self.connect_node(node_id, query, node_layer, current_ep);
     }
 }
+
+#[cfg(test)]
+#[path = "insert_tests.rs"]
+mod tests;

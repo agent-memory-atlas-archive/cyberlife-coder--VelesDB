@@ -53,50 +53,91 @@ pub enum ConfigError {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SearchMode {
-    /// Fast search with `ef_search=96`, ~95% recall.
+    /// Fast search with `ef_search=96`: 97.4% recall@10 in `recall_benchmark`
+    /// (10K random 128-D points).
     Fast,
-    /// Balanced search with `ef_search=160`, ~99.5% recall (default).
+    /// Balanced search with `ef_search=160`: 99.8% recall@10 in
+    /// `recall_benchmark` (default).
     #[default]
     Balanced,
-    /// Accurate search with `ef_search=512`, ~100% recall.
+    /// Accurate search with `ef_search=512`: 100% recall@10 in
+    /// `recall_benchmark`, 0.98 on SIFT1M's 1M (`docs/BENCHMARKS.md`).
     Accurate,
-    /// Perfect recall via **exhaustive bruteforce** (`ef_search = usize::MAX`
-    /// signals a full scan): every vector is scored, no HNSW graph traversal, so
-    /// recall is 100% by construction at O(n) cost.
+    /// The engine's highest-recall mode, and the one value of this enum that no
+    /// `ef_search` number can express.
     ///
-    /// Distinct from `SearchQuality::Perfect`
-    /// (`crate::index::hnsw::SearchQuality`) despite the shared name:
-    /// `SearchMode` picks the **engine** (bruteforce here vs. the HNSW graph),
-    /// whereas `SearchQuality::Perfect` stays *on* the graph with a very high
-    /// `ef_search` (`4096.max(k*100)`) — ~1.0 recall up to ~100K, ~0.9994 at 1M,
-    /// at graph cost rather than a full scan. Pick `SearchMode::Perfect` only
-    /// when an exact guarantee is worth the linear scan.
+    /// Per query it maps, through `SearchMode::quality()`, to
+    /// `SearchQuality::Perfect`: an exhaustive scan that leaves the graph,
+    /// the exact top-k, ties aside, at O(n) cost, refused on a collection larger
+    /// than `limits.max_perfect_mode_vectors`. As a GLOBAL default in `[search]`
+    /// it is applied as `accurate`, with a warning at load, because one search
+    /// path cannot enforce that cap.
+    ///
+    /// This doc said the opposite until #2246 — that `SearchQuality::Perfect`
+    /// "stays on the graph" at `ef_search = 4096`. `try_search_special_quality`
+    /// routes it to `search_brute_force`. #2239 corrected that claim in
+    /// `params.rs` and missed this copy of it.
     Perfect,
 }
 
 impl SearchMode {
     /// Returns the `ef_search` value for this mode.
+    ///
+    /// **Lossy for [`Self::Perfect`], which is why wiring must not use it.**
+    /// `usize::MAX` was written as a bruteforce sentinel and nothing reads it as
+    /// one: the only conversion available, `ef_to_quality`, turns it into
+    /// `SearchQuality::Custom(usize::MAX)` — an uncapped graph traversal that is
+    /// neither exhaustive nor covered by `limits.max_perfect_mode_vectors`.
+    /// A config asking for `perfect` would get a silently downgraded mode and a
+    /// bypassed guard rail. Use [`Self::quality`] instead (#2238).
     #[must_use]
     pub fn ef_search(&self) -> usize {
         match self {
             Self::Fast => 96,
             Self::Balanced => 160,
             Self::Accurate => 512,
-            Self::Perfect => usize::MAX, // Signals bruteforce
+            Self::Perfect => usize::MAX,
+        }
+    }
+
+    /// Returns the [`SearchQuality`](crate::SearchQuality) this mode means.
+    ///
+    /// The lossless counterpart to [`Self::ef_search`]: every mode maps onto a
+    /// named quality, including `Perfect`, which no `ef_search` number can
+    /// express because the engine special-cases the variant rather than the
+    /// value. This is the conversion the `[search]` wiring of issue #2087 must
+    /// use.
+    ///
+    /// Gated on `persistence`, like `SearchQuality`'s own export: without that
+    /// feature there is no HNSW index for a quality to describe. `SearchMode`
+    /// itself stays available, because a config file parses on every build.
+    #[cfg(feature = "persistence")]
+    #[must_use]
+    pub fn quality(&self) -> crate::SearchQuality {
+        match self {
+            Self::Fast => crate::SearchQuality::Fast,
+            Self::Balanced => crate::SearchQuality::Balanced,
+            Self::Accurate => crate::SearchQuality::Accurate,
+            Self::Perfect => crate::SearchQuality::Perfect,
         }
     }
 }
 
 /// Search configuration section.
 ///
-/// **Reserved — parsed and validated, not yet applied.** `[limits]` and
-/// `[hnsw]` reach the engine; this section does not.
-/// [`VelesConfig::validate`] warns when it deviates from its defaults so a
-/// config cannot silently promise behavior the engine does not deliver.
-/// Wiring is tracked in issue #2087 — `query_timeout_ms` in particular needs
-/// a query timeout the engine does not have, which is a feature of its own.
+/// **Half applied.** `default_mode` and `ef_search` reach the engine since
+/// #2087: an unqualified `search()` resolves through
+/// [`SearchConfig::resolved_quality`], with `ef_search` winning over
+/// `default_mode` when both are set.
+///
+/// `max_results` and `query_timeout_ms` are still inert and still warned about
+/// by [`VelesConfig::validate`], field by field. They are not oversights:
+/// clamping a caller's `LIMIT` silently is a footgun and erroring is a breaking
+/// change under a *default* config, while a query timeout is a feature the
+/// engine does not have. Both need a decision, not plumbing.
+///
 /// Per-query runtime overrides (`WITH (ef_search = N)`) are a separate,
-/// working mechanism.
+/// working mechanism and continue to win over anything here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
@@ -108,6 +149,46 @@ pub struct SearchConfig {
     pub max_results: usize,
     /// Query timeout in milliseconds.
     pub query_timeout_ms: u64,
+}
+
+impl SearchConfig {
+    /// The [`SearchQuality`](crate::SearchQuality) an unqualified `search()`
+    /// resolves to under this section.
+    ///
+    /// `ef_search` wins over `default_mode` when set, which is what the field's
+    /// own doc has always promised ("if set, overrides mode") and what nothing
+    /// used to honour, the section being inert.
+    ///
+    /// Goes through [`SearchMode::quality`] rather than
+    /// [`SearchMode::ef_search`] on purpose: the latter cannot express
+    /// `Perfect`, and routing through it would hand a `perfect` config an
+    /// uncapped traversal with `max_perfect_mode_vectors` bypassed (#2238).
+    ///
+    /// `Perfect` itself is applied as `Accurate` here. A per-query `Perfect` is
+    /// an exhaustive scan capped by `enforce_perfect_mode_limit`; as a global
+    /// default it could not be applied at all: a filtered search's bitmap
+    /// pre-filter never reads the configured quality — it traverses the graph at
+    /// its own ef — so a `perfect` default would scan on some queries and
+    /// traverse on others. `VelesConfig::validate` warns when this downgrade
+    /// happens rather than failing the load.
+    ///
+    /// Available only with the `persistence` feature, the only build that
+    /// exports [`SearchQuality`](crate::SearchQuality).
+    #[cfg(feature = "persistence")]
+    #[must_use]
+    pub fn resolved_quality(&self) -> crate::SearchQuality {
+        self.ef_search.map_or_else(
+            || match self.default_mode {
+                // Applied as `Accurate`, and warned about at load by
+                // `validate()`: a filtered search's bitmap pre-filter never
+                // reads this quality, so a global `Perfect` would scan on some
+                // queries and traverse on others (see the doc above).
+                SearchMode::Perfect => crate::SearchQuality::Accurate,
+                mode => mode.quality(),
+            },
+            crate::SearchQuality::Custom,
+        )
+    }
 }
 
 impl Default for SearchConfig {
@@ -172,32 +253,28 @@ pub mod server {
 
     /// Storage configuration section.
     ///
-    /// **Reserved — parsed and validated, not yet applied.** `[limits]`
-    /// and `[hnsw]` reach the engine; this section does not.
-    /// `VelesConfig::validate` warns when it deviates from its defaults.
-    /// Wiring is tracked in issue #2087 (`data_dir` in particular conflicts
-    /// with the path passed to `Database::open` and may go through
-    /// deprecation instead).
+    /// **Reserved.** `storage_mode` is parsed and validated but not applied,
+    /// pending its own decision (distinct from `quantization::StorageMode`;
+    /// whether the engine has a memory-only mode to select is not
+    /// established). [`crate::config::VelesConfig::validate`] warns when it
+    /// is set away from its default.
+    ///
+    /// `data_dir`, `mmap_cache_mb` and `vector_alignment` were removed in
+    /// 7.0.0 (#2087): none of them had an engine counterpart, and
+    /// `data_dir` conflicted irreducibly with the path passed to
+    /// `Database::open`. A file that still sets one loads, and the loader
+    /// names it in a warning.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(default)]
     pub struct StorageConfig {
-        /// Data directory path.
-        pub data_dir: String,
         /// Storage mode: `"mmap"` or `"memory"`.
         pub storage_mode: String,
-        /// Mmap cache size in megabytes.
-        pub mmap_cache_mb: usize,
-        /// Vector alignment in bytes.
-        pub vector_alignment: usize,
     }
 
     impl Default for StorageConfig {
         fn default() -> Self {
             Self {
-                data_dir: "./velesdb_data".to_string(),
                 storage_mode: "mmap".to_string(),
-                mmap_cache_mb: 1024,
-                vector_alignment: 64,
             }
         }
     }
@@ -291,69 +368,6 @@ impl Default for LimitsConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// WAL batch commit configuration
-// ---------------------------------------------------------------------------
-
-/// Default commit delay in microseconds for WAL group commit.
-const fn default_commit_delay_us() -> u64 {
-    100
-}
-
-/// Default maximum entries per WAL batch.
-const fn default_max_batch_size() -> usize {
-    128
-}
-
-/// Configuration for WAL group commit batching.
-///
-/// **Deprecated — parsed and ignored.** Setting `enabled = true` changes
-/// nothing: no group commit occurs, and every write keeps its own durability
-/// barrier (the batch APIs already amortize to one barrier per call).
-/// [`VelesConfig::validate`] logs a warning when the flag is set so a config
-/// cannot promise behavior the engine does not deliver.
-///
-/// Issue #2078 resolved to retire this rather than wire it: the `WalBatcher`
-/// it configured acknowledged a write before its bytes were durable, so it was
-/// a write coalescer and not a group-commit protocol, and its `commit_delay_us`
-/// was read by nothing — not even the batcher. The module is deleted. This
-/// struct and the `[wal_batch]` table stay only so existing TOML files keep
-/// loading; both go at the next major, which is the Rust API break.
-///
-/// When wired, group commit would batch multiple concurrent writes into a
-/// single `sync_all()` call, amortizing the fsync cost across the batch.
-///
-/// # Example (TOML)
-///
-/// ```toml
-/// [wal_batch]
-/// enabled = true
-/// commit_delay_us = 200
-/// max_batch_size = 256
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalBatchConfig {
-    /// Whether group commit is enabled. Default: `false`.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Maximum delay in microseconds before flushing a batch. Default: `100`.
-    #[serde(default = "default_commit_delay_us")]
-    pub commit_delay_us: u64,
-    /// Maximum number of entries per batch. Default: `128`.
-    #[serde(default = "default_max_batch_size")]
-    pub max_batch_size: usize,
-}
-
-impl Default for WalBatchConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            commit_delay_us: 100,
-            max_batch_size: 128,
-        }
-    }
-}
-
 /// Main `VelesDB` configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -372,8 +386,6 @@ pub struct VelesConfig {
     pub logging: LoggingConfig,
     /// Quantization configuration.
     pub quantization: QuantizationConfig,
-    /// WAL group commit batching configuration.
-    pub wal_batch: WalBatchConfig,
 }
 
 impl VelesConfig {
@@ -412,12 +424,16 @@ impl VelesConfig {
     /// another cannot claim its variables (none do today; the ordering keeps
     /// that true for whatever is added next).
     ///
+    /// The tables a release removed are not listed: they are no field of this
+    /// struct. [`Self::env_key_to_config_path`] still splits at them, from
+    /// `config_removed`, so their variables are named by the removal warning
+    /// instead of flattening into a key nothing reports.
+    ///
     /// Wider than [`Self::ENGINE_SECTIONS`] on purpose: `server` and
     /// `logging` are fields here too, and a variable naming one must resolve
     /// to that field rather than fall through as an unprefixed key.
     const ENV_SECTIONS: &'static [&'static str] = &[
         "quantization",
-        "wal_batch",
         "logging",
         "storage",
         "limits",
@@ -447,7 +463,11 @@ impl VelesConfig {
     /// engine variable reached its field.
     pub(crate) fn env_key_to_config_path(key: &UncasedStr) -> Uncased<'_> {
         let lowered = key.as_str().to_ascii_lowercase();
-        for section in Self::ENV_SECTIONS {
+        let sections = Self::ENV_SECTIONS
+            .iter()
+            .copied()
+            .chain(crate::config_removed::removed_sections());
+        for section in sections {
             if let Some(field) = lowered
                 .strip_prefix(section)
                 .and_then(|rest| rest.strip_prefix('_'))
@@ -493,29 +513,31 @@ impl VelesConfig {
     /// otherwise have that table parsed into *this* struct too and
     /// rejected by [`Self::validate`]'s rules for a value it was never
     /// meant to apply to. See [`Self::load_from_path_engine_only`].
-    const ENGINE_SECTIONS: &'static [&'static str] = &[
-        "search",
-        "hnsw",
-        "storage",
-        "limits",
-        "quantization",
-        "wal_batch",
-    ];
+    const ENGINE_SECTIONS: &'static [&'static str] =
+        &["search", "hnsw", "storage", "limits", "quantization"];
 
-    /// Drops every top-level TOML table not in [`Self::ENGINE_SECTIONS`].
+    /// Drops every top-level TOML table not in [`Self::ENGINE_SECTIONS`],
+    /// except a table a release removed: that one is kept so the loader can
+    /// name it in its removal warning, and extraction then ignores it like
+    /// any key no field claims.
     fn filter_to_engine_sections(raw: &str) -> Result<String, ConfigError> {
         let mut doc: toml::Value =
             toml::from_str(raw).map_err(|e| ConfigError::ParseError(e.to_string()))?;
         if let Some(table) = doc.as_table_mut() {
-            table.retain(|k, _| Self::ENGINE_SECTIONS.contains(&k));
+            table.retain(|k, _| {
+                Self::ENGINE_SECTIONS.contains(&k)
+                    || crate::config_removed::removed_sections().any(|removed| removed == k)
+            });
         }
         toml::to_string(&doc).map_err(|e| ConfigError::ParseError(e.to_string()))
     }
 
     /// Loads configuration from a specific file path, considering **only**
     /// the engine sections (`[search]`/`[hnsw]`/`[storage]`/`[limits]`/
-    /// `[quantization]`/`[wal_batch]`) and silently dropping any other
-    /// top-level table before parsing — notably `[server]` and `[logging]`.
+    /// `[quantization]`) and silently dropping any other top-level table
+    /// before parsing — notably `[server]` and `[logging]`. A table a release
+    /// removed is the one exception: it is not applied either, but it is
+    /// named in a warning rather than dropped without a word.
     ///
     /// Use this instead of [`Self::load_from_path`] when the TOML file is
     /// **shared** with a hosting shell that owns its own `[server]`/
@@ -558,10 +580,14 @@ impl VelesConfig {
     /// Shared tail of `load_from_path`, `from_toml`, and
     /// `load_from_path_engine_only`, which differ only in how `figment` is
     /// assembled.
+    ///
+    /// The removal warning is raised here, from the merged sources, because
+    /// the extracted struct no longer has anywhere to hold a removed key.
     fn finish(figment: &Figment) -> Result<Self, ConfigError> {
         let config: Self = figment
             .extract()
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        crate::config_removed::warn_removed_keys(figment);
         config.validate()?;
         Ok(config)
     }
@@ -584,8 +610,9 @@ impl VelesConfig {
     /// Returns the effective `ef_search` value.
     #[deprecated(
         since = "5.2.0",
-        note = "never read by the engine — [search] is not applied (issue #2087); \
-                query-time WITH (ef_search = N) is the working override"
+        note = "the engine resolves `[search]` through `SearchConfig::resolved_quality` \
+                since #2087, not through this; it returns usize::MAX for Perfect, \
+                a value nothing reads as a signal (#2238)"
     )]
     #[must_use]
     pub fn effective_ef_search(&self) -> usize {

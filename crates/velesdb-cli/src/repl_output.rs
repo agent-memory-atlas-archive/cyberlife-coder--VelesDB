@@ -60,7 +60,7 @@ pub fn print_table(rows: &[HashMap<String, serde_json::Value>]) {
 
     let mut table = Table::new();
     table
-        .load_preset(UTF8_FULL)
+        .load_style(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
 
     // Header
@@ -240,7 +240,10 @@ pub fn print_help() {
     println!();
     println!("{}", "Session Settings:".bold().underline());
     println!();
-    println!("  {} fast, balanced, accurate, perfect", "mode".cyan());
+    println!(
+        "  {} fast, balanced, accurate, perfect (unset: [search] of the --config file)",
+        "mode".cyan()
+    );
     println!("  {} 16-4096 (or auto from mode)", "ef_search".cyan());
     println!("  {} Query timeout in ms", "timeout_ms".cyan());
     println!("  {} Enable reranking (true/false)", "rerank".cyan());

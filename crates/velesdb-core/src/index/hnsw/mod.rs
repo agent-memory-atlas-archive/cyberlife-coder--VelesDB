@@ -6,9 +6,9 @@
 //! # Native Implementation (v1.0+)
 //!
 //! `VelesDB` uses a custom native HNSW implementation that is:
-//! - **1.2x faster search** than external libraries
-//! - **1.07x faster parallel insert**
-//! - **~99% recall parity** with no accuracy loss
+//! - **faster at search** than the `hnsw_rs` it replaced in 1.0.0
+//! - **faster at parallel insert** (history in `docs/reference/NATIVE_HNSW.md`)
+//! - **at recall parity** with it, with no accuracy loss
 //!
 //! # Module Organization
 //!
@@ -23,13 +23,17 @@ pub(crate) mod auto_ef;
 pub(crate) mod direct_writer;
 #[cfg(feature = "internal-bench")]
 pub(crate) mod eval_count;
-mod index;
+pub(crate) mod index;
 pub mod native;
 pub mod native_index;
 mod native_index_io;
 #[cfg(test)]
 mod native_index_tests;
 mod native_inner;
+/// The placement token, for tests outside this module that drive the mappings
+/// directly (`Placed::for_test`).
+#[cfg(test)]
+pub(crate) use native_inner::Placed;
 mod params;
 pub(crate) mod persistence;
 mod sharded_mappings;
@@ -55,8 +59,6 @@ mod persistence_atomicity_tests;
 mod sharded_mappings_tests;
 #[cfg(test)]
 mod sidecar_removal_tests;
-#[cfg(test)]
-mod upsert_tests;
 
 // ============================================================================
 // Public API

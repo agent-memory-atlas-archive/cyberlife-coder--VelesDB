@@ -7,6 +7,1690 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-10-25
+
+> **MAJOR release.** The breaking changes are listed in
+> [`docs/guides/MIGRATION_v7.0.0.md`](docs/guides/MIGRATION_v7.0.0.md):
+> a search `mode` VelesQL or REST cannot parse, and an `ef_search` outside
+> `[16, 4096]` (as the option or inside a `custom:`/`adaptive:` mode), now fail
+> instead of running at the default quality or an uncapped traversal (#2267,
+> #2274, #2275); a collection's own `execute_aggregate` refuses a query the
+> validator rejects; the TypeScript SDK's WASM backend refuses arguments it
+> cannot apply (#2095). Removed: the aarch64-only `velesdb_core::simd_neon`
+> (#1965) and the never-applied `WalBatchConfig` / `[wal_batch]` and
+> `StorageConfig::{data_dir, mmap_cache_mb, vector_alignment}` promised for this
+> major (#2174, #2087). `utoipa` moves to 6.0.0 behind velesdb-core's `openapi`
+> feature (#2429): a downstream crate enabling that feature with its own
+> `utoipa 5` dependency no longer compiles. The on-disk format stays readable
+> both ways: `.vectors` v2 opens under 6.0.0. velesdb-migrate's public
+> `Error::Yaml` variant changes its payload from `serde_yaml::Error` to `String`
+> (RUSTSEC-2024-0449, under `### Changed`).
+
+### Security
+
+- **`unsafe-libyaml` / `serde_yaml` removed from the dependency tree
+  (RUSTSEC-2024-0449, unmaintained).** `serde_yaml` is archived and every fork
+  (`serde_yaml_ng`, `serde_yml`) still sits on `unsafe-libyaml`, so there was
+  no release to move to. `velesdb-migrate` (its migration config loader) and
+  `velesdb-server` (one OpenAPI snapshot test) now use `serde-saphyr`, a
+  safe-Rust YAML parser, and the advisory's `deny.toml` ignore is deleted:
+  `cargo deny check advisories` passes without it. Lockfile edited in place
+  (`serde-saphyr`, `granit-parser` and three small dependencies added,
+  `serde_yaml` and `unsafe-libyaml` dropped) and checked with
+  `cargo metadata --locked`. See `### Changed` for the API and parsing notes.
+- **`rustls` 0.23.43 → 0.23.45 (RUSTSEC-2026-0285: TLS 1.3 handshake
+  messages incorrectly accepted across encryption level boundaries).** The
+  advisory is dated 2026-09-14 (#2317's audit at 07:19 UTC that day still
+  passed); it turns the `Security Audit` gate red on `develop` and on every
+  open PR with an unchanged lockfile.
+  Lockfile only, `cargo update -p rustls --precise 0.23.45`, which also
+  moves `aws-lc-rs`, `aws-lc-sys` and `rustls-webpki` as rustls requires.
+- **Rust lockfiles: `rustls` 0.23.46, `rustls-webpki` 0.103.16, `tokio`
+  1.53.3, `webpki-roots` / `webpki-root-certs` 1.0.11 (#2463).** Advisories published
+  after the last audit turned `Security Audit` red on `develop` and every open
+  PR: RUSTSEC-2026-0346/-0347/-0348/-0349 (rustls), -0382 (rustls-webpki,
+  distrusted intermediates), -0381/-0383 (bundled emSign roots) and -0386
+  (tokio `AsyncFd`, unsound). The root lockfile and the Tauri demo's carry the
+  patched releases; each package's version and checksum was edited in place
+  and checked with `cargo metadata --locked`, because `cargo update` under the
+  pinned 1.90 toolchain also re-resolves unrelated `windows-sys` edges. Two
+  `unmaintained` advisories have no release to move to and are ignored in
+  `deny.toml` with their reason: RUSTSEC-2024-0449 (`unsafe-libyaml`, through
+  `serde_yaml` in velesdb-migrate) and RUSTSEC-2026-0374 (`basic-toml`, a
+  build-time dependency of uniffi's askama templates in velesdb-mobile).
+- **npm lockfiles: `vite` 8.3.5, `source-map-js` 1.2.2 (TypeScript SDK, Tauri
+  demo, React WASM example), `proxy-addr` 2.0.8, `body-parser` 2.4 and `zod` 4
+  (Express RAG example) (#2463).** The `npm advisories` gate refused four lockfiles
+  on high and critical advisories (GHSA-9jrq-w75r-8gcw and others in vite,
+  GHSA-68fv-2mgg-jv7q, GHSA-jqcg-44mw-7w3h, GHSA-27r3-jxmh-p828,
+  GHSA-mrhx-c7xc-m3w5). zod has no fixed 3.x, so the example moves to zod 4,
+  whose `z.record` takes the key schema explicitly.
+
+### Added
+- **`velesdb_core::fusion::sort_fused_results` (#2297).** Orders fused
+  `(id, score)` pairs by score descending, then id ascending, the order
+  every fusion path returns; for a caller that fuses on its own, as
+  `velesdb-wasm` does.
+- **`impl Display for WithValue` (#2274).** A `WITH` option value renders
+  in canonical VelesQL form, which the parser reads back as the same value:
+  a string single-quoted with each quote doubled, a float in decimal with a
+  fractional part and never an exponent, an identifier bare only when the
+  grammar reads it back bare and double-quoted otherwise. It is not the
+  query's own spelling (`1.50` shows as `1.5`, `TRUE` as `true`). `NaN`,
+  which the parser never produces and no literal reads back as, displays as
+  text that does not parse. Every `V014` message names a value that is not
+  an integer this way.
+- **`LockRank::ENTRY_POINT_PROMOTION` (rank 8) in the public lock-rank
+  registry (#2259).** The HNSW entry point now moves under a lock, taken
+  after the GPU snapshot's and before the vector store's; an implementation
+  that orders its own locks against core's ranks sees it.
+- **`[search]`'s `default_mode` and `ef_search` reach the engine (#2087).** The
+  section was parsed, validated and ignored; an unqualified `search()` now
+  resolves through `SearchConfig::resolved_quality()`, with `ef_search` winning
+  over `default_mode` as that field's doc has always promised. Resolution
+  belongs to `Database`, the only component holding a `VelesConfig`, and is
+  pushed to each collection on every open beside `[limits]` — never persisted.
+  Per-query overrides (`WITH (ef_search = N)`, `search_with_ef`,
+  `search_with_quality`) continue to win over it, and a default config leaves
+  `search()` on the built-in `Balanced` it already used.
+
+  `search.max_results` and `search.query_timeout_ms` stay inert and are now
+  warned about **field by field** rather than as a section, so the warning stops
+  naming knobs that work. Neither is an oversight: clamping a caller's `LIMIT`
+  silently is a footgun and erroring is a breaking change under a default
+  config, while a query timeout is a feature the engine does not have.
+
+  **`default_mode = "perfect"` is applied as `accurate`, with a warning at
+  load.** `SearchQuality::Perfect` is an exhaustive scan capped by
+  `limits.max_perfect_mode_vectors`, and a filtered search's bitmap pre-filter
+  never reads the configured quality — it traverses the graph at its own ef —
+  so a global `perfect` would scan on some queries and not on others; the
+  default never resolves to it. A first version refused the value outright, which made a file v6.0.0
+  loaded fail `Database::open`: a breaking change in a minor release, caught by
+  the seven-lens review (#2246) before it shipped.
+
+  Hot-path cost measured against `develop` before merging, under a DEFAULT
+  config: six alternating A/B passes, 84.4–88.0 µs vs 83.6–86.4 µs per
+  `search()` on a 20 000-point fixture — overlapping ranges, no measurable
+  regression. That measures the plumbing and nothing else: under defaults the
+  resolved quality is `Balanced`, exactly what was hard-coded before, so the A/B
+  could not see the wiring's real effect and was not meant to (#2246). An
+  earlier draft closed over the index call and cost a reproducible +2.2 %; the
+  measurement is what caught it.
+
+  **Upgrade note.** A config that already set `default_mode` or `ef_search`
+  starts applying them — until now they were inert. `default_mode = "accurate"`,
+  which the "Production - High Precision" profile in `CONFIGURATION.md` ships,
+  moves an unqualified search from `160.max(k*5)` to `512.max(k*16)`
+  candidates.
+
+
+- **`SearchMode::quality()`** — the lossless `SearchMode` → `SearchQuality`
+  conversion. `SearchMode::ef_search()` cannot express `Perfect`: it returns
+  `usize::MAX` as a bruteforce sentinel that nothing reads, and the only
+  conversion available turns that into `SearchQuality::Custom(usize::MAX)` —
+  an uncapped graph traversal that is neither exhaustive nor covered by
+  `limits.max_perfect_mode_vectors`. Wiring `[search]` (#2087) through
+  `ef_search()` would therefore have silently downgraded a config asking for
+  `perfect` *and* bypassed its guard rail. `quality()` is the conversion that
+  wiring must use.
+
+
+- **The durable `.vectors` file is now mapped as the graph's arena** instead of
+  being deserialized into a second copy of the same bytes, on little-endian
+  targets, for v2 files holding at least `MIN_ARENA_CAPACITY` vectors. Anything
+  outside those conditions keeps the copy path: a mapped arena is an
+  optimisation, never a requirement, so a filesystem that refuses the mapping
+  costs the optimisation and nothing else.
+
+  Adoption is observation-only by construction — below the capacity floor an
+  arena would be sized up and the file grown, and **opening a collection must
+  never write to it**, because the memory crate's migration resume proves a
+  source store unchanged by hashing these files. A graph that adopted the
+  durable file carries no `ArenaHome` at all, so the drop that deletes a
+  disposable arena is unreachable rather than merely disabled.
+
+- **`cargo-semver-checks` gates `velesdb-core` and `velesdb-memory`.** Each
+  crate's public API is diffed against its last published release, and a
+  breaking change without the major bump SemVer requires fails the build. Core
+  runs with `--release-type minor`: `develop` carries the published version
+  between releases, which the tool reads as a patch update, arming lints that
+  only a release commit could satisfy.
+
+- **`rust-toolchain.toml` and the workspace `rust-version` state one MSRV (#1987).**
+  `scripts/tests/test_msrv_single_source.py` fails `CI Success` when the
+  toolchain file and the workspace `rust-version` disagree, or when a member
+  crate declares its own `rust-version`. What a workflow may install is
+  `test_ci_toolchain_pin.py`'s rule alone.
+
+- **Every third-party action a workflow runs is pinned by full commit SHA (#2474).**
+  `scripts/tests/test_workflow_actions_pinned.py` fails `CI Success` on a
+  `uses:` that names a tag, a branch or a short SHA, in `ci.yml`, the Docker
+  publish workflow, `gate-contracts.yml` and the release workflows alike.
+  Twenty references had arrived as bare tags (`actions/cache@v6`,
+  `docker/build-push-action@v7`, `actions/checkout@v7`, among them), which
+  the owner of a tag can move under a job that holds the repository's
+  secrets. Each now names the commit its tag resolved to, with the version
+  in a comment, so Dependabot moves the SHA and the comment together.
+
+- **Four review signals that block nothing (#1987).** A weekly
+  `minimal-versions` job in `quality-deep.yml`, also run on pull requests that
+  change the workspace manifest or a member's, checks `velesdb-core` and
+  `velesdb-memory`, each resolved alone, with every direct dependency at the
+  lowest version the resolve accepts, on Linux and on macOS. On a pull
+  request that changes `velesdb-core`, `core-review.yml` prints its
+  public API diff against the base (rustdoc JSON built with lints capped, so
+  a doc defect at either end does not stop the report). A `cargo mutants
+  --in-diff` job shipped beside it in this train and was removed before
+  release (see `### Removed`). `codeql.yml` analyzes Rust,
+  Python, JavaScript/TypeScript and the workflows themselves on push, pull
+  request and weekly. None of them is read by `CI Success`.
+
+- **A deferred removal promised for a future major can no longer be skipped by
+  that major.** `scripts/check-deferred-removals.py` carries each promise with
+  every site that must be gone, and fails the release commit that raises the
+  major while a site survives. Written after `v6.0.0` shipped past exactly such
+  a promise, two days after it was recorded in a doc comment nothing reads.
+
+- **Issue bodies and comments are checked for assistant attribution.** The
+  existing guard covered commits, pull request titles and bodies, and tracked
+  content; those two surfaces arrive on events no `pull_request` workflow sees.
+
+- **Two persistence instruments**, `persistence_save_scale` and
+  `persistence_load_scale`, measuring the two halves of the round trip. The
+  load one carries a control arm because a mapped load does not read the
+  vectors — it maps them, and the pages fault in on first touch, so timing the
+  load call alone reports the cost as gone when it has only moved.
+
+### Removed
+- **BREAKING (Rust API, Python bindings, config) — `WalBatchConfig`, the
+  `VelesConfig::wal_batch` field and the `[wal_batch]` table (#2174), and
+  `StorageConfig::{data_dir, mmap_cache_mb, vector_alignment}` with their
+  `[storage]` keys (#2087).** Both removals were promised for 7.0.0 and tracked
+  by `scripts/check-deferred-removals.py`. All four were parsed and never
+  applied: the group commit `[wal_batch]` configured was deleted as unwired
+  (#2078), and the three `[storage]` fields had no engine counterpart at all.
+  Removed with them: `wal_batch` from the engine-only section filter and from
+  the `VELESDB_*` mapping, the two warnings that announced them as inert or
+  deprecated, the `mmap_cache_mb` range check, and the Python mirror —
+  `StorageOptions` keeps `storage_mode` only.
+
+  **An existing config file keeps loading.** Every loader —
+  `VelesConfig::{load, load_from_path, from_toml}` and the engine-only ones
+  behind `velesdb-server --config`, the CLI, the Tauri plugin, mobile's
+  `openWithConfig{,Toml}` and Python's `VelesConfigOptions.from_toml{,_path}`
+  — ignores a removed key whatever its value, and logs one warning per load,
+  "these config entries were removed in 7.0.0 and are ignored", whose
+  `removed` field names each removed key it found with its issue (for
+  example `wal_batch (#2174), storage.mmap_cache_mb (#2087)`). The
+  `VELESDB_WAL_BATCH_*` and
+  `VELESDB_STORAGE_{DATA_DIR,MMAP_CACHE_MB,VECTOR_ALIGNMENT}` variables get
+  the same treatment. One file 6.x refused now loads: an `mmap_cache_mb` of `0`
+  or above 1 TiB failed its range check, and is now ignored like any other
+  value. Strictness is unchanged for every other key — the loaders never denied
+  unknown keys, and still do not. Deserializing a `VelesConfig` with serde
+  directly, outside the loaders, drops the removed keys without a warning.
+
+  **Migration.** Delete `[wal_batch]` and the three `[storage]` lines from
+  `velesdb.toml` and unset the matching variables; none of them changed
+  behaviour. Rust code naming `WalBatchConfig`, `config.wal_batch` or one of
+  the three fields no longer compiles: drop the line (a struct literal ending
+  in `..VelesConfig::default()` needs nothing else). Python code passing
+  `data_dir=`, `mmap_cache_mb=` or `vector_alignment=` to `StorageOptions` gets
+  a `TypeError`: drop the keyword. The data directory was only ever the path
+  given to `Database::open`, or `velesdb-server`'s `[server] data_dir` /
+  `--data-dir`.
+
+  The two entries leave `DEFERRED_REMOVALS`, which is now empty. Its refusal
+  vectors in `scripts/guards.json` supply their own list through a new
+  `--registry` flag, so the guard is still seen refusing without a fake promise
+  in the real list.
+- **BREAKING (Rust API, aarch64 only) — `velesdb_core::simd_neon` (#1965).**
+  A public module nothing called: a standalone duplicate of the NEON kernels
+  `simd_native` dispatches to at runtime. Two guides said mobile computed its
+  distances through it; it computes them through `simd_native`, as every
+  aarch64 build does. A direct caller moves to the safe, runtime-dispatched
+  functions of `velesdb_core::simd_native`:
+
+  | Removed (`simd_neon::`) | Replacement (`simd_native::`) |
+  |---|---|
+  | `dot_product_neon_safe`, `unsafe dot_product_neon` | `dot_product_native` |
+  | `euclidean_neon_safe`, `unsafe euclidean_neon` | `euclidean_native` |
+  | `unsafe euclidean_squared_neon` | `squared_l2_native` |
+  | `cosine_neon_safe`, `unsafe cosine_neon` | `cosine_similarity_native` |
+  | `cosine_normalized_neon_safe`, `unsafe cosine_normalized_neon` | `cosine_normalized_native` |
+
+  `cargo
+  semver-checks` runs on x86_64 and cannot see an aarch64-only module, hence
+  this entry. `simd_neon_prefetch` stays: `simd_native`'s prefetch uses it.
+- **The `mutants` job in `core-review.yml` (#2339).** It ran on every pull
+  request touching `velesdb-core` and never once returned a verdict on a real
+  diff: both runs that met one were cut at the 45-minute action limit — the
+  first with 2 of 22 mutants tested and a third still building, the second
+  with none of 59 tested after 105 s of build and 981 s of unmutated
+  baseline. Finishing one would take about six shards, each re-paying that
+  baseline, for a report nothing is allowed to block on; narrowing the test
+  set buys between x2.3 and x28 depending on the module (893 s for the full
+  `--lib` pass, 380 s filtered to hnsw, 32 s to sparse) and nothing at all on
+  a diff spanning two. Mutation testing stays what it has actually been worth
+  here — a reviewer aiming it at one area by hand, as on #2282 — and
+  `QUALITY_BAR.md` now says so and gives the command. The 45 files of
+  `mutants.out/` that reached the history through #2347 are removed with it,
+  and the directory is ignored.
+
+### Fixed
+
+- **CI: two steps of the weekly Miri job were green without testing the unsafe
+  code they name.** `Miri - vector bytes storage` ran 0 tests in every binary:
+  `storage` is compiled only with `persistence`, the job builds
+  `--no-default-features`, and libtest exits 0 on a filter that matches nothing.
+  Its filter was also wrong with the feature on (`storage::vector_bytes::` does
+  not match the tests' module, `storage::vector_bytes_tests::`). It now builds
+  `--features persistence` and runs the 13 `vector_bytes_tests` under Miri, which
+  never executes pest's `std` path (measured: no test there parses VelesQL), so
+  psm's assembly stays out of reach. `Miri - distance module` matched a single
+  test (`distance::` skips `distance_tests`, at the crate root); it now runs the
+  31 scalar distance tests, skipping `geo_distance_tests` (no unsafe code,
+  bit-exact trigonometry that Miri perturbs on purpose). Every Miri step now runs
+  through `scripts/miri-step.sh`, which fails unless a test of the module the
+  step names passed, so a filter that matches nothing cannot go green again;
+  `scripts/tests/test_miri_step.py` pins its verdicts and that the workflow does
+  not bypass it. All four steps also take `--lib`, which stops building and
+  walking the integration-test binaries, none of which matches.
+
+- **A caller-supplied `k` could abort the process through the sparse top-k
+  search.** The three strategies of `sparse_index::search` reserved
+  `BinaryHeap::with_capacity(k + 1)` before scoring anything, so a `k` such as
+  `1 << 40` asked the allocator for 17 TB and aborted the whole process
+  (`memory allocation of 17592186044432 bytes failed`, not a per-request
+  error), and `usize::MAX` overflowed the `+ 1`. The same overflow sat in the
+  filtered path's `k + 10` / `k + 20` oversampling floor. The reservation is
+  now capped at 4096 entries (the heap grows with the results, which are
+  bounded by the scored documents) and the floors saturate. `text.rs` had
+  received the same fix for its fused path; this module had been missed. The
+  server's point-upsert and batch-filter parsing no longer reserve a `Vec` sized
+  from the request's own length either, which CodeQL reported as an
+  uncontrolled allocation; they collect from the iterator instead.
+
+- **Two regular expressions that backtracked on adversarial input (CodeQL
+  `js/polynomial-redos`, `py/redos`).** The TypeScript SDK's WASM `query()`
+  shape check ended in three adjacent `\s*`, so a few thousand spaces after a
+  near-miss statement cost seconds of event-loop time; each optional tail now
+  starts on a token (`limit`, `;`) and the check is linear. The loom-command
+  pattern in `test_ci_toolchain_pin.py` let an unquoted value overlap a quoted
+  one, doubling the work per repetition; the unquoted alternative can no longer
+  start on a quote. Both have a regression test that failed before the fix.
+
+- **CI: the `Semver Checks` gate refused any release commit that bumps the major.**
+  `ci.yml` passed `--release-type minor` to velesdb-core so that `develop`, which
+  holds the published version between releases, is not asked for the bump the
+  release commit performs. The flag stayed on the release commit, where it kept
+  asserting a minor bump over a real major one, so the 7.0.0 cut failed on the
+  removals its own migration guide lists. When the workspace version is ahead of
+  the newest non-yanked crates.io release the step drops the flag and
+  cargo-semver-checks reads the two versions as they are; with the index
+  unreadable it keeps the declaration. The step's script is run under `bash`
+  with stubbed `cargo` and `curl` by `test_ci_semver_release_type.py`.
+
+- **`scripts/bump_version.py` also rewrites the version claims
+  `check-doc-freshness.py` compares to the manifest.** The `workspace X.Y.Z`
+  document stamps, the "current product version" prose and the published-packages
+  line were left at the previous release, so the commit raising the version
+  failed the guard and eleven files had to be edited by hand. Historical
+  references ("since 6.0.0", "fixed in 6.0.0") are recognised as the guard
+  recognises them and are not rewritten. `test_changelog_release_notes` no
+  longer reads the empty `[Unreleased]` of a freshly cut release as a parser
+  failure.
+
+- **`scripts/bump_version.py` now rewrites the `` `<crate> vX.Y.Z` `` footer of
+  the seven workspace-versioned crate READMEs.** `check-version-sync.py` pins
+  those footers, but the bump left them alone, so the release commit that
+  raised the version failed the guard and the footers had to be edited by
+  hand. A parity test (`scripts/tests/test_bump_version.py`) now fails when the
+  guard reads a workspace footer the bumper does not write; `velesdb-memory`'s
+  footer stays out, as it versions on its own train.
+
+- **CI: `Miri UB Detection` (`quality-deep.yml`) was red on `develop` since
+  #2468; VelesQL parsing keeps pest's stack check in every native build.**
+  #2468 moved pest to 2.9.4, whose default `std` feature now links `stacker`
+  and `psm` to check the remaining native stack on every rule entry. `psm`
+  reads the stack pointer in assembly, which Miri cannot execute, so
+  `cargo miri test --no-default-features -p velesdb-core -- velesql::parser::`
+  aborted at the first test that reached pest (`can't call foreign function
+  rust_psm_stack_pointer`). The job runs weekly or by hand, never on a pull
+  request, so the bump merged green. velesdb-core now takes pest without
+  `std`, and its default `persistence` feature turns `pest/std` back on:
+  every consumer that builds `persistence` (server, CLI, Python, Node,
+  mobile, migrate, Tauri plugin, velesdb-memory's default) links exactly what
+  it linked before, while a `--no-default-features` build (Miri,
+  `velesdb-wasm`, velesdb-memory without `persistence`) no longer links
+  `stacker`/`psm`. On `wasm32-unknown-unknown` stacker finds no stack limit,
+  so the check never fired there. The #896 pre-scan stays the first guard in
+  every build. A new test, `pest_stack_guard_refuses_nesting_the_prescan_never_sees`,
+  drives the generated parser past the pre-scan on a 256 KiB thread and
+  aborts if a default build loses `pest/std`. No test was skipped: the 128
+  parser tests run under Miri again.
+- **langchain: `ef_search` combined with `filter` (and a `search_quality`
+  preset combined with `filter`) now raise a clear `ValueError` instead of a
+  `TypeError` from inside the integration (part of #2302).** The binding's
+  `search_with_ef` and `search_with_quality` take no filter, so
+  `VelesDBVectorStore` passing `filter=` to them failed with
+  `TypeError: ... unexpected keyword argument 'filter'`. The refusal names the
+  unsupported combination. `similarity_search_with_ef` defaults `ef_search` to
+  64, so *any* call that passes a `filter` to it raises `ValueError` (it
+  already failed, with the `TypeError`); use `similarity_search_with_filter`
+  for a filtered search without an `ef_search` override. A misleading comment claimed the quality preset yielded to a
+  filter; the combination is now refused too, where the preset used to be
+  dropped without notice (no public method reached it, the guard protects
+  internal callers). **Known limitation, #2302 stays open:** a filtered
+  search that honours `ef_search` needs a new core public API
+  (`search_with_filter_and_ef`), `run_dense` in
+  `crates/velesdb-core/src/database/gated_search.rs` to stop ignoring `ef` when
+  a filter is present, the PyO3 binding, its `.pyi` stub and a parity test;
+  none of it is in this change. The new tests run against the real `velesdb`
+  binding, and the fake collection now mirrors the real `search_with_ef`
+  signature.
+- **core (Windows): a failed backup restore in the compaction replace is
+  logged, not dropped.** When `atomic_replace` could neither move the
+  compacted file over `vectors.dat` nor put the backup back, `vectors.dat` was
+  missing and the backup was its only copy, and the restore error was
+  discarded with no trace. It is now logged at error level with both paths,
+  and the `.bak` file is left in place for the next open to recover. The swap
+  itself is unchanged.
+- **CI: `Python Integrations` failed on every PR once nltk 3.10.4 shipped
+  (2026-10-21) (#2463).** That release refuses to read NLTK data from, or download it
+  into, a directory another account can write to, and the runner's copy of
+  llama-index-core's bundled cache (`llama_index/core/_static/nltk_cache`)
+  fails the check, so `test_delete_removes_all_chunks_of_document` died on
+  "Resource 'stopwords' not found". The job now points `NLTK_DATA` at a
+  0700 directory under `$RUNNER_TEMP` and downloads `stopwords` and
+  `punkt_tab` into it before the LlamaIndex suite, which llama-index-core
+  then reads instead of its bundled cache. No test was skipped or changed.
+- **core: a search that sets only `rerank` ran at `Balanced`, not the configured
+  `[search]` default (#2399, 2026-10-02).** `QuerySearchOptions::resolved_quality`
+  ended in a hard-coded `Balanced`, so `WITH (rerank = true)` skipped the
+  collection's runtime quality that `SELECT * FROM c WHERE vector NEAR $v
+  LIMIT n` honours. It now takes that runtime quality as its fallback, on both
+  the plain and the filtered vector path. The batch and multi-query entry
+  points (`search_batch_parallel`, `search_batch_with_filters`,
+  `multi_query_search` and `multi_query_search_ids`) had the identical
+  `Balanced` hard-code, unreached by that fix since they take no per-call
+  quality of their own; they now read the same runtime quality too, so with
+  a non-default `[search]` their results change for every caller of these
+  four functions, whichever surface it comes through. No other query shape or
+  entry point is guaranteed to follow `[search]` yet; #2430 tracks the audit
+  and `docs/guides/CONFIGURATION.md` states what is covered.
+- **core: `hybrid_search`, `hybrid_search_with_filter`, the score-level
+  hybrid fusion streams and `GraphCollection::search_by_embedding` take their
+  vector candidates at the configured `[search]` quality (#2430, 2026-10-24).**
+  They called `index.search`, which pins `Balanced`. With a non-default
+  `[search]` their results change. The other paths tabulated in #2430
+  (graph-anchored `NEAR` prefilter, the secondary-index bitmap branch) still
+  ignore it. Each of the four has a test that reopens one persisted index under
+  two configured `ef_search` values.
+- **core: a graph-anchored `NEAR` over a large anchor set takes its candidates
+  at the configured `[search]` quality (#2430).** Above 10 000 anchors the
+  `NEAR` + `MATCH` prefilter hands the anchors to the index as a bitmap, and
+  that branch passed `SearchQuality::default()`, so it ignored `default_mode`
+  and `ef_search`. It now uses the collection's runtime quality, as `search()`,
+  the batch entry points and the hybrid functions do. A default `[search]`
+  still resolves to `Balanced`, so only a non-default one changes results. The
+  branch is tested directly on a 4 000-point corpus with a sparse anchor set,
+  not through a 10 000-node graph.
+- **The CLI REPL leaves the `[search]` of its `--config`/`VELESDB_CONFIG`
+  file in force until a `\set mode` or `\set ef_search`, and `.bench` runs at the quality it prints (#2303).** A session that
+  never ran `\set` used to inject `mode = 'balanced'`, against the
+  priority order `docs/guides/CONFIGURATION.md` states. An untouched session now adds no quality (the `max_results` `LIMIT` cap aside), and `\show`
+  prints the configured default, marked
+  `(configured default)`. `\reset mode` goes back to it rather than to
+  `balanced`. `.bench` printed the session mode but searched with neither the
+  mode nor `ef_search`, and dropped every failed query in silence, so a bench
+  whose queries were all refused still reported a throughput. It now searches
+  at the quality a query in the same session gets (the session's `ef_search`
+  when set, else its `mode` when set, else the configured default), prints
+  that quality, and returns the first query error.
+- **`velesdb simd info` names the SIMD level it detects (#1965).** It
+  printed a fixed summary of the design, whose thresholds the code no longer
+  applies (AVX2 switching at 1024 dimensions where the dispatcher switches at
+  256, AVX-512 with 4/2/1 accumulators where it runs an 8-accumulator kernel
+  from 1024 dimensions), and nothing
+  about the machine. It now prints `simd_native::simd_level()`, named by
+  `SimdLevel`'s new `Display`, e.g. `Detected level: NEON (aarch64)`.
+- **The NEON distance kernels are `unsafe fn` (#1965).** They were safe
+  `pub(crate)` functions that read `b` at every index of `a` with no length
+  check, so a crate-internal call with a shorter `b` read past its end with no
+  `unsafe` in sight. The public entry points already asserted equal lengths,
+  in release too, so no public call was affected; the precondition is now each
+  kernel's `# Safety` contract, as the x86 dot-product kernels document it,
+  and every call site names the assert or precondition it relies on.
+- **Equal fused scores come back in one order, ascending id, on every
+  surface (#2297).** Every fusion strategy gathers its scores in a hash map,
+  whose iteration order changes from one map to the next, then sorted by
+  score alone: two identical multi-query searches returned tied documents
+  in different orders, in core and through the WASM binding and the TS
+  SDK on top of it. `fusion::sort_fused_results` now orders fused results
+  by score descending, then id ascending, and every fusion path uses it:
+  core's six strategies, hybrid dense + text search (whose top-k heap also
+  keeps, when `k` cuts through a tie, the ids that order puts first, not
+  the highest ones), and `velesdb-wasm`'s own relative-score fusion.
+  `-0.0` and `0.0` tie too, which a mixed-direction fusion produces side by
+  side (a zero distance negated next to a zero similarity).
+- **TypeScript SDK CI: tests/ is linted, and the coverage thresholds bind
+  (#2364, #2383).** `lint` ran `eslint src`, and the eslint project excluded
+  tests/, so tests/ was never linted: 7 errors hid there, now fixed. The SDK
+  job ran `npm test`, which never evaluates the per-file thresholds in
+  `vitest.config.ts`, and four files had drifted below them. It now runs
+  `npm run test:coverage`, and tests close the gaps, among them the wasm
+  error translator's degraded paths. No threshold was lowered.
+- **An HNSW insert past the pre-allocated capacity no longer takes the
+  layers' write lock for good, and a layer added late no longer drops
+  neighbour writes (#2306).** `expand_layers`' slow path grew the layers to
+  the one node that needed it and never raised `pre_allocated_capacity`, so
+  once an index outgrew it, a loaded index from its first insert, every
+  insert took `layers.write` and waited out whatever held the layers, a save
+  included. It now grows the capacity by an eighth (256 slots at least), and
+  the inserts that follow return to the fast path, which takes no
+  `layers.write`. The same path
+  created a layer above the pre-expanded top sized to the node that created
+  it, while the fast path went on sending later, higher node ids to it;
+  `Layer`'s accessors skip an id past a layer's end without a word, so those
+  nodes' links on that layer were lost. Every layer now covers the published
+  capacity, which only grows: a smaller `pre_expand_layers` no longer
+  lowered it either.
+- **The promise contract no longer counts a figure as sourced, or as
+  fresh, on the strength of a `grep` (#2300, #2309).** `check-promise-contract`
+  exempted every `executable` claim from its staleness checks, but five of
+  the six only `grep` for their own figure, which proves the sentence is
+  still written, not that it still holds. Only a claim marked
+  `"re_derives": true` is exempt now. The checker refuses that mark on a
+  claim that is not executable, and on a command every stage of which only
+  finds or shows text (`grep`, `rg`, `cat`, `head`, `tail`, `echo`, whatever
+  the flags, pipes or shell wrapping, though a counting `grep -c` piped
+  onward computes); a command with a substitution or a second line is left
+  to review, since it may compute the figure. A
+  refusal vector proves the refusal fails the run.
+  A `measured_version` of `unknown` now counts as unsourced, like an
+  unknown date or machine. The six claims that had one get the version
+  their own record gives, each with a dated waiver: the four
+  billed-campaign figures take 3.12.0 from the commits that record their
+  raw logs (0d461a502 for the vibe-cli session, cf4e14f7d for the
+  day-scale ones), the HNSW latency taken on the M5 Pro on 2026-07-20
+  takes 3.12.0 from its date, since develop carried no other version that
+  week, and the ColumnStore baseline takes the date and version of the i9
+  run it comes from (2026-03-19, 1.6.0), which the registry had misdated.
+  The 82.5 % context-savings figure, measured on 4.0.0 and only grepped
+  since, is re-measured on 6.0.0: unchanged.
+
+- **A vacuum's swap no longer copies an unbounded remainder under the index
+  write guard (#2335).** `catch_up` copies the writes made during the rebuild
+  without that guard, but a write landing between its last round and the
+  grant of the guard was copied by the swap **under** it, with searches and
+  writes waiting. Measured before the fix, eight vacuums against a writer
+  upserting 2 000-id batches over an 8 000-id window: **60 000 ids copied
+  under the guard, 8 000 in a single swap** — the whole working set, not the
+  one batch the issue described.
+  The replacement graph is the vacuum's own and invisible until the swap, so
+  inserting into it never needed the index write guard; only the mappings had
+  to hold still. A `publishing` lock now holds them: every mapping
+  publication takes it shared, before the index lock, and `vacuum` seals it
+  exclusively for a last catch-up whose remainder therefore cannot grow. That
+  settle runs outside the graph guard, on the dedicated graph pool, and the
+  guard is held for the mapping rebuild alone. After: **60 000 settled under
+  the seal, 0 under the guard**. Searches never take the new lock.
+- **`NativeHnswIndex::save` now serializes with itself, as `HnswIndex::save`
+  already did (#2262).** A save stamps every artefact with the generation
+  after the one it reads from the directory, so two into one directory read
+  that generation together and stamped it twice over each other's files, and
+  a crash between two renames stopped being detectable. `HnswIndex` took a
+  `saving` lock for exactly this; the other public wrapper over the same
+  files did not. Measured before the fix: twelve rounds of two concurrent
+  saves advanced the directory's generation by one each time instead of two.
+- **Every velesdb-core feature that gates code is now linted and mutated
+  (#2348).** `cargo clippy --features a,b` lints what those features switch
+  on and nothing else, and the two workspace passes between them named four
+  of the ten features the crate declares. `internal-bench` (29 `cfg` sites),
+  `openapi` (128) and `test-fault-injection` were compiled by no pedantic
+  pass at all — they had `cargo check` jobs, which do not lint — and three
+  `clippy::pedantic` violations reached a review through that hole. The two
+  passes now cover both states of every feature between them, the SIFT1M job
+  runs clippy instead of check (same build, stricter verdict), and
+  `scripts/check_feature_lint_coverage.py` refuses a feature that gates code
+  no pedantic pass compiles. One violation surfaced immediately and is
+  fixed: a 113-line fault-injection test in `velesdb-server`, now three
+  helpers and an 80-line body.
+  `cargo-mutants` had the same blind spot for a different reason: it picks
+  mutants from the source text, with no knowledge of `cfg`. The mutant list
+  is byte-identical with and without `--features internal-bench`, but
+  without it the mutated code is compiled out, so no test can observe the
+  mutation. Measured on #2347's own diff, over the six mutants in
+  `sparse_index::op_count::record_binary_search`: **six MISSED without the
+  feature, six caught with it**. The CI job that would have carried the flag
+  is gone (see `### Removed`); the flag is now part of the command
+  `QUALITY_BAR.md` gives a reviewer running the tool by hand.
+- **A batch insert no longer deadlocks the index against a concurrent
+  `vacuum` (#2343).** `HnswIndex::insert_batch_parallel` held the index read
+  guard across a rayon join on the **global** pool. A `vacuum` asking for the
+  write guard blocks every new reader, so the global workers that take the
+  read guard — the per-query search and SIMD reranking — parked; the insert's
+  own jobs never got a worker, and the guard the vacuum waited on was never
+  released. Nothing advanced, on an index serving reads: reproduced as three
+  hangs in six runs on an idle machine.
+  The place phase now runs on the dedicated pool the bulk drain already used,
+  and only at or above `PARALLEL_BATCH_MIN`, below which it enters no pool at
+  all. No search path changed, and no public API. **Debug builds gain two
+  assertions**: `link_placed` refuses a call from a rayon worker, and
+  `insert_batch_parallel` refuses one *for a batch at or above that
+  threshold* — below it no pool is installed, so nothing is refused. Such a
+  caller keeps running its own pool's jobs while it waits and can re-close the
+  same cycle by stealing. Release builds carry no check.
+- **The agent hooks remind a conversation of the working context it uses.** The
+  SessionStart, PreCompact and Stop hooks of the Claude Code and Codex
+  integrations named the session set in `.velesdb-hooks.json` (else `rolling`),
+  whatever session the conversation kept its state under. After a compaction, a
+  conversation working under a session of its own was told to load a context it
+  never wrote, and at Stop to save over one another conversation may own.
+  PostToolUse now records the session of each successful `save_working_context`,
+  and of each `load_working_context` that found one, per host session and per
+  project the call names, a save and a load each in a record of its own, so a
+  load never replaces a recorded save, even when the two calls' hooks overlap. A
+  load reminder (SessionStart) names the last session the conversation saved, or
+  else the last it loaded; a save reminder (PreCompact, Stop and the checklist
+  an opted-in repository's Stop gives for an edit batch, Codex's post-compaction
+  reminder) names only one it saved, and otherwise the configured one, so
+  reading another conversation's context never makes it save over that one.
+  After a compaction the Claude Code SessionStart hook asks to load the working
+  context again. Codex runs the hook only for the tools its PostToolUse matcher
+  names: the installer and the snippet now include the two working-context
+  tools. A call naming another project is never adopted for this one; it is kept
+  under its own. A load that found nothing, a failed call, a project name that
+  is empty or holds a control character, and a session name outside
+  `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` are ignored; jq checks each name as it was
+  sent, a NUL byte or a trailing newline included, before any shell reads it, so
+  none can redirect the reminders or carry text into them. A record is read only
+  when its file holds exactly that one record.
+- **The agent hooks read an MCP result Claude Code sends as a JSON string.**
+  Claude Code passes a velesdb-memory tool's result to PostToolUse as a JSON
+  string, which the hooks' success check refused, so in a Claude Code session
+  no successful recall unlocked the learning-loop guard and no working-context
+  call was recorded.
+  Both hosts' hooks now share one check: a string counts when it decodes to a
+  non-empty object with no error, and a load's `found` is read from it too.
+- **One recall unlocks every worktree of the project it names (#2308).** The
+  learning-loop guard keeps the refused edits of one host session in one place,
+  and subagents share their parent's session. A recall scoped to a project
+  found two worktrees of it waiting and promoted neither, so no edit could
+  proceed in any of them. It now unlocks each worktree of that project with a
+  refused edit, and the worktree the recall ran from even when its own edit was
+  never refused, and no other project's. The project a recall names is compared
+  as it was sent: a name followed by a newline no longer unlocks the project it
+  resembles. The hooks read a repository's path, project and session exactly,
+  where command substitution stripped a trailing newline: a repository whose
+  directory name ends in one is unlocked by its own recall, never under the
+  name of the directory it resembles, and a pending record holding two records
+  is refused instead of acted on. The Windsurf hook reads them the same way, so
+  its reminder names the project of the repository it runs in instead of the
+  parent directory's when that repository's directory name ends in a newline.
+
+- **Writes made while `vacuum` rebuilds an HNSW index survive it, the
+  rebuilt graph keeps the index's parameters and an exact tombstone count,
+  and a save made beside writes, another save or a vacuum reloads
+  consistent (#2262).** `vacuum` snapshots the live vectors,
+  rebuilds a graph from them without holding the index lock, then swapped the
+  graph in and re-mapped the snapshot's ids, so every insert, upsert and
+  delete made during the rebuild was undone: new ids missing from every
+  search, even an exhaustive one, and deleted ids back in results, until the
+  next open's recovery. The swap now re-maps the ids mapped at that moment:
+  an id written since the snapshot has its vector copied from the old graph
+  into the new one, and an id deleted since stays deleted. Its node stays in
+  the new graph, and `tombstone_count`, which is what triggers a vacuum,
+  missed it whenever it fell above the highest slot still mapped; the swap
+  now counts every slot of the new graph that no id names. `save` dumped the
+  graph, released the index lock, then read the mappings, one map after the
+  other, so a write in between saved an id on a slot the saved graph did not
+  hold, or two maps that disagree, and the next load refused the save. The
+  mappings are now copied under the lock the graph is dumped under, before
+  the dump, with the reverse map derived from the forward one, and the
+  persisted `next_idx` is the slot count the dump wrote. The graph's own
+  dump wrote its vectors file, released the arena's lock, then wrote its
+  graph file, so a batch inserted in between could push nodes the vectors
+  file lacked and link them into saved nodes, which the load refused; one
+  arena read guard now spans both files, so an insert waits for the whole
+  dump. Measured on a shared machine with a release build, a save of a
+  100 000 x 128 index kept a single insert waiting 35 to 48 ms before and 37
+  to 42 ms after, apart from one first save at 165 ms: a single insert
+  already waited on the layers lock the graph file's writer holds. A vacuum
+  also rebuilt every graph with `HnswParams::auto` for its
+  dimension, whatever M, `ef_construction` and alpha the index was built
+  with, and a save then persisted those; it now rebuilds with the graph's
+  own. A vacuum of an index with no live id returned before rebuilding, so
+  its dead slots stayed and `needs_vacuum` kept asking; it now rebuilds into
+  an empty graph. Nothing in the tree vacuums from that count — the two
+  endpoints below are what reach a vacuum, and neither reads it — but a
+  caller polling `needs_vacuum` looped.
+  Two saves of one index into one directory rewrote its graph file in place
+  under one generation; saves of one index now take a lock of their own,
+  never the maintenance lock. `vacuum` and
+  `reorder_for_locality` share a maintenance lock that writers and saves
+  never take; a save made during a rebuild saves the old graph. The writes
+  made during the rebuild are copied into the new graph before the write
+  lock, in at most four rounds, each taking the writes made during the one
+  before; the rounds stop once 64 or fewer are left, or once four have run.
+  Those two describe when the catch-up stops trying, not how much the swap
+  copies: the swap copies every id mapped but not yet carried when the write
+  lock is granted, and a write in flight — a whole batch — joins that set
+  after the last round looked, so its size has no upper bound (#2335 tracks
+  bounding it). The write lock also covers rebuilding the mapping of every
+  live id and dropping the old graph. Nothing runs on rayon under that
+  lock, whose batch searches park rayon's workers on it. Two routes reach
+  it, `POST /collections/{name}/index/rebuild` and
+  `POST /collections/{name}/vacuum`, both through `Collection::rebuild_index`,
+  and both accept writes and flushes meanwhile. Eight tests race a vacuum or
+  saves, and two vacuum an index: one
+  built with its own parameters, one whose ids are all deleted.
+  `writes_racing_a_vacuum_survive_it` fails on the old re-map: 300 of 300
+  inserts lost, 300 of 300 upserts still on their old vector, 297 of 300
+  deletes back in an exhaustive scan.
+  `writes_racing_a_vacuum_of_an_sq8_index_survive_it` runs the same race on a
+  trained SQ8 index; with the copy of the writes reverted, 300 of 300
+  inserts were lost and 300 of 300 upserts left on their old vector.
+  `a_vacuum_carrying_writes_finishes_beside_batch_searches`, a test binary of
+  its own on a two-thread rayon pool, races batches of 256 ids against the
+  swap, so that the copy made under the write lock carries a whole batch:
+  it fails by its watchdog — forty times one unraced vacuum of that index,
+  timed by the test itself, since the cost of a vacuum is the machine's and
+  the profile's — when that copy runs on rayon, the first vacuum never
+  finishing. Raced one id at a time, the copy stayed under the
+  hundred vectors at which it would reach rayon, and proved nothing.
+  `deletes_racing_a_vacuum_keep_the_tombstone_count_exact` failed while the
+  swap left `next_idx` at the highest slot mapped: `tombstone_count` read 0
+  over 1 229 to 1 361 dead slots, in 5 rounds of 5.
+  `writes_racing_a_save_reload_consistent` failed on the old save: 30 of 31
+  saves made beside writes were refused on load, 21 for maps of different
+  sizes and 9 for an id on a slot the saved graph did not hold; with
+  `next_idx` read at the copy instead of the dump, 31 of 32 saves reloaded
+  one tombstone short. `batch_inserts_racing_a_save_reload_consistent`
+  failed 3 runs of 3 on the old graph dump: 13 of 173 saves refused on load
+  for a neighbor id out of range. `vacuum_keeps_the_index_parameters` failed
+  on the old rebuild: M 24, `ef_construction` 300 and alpha 1.2 after a
+  vacuum of an index built with 12, 90 and 1.0.
+  `vacuum_of_an_index_with_no_live_id_empties_it` failed on the old early
+  return: (tombstones, slots, live ids) (200, 200, 0) after the vacuum.
+  `saves_racing_into_one_directory_reload_consistent` failed without the
+  save lock in 2 runs of 3: 10 of 60 rounds left a directory the load
+  refused ("layer num_nodes 9152575309965 exceeds file capacity 296548", or
+  a truncated file).
+  `a_save_racing_a_vacuum_reloads_consistent` failed 5 runs of 5 on the old
+  save taking no lock: 3 to 6 of some 40 saves each reloaded 997 to 1 000 of
+  1 000 ids onto other ids' vectors, or was refused as corrupt.
+
+- **The TypeScript SDK's WASM backend refuses what it cannot honour
+  instead of dropping it (#2095).** `textSearch` never passed the caller's
+  `filter` on: velesdb-wasm's `text_search(query, k, field?)` has no filter
+  slot, so the filter was never applied. `hybridSearch`,
+  `multiQuerySearch` and `search` with a `sparseVector` dropped their
+  filters the same way; `search` ignored `sparseIndexName` and
+  `includeVectors: true`; `createCollection` ignored `storageMode` and the
+  HNSW, PQ-rescoring and indexing settings; `query` ignored `timeoutMs` and
+  `stream`. `upsert` and `upsertBatch` never gave the binding a
+  `sparseVector`, so sparse search found nothing, whatever
+  `db.capabilities().sparseSearch` said. `multiQuerySearch` passed only
+  `fusionParams.k`, because the SDK typed the binding's
+  `multi_query_search` from a hand copy that predated the `weights`
+  argument velesdb-wasm has taken since 4.0.0.
+
+  The weights now reach the binding, and every binding function the SDK
+  calls, `VectorStore`'s and `MemoryService`'s alike, is declared with the
+  binding's own full parameter list, optional parameters made required, so
+  an argument the SDK computes and does not pass fails the typecheck; only
+  the two module initialisers, called with or without an argument, are
+  typed by hand. Sparse vectors are indexed. The binding cannot delete
+  postings, so each sparse upsert gets a fresh sparse id and a replaced or
+  deleted point's old one is retired: it never matches again. Retired ids
+  would pile up, and every sparse search over-fetches by their number, so a
+  search's cost would grow with the replacements a collection has seen. The
+  sparse index therefore lives in a store of its own and is rebuilt from the
+  live sparse vectors once retired ids outnumber live ones: it never holds
+  more than twice the live entries, at O(1) amortized cost. velesdb-wasm deleting postings itself (#2287)
+  will make the rebuild unnecessary.
+  `createCollection` creates the store in the requested `storageMode`.
+  `WASM_CAPABILITIES` is the one table the backend consults before it uses
+  an option. It gains `filteredSearch`, `multiQueryFusionParams`,
+  `namedSparseIndexes`, `includeVectors`, `idOnlySearch`, `storageModes`,
+  `collectionTypes`, `collectionConfig` and `queryOptions`; the
+  filter-taking entry points are derived from the backend interface, so a
+  new one cannot be missed; and a conformance test probes every key and
+  value against the backend. The REST backend's `multiQuerySearchIds`
+  dropped a `filter` too: it now sends it on, so velesdb-server's refusal
+  reaches the caller. The SDK's CI job now also runs its lint script.
+  On velesdb-wasm 6.0.0, the results of `textSearch`, `hybridSearch` and a
+  filtered `search` are affected by #2332, which this change does not touch.
+
+  Its behaviour changes are listed under Changed.
+
+- **`GEO_DISTANCE` was inaccurate or NaN near the antipode, and its `=` /
+  `!=` depended on floating-point rounding (#2310).** Both evaluation paths,
+  `ColumnStore::filter_geo_distance` and VelesQL's payload filtering
+  (`filter::matching`), carried their own copy of the Haversine formula,
+  `2·atan2(√a, √(1−a))`. Near the antipode `1−a` loses its significant
+  digits, so the distance was off by up to decimetres (0.10 m on the pair
+  pinned by `geo_distance_tests::near_antipodal_pair_reproduces_its_reference`),
+  and rounding could push `a` above 1, making the distance NaN: the row then
+  dropped out of every comparison. Both paths now call one function,
+  `geo_distance::great_circle_distance_m`, which uses the spherical Vincenty
+  form, well conditioned everywhere and never NaN for valid coordinates.
+  Distances computed away from the antipode can change in their last bits;
+  near it they are now accurate. Equality was also fragile:
+  `ColumnStore` compared against an absolute `f64::EPSILON`, and the VelesQL
+  path against `f64::EPSILON` scaled to the distance, both tighter than the
+  rounding of the computation itself. Both now follow one product rule, in
+  `geo_distance::distance_satisfies`: two distances are equal when they
+  agree to the millimetre; `<`, `<=`, `>`, `>=` still compare exactly. A
+  reference or payload point outside `[-90, 90]` / `[-180, 180]` (NaN
+  included), which used to get a meaningless distance, now has none and,
+  like a NaN threshold, matches no row under any operator, `!=` included.
+  The formula is checked against 60-digit reference distances and, by the ignored
+  `geo_distance_tests::sweep_agrees_with_the_chord_formulation`, against an
+  independent formulation over a seeded sample of the whole sphere and of
+  the antipode's neighbourhood.
+
+- **VelesQL's `ef_search` overrides `mode`, as documented (#2274).** A query
+  that set both ran at the `mode` and ignored the `ef_search`, though
+  `docs/VELESQL_SPEC.md` said `ef_search` overrides `mode` and REST resolves
+  the pair that way; and the CLI's REPL injected its session `mode` into
+  every query naming none, so neither `\set ef_search` nor an inline
+  `WITH (ef_search = N)` ever reached its search. An explicit `ef_search` now
+  wins over `mode`, or its alias `quality`, on the plain and the filtered
+  vector path, through one resolution. The REPL adds its session setting
+  only to a query that names neither, and then the one it holds (its
+  `ef_search` when set, else its `mode`), so an inline `mode` also beats a
+  session `ef_search`.
+
+- **The memory-extraction bench records what produced each count, and its report
+  stops comparing runs it cannot compare (#1949).** A re-run of the 2026-08-16
+  campaign on another machine gave other counts, and none of its 26 screening
+  files could say why. Each result file now records the model server's version
+  and the weights' digest (`/api/version`, `/api/tags`) beside the decode
+  options; the daemon an end-to-end run launches, by its `--version` line and
+  sha256; the host, the commit and whether a file it holds differed from it in
+  the working tree, asked of the commit rather than git's index (a file a
+  sparse checkout leaves out counts only while it is still in the working
+  tree), and where the bench's checkout sits below that repository's root; the
+  cases file by its path from that root, only when the recorded commit
+  holds it, and whether it differed from that commit; when the run started; and the suite it
+  ran, as a case count and a digest of what that phase's scorer reads of each
+  case, in the order that can move its counts: none for screening, the order an
+  end-to-end run writes and reads its passages in. A question left unanswered,
+  or answered in a shape Ollama does not give, is written as null with the
+  reason. Git's answers are read as git wrote them, never stripped, so a path
+  that begins or ends with whitespace is read whole, and a SIGTERM stops git
+  together with whatever git started, such as a clean filter (#2296). The report prints each row's provenance and origin, or `unverified`
+  with the first reason its file records and `unrecorded`, counts the runs
+  behind each row, and flags rows that sum different numbers of runs or cover
+  different suites: the reference screened
+  its Ollama models twice and its MLX ones once, and its two end-to-end rows
+  covered 1 case and 4. A file written before the options were recorded is
+  credited with the one it holds, the `generation_cap` the bench sent as
+  `num_predict` (as `max_tokens` to the MLX server). Every report cell is put on
+  one line with its pipes escaped, so no value a file holds can split a row.
+  Every result file is a row of its own: the order
+  control's replay had replaced the reference row it shares a label with, so the
+  published row showed the replay's timings. The report's Environment section,
+  which printed the rendering machine's commit, rustc and a `num_ctx` no run
+  recorded, is gone. The 2026-08-16 campaign file is re-folded from its result
+  files, restoring that reference row and cutting every absolute path to its
+  last component (the result files, the evidence, keep theirs), and its report
+  is regenerated: #1955 had changed the generator without re-rendering it, so it
+  printed `0` where no reply parsed. Tests fail when the committed report and
+  its generator disagree, and when either holds an absolute path. The
+  extraction-models guide and `docs/BENCHMARKS.md` no longer say the quality
+  verdicts reproduced to the digit: they repeated run for run on the one machine
+  that measured them, and the tiers stay unverified until a re-run with a
+  declared `num_ctx`.
+
+- **Every performance figure in the guides, the reference docs, the rustdoc,
+  the bindings' docs and the examples' READMEs names the run that measured it
+  (#2266).** Only the README's figures were pinned in
+  `docs/reference/promise-contract.json`; the review of #2250 found figures
+  elsewhere that no run produced, and some that contradicted the benchmark
+  meant to back them. Each now states what its run recorded, or leaves the
+  text. `BENCHMARKS.md`'s 87.6% full-precision recall@10 came from clustered
+  data, and the run on the benchmark's own uniform data (e35d9612, which
+  restored its `>= 0.95` assert) measured 98.4%; the README's SIMD kernels
+  read Cosine 32 ns, Euclidean 26 ns and Jaccard 27 ns, as the April 3, 2026
+  run in `BENCHMARKS.md` §1 recorded them, not 33, 20 and 35; the fast-insert
+  and turbo constructors are 2.8x and 4.9x faster than `new` (1K × 768D,
+  2026-03-23), not "~2-3x" and "~3-5x"; `pq_recall_multidist`'s assert
+  messages cited a recall "ceiling around 0.87-0.88" that the benchmark's own
+  2026-03-08 baseline contradicts (1.0 for every clustered variant); a caching
+  note quoted a 21% token saving its README never records (20.3%); PQ's
+  compression is `2 × dim / m` (dim/4 at the default m = 8, so 16x for the
+  64-D benchmark), where 17 lines stated a range. The constructors' recall
+  figures, the pgvector insert ratio, the storage modes' recall and training
+  times at 768D, the mobile and FAQ recall losses, a 25-30 Kvec/s write rate,
+  the ColumnStore's "50M+ items/sec" goal, the demos' "typical" timings and
+  two first-run estimates go: no run produced them. The register grows from 30
+  claims to 366. Each names its source; the 302 measured ones name their date
+  (5 only the month), and 46 of those no machine, because the commit or the
+  doc that recorded the run names none. One is re-derived on every run; the
+  other 63 record what no run measures: a target, a configured value, a scale,
+  a floor a test asserts. 21 claims cover a results table measured in one run.
+  Every documentary claim measured before 6.0 (249) carries a dated waiver
+  scoped to 6.x; the one executable claim measured before 6.0 has none: its
+  validation_command, a grep that the two READMEs agree, runs on every check.
+  `check-promise-contract.py` counts a provenance that begins with `unknown`
+  as unsourced, whatever reason follows it.
+
+  `scripts/check-figure-sources.py`, a step of the required `lint` job,
+  refuses a figure that no claim registers. It reads a number with a unit
+  together with a keyword or a verb before it, the end of the line above, or
+  its table cell's column header, whose unit also reads a bare cell; below the
+  millisecond, the unit alone; and every time of a table row, in a Markdown
+  file or a doc comment. It reads a time in three forms only (a bare number
+  under a header that names its unit, a number with its unit, either inside
+  one emphasis pair) and reports any other shape that holds a number next to a
+  time unit as an unreadable figure, whatever the register holds. A size,
+  bound or config word exempts only the value it qualifies, and a number in a
+  code span only as code; bench code, whose figures are the bounds it asserts
+  and the results it prints, stays out. It is a heuristic: a number with no
+  unit and no such word, a duration whose keyword is not beside it or given in
+  minutes, a time in a table row labelled by a config word, and a figure drawn
+  in an image pass unseen, as its docstring lists. The register, not the
+  guard, is what binds a figure to its run.
+
+- **`upsert_bulk` with an async index builder wrote every vector into the
+  graph twice (#2264).** Its direct writer places each vector in the graph's
+  arena and maps its id there, so brute force sees it at once; the builder's
+  drain then inserted the copy it had queued, which placed the vector again at
+  a new slot and moved the id to it. The arena held two slots per bulk-loaded
+  point until a vacuum, so `reorder_for_locality`, and with it
+  `POST /collections/{name}/locality/reorder`, refused every collection loaded
+  this way. The same drain mapped again a point deleted after its bulk load,
+  and gave a point upserted in between back the vector it had been
+  bulk-loaded with. The builder now queues ids, not vectors: its drain
+  resolves each id to its slot under the index read guard, skips an id
+  deleted since and a slot already linked, links an id queued twice once, and
+  places nothing. An index with its exact-distance features off gives the
+  direct writer no slot to fill, so for it the builder still places the
+  vectors. The bulk load also stops copying each vector into the queue. The
+  drain connects on a rayon pool of its own, never the global one: it links
+  under the index read guard, and a global worker that takes that same guard
+  under a pending `vacuum` writer would deadlock (#2343). A drain whose link
+  fails puts its ids back on the queue, and `trigger_build_async`, which
+  drains the vector buffer only, refuses while placed ids wait.
+
+- **The REST OpenAPI document shows no rustdoc link syntax (#2263).** utoipa
+  copies doc comments into the OpenAPI document (`docs/openapi.{json,yaml}`,
+  served at `GET /api-docs/openapi.json` by a server built with
+  `swagger-ui`) as they are written, and only rustdoc resolves an intra-doc
+  link: four descriptions showed clients literal brackets, one of them around
+  the path of a private helper. The four are rewritten in plain prose that
+  states what a client can rely on instead: the status a failing match query
+  answers, when `stats` events arrive, and the integer `id` a streamed point
+  needs; the `503` a guard rail causes on the match endpoint is now declared.
+  A test fails when a published description holds link syntax: a code link,
+  a bracketed path, a reference-style link or definition, or an inline link
+  to anything but a URL or a fragment.
+
+- **The agent-hook suite could fail on a loaded machine or end without naming
+  what failed (#2277), and PostToolUse never compressed under the stock macOS
+  bash.** `integrations/agent-hooks/test/hooks.test.sh` ran the checks that need
+  a compiled result under the PostToolUse hook's own watchdogs, a 10 s
+  capability probe and a 20 s compilation, and a machine busy enough to miss
+  either made the hook pass the result through, as it should, and those checks
+  fail. They now own both timeouts at the 60 s maximum: the compilation's,
+  hard-coded until now, is `VELESDB_HOOK_COMPILE_TIMEOUT` (default 20, at most
+  60, validated like `VELESDB_HOOK_PROBE_TIMEOUT`). The watchdog counted rounds
+  of `sleep 0.1`, which a loaded machine stretched; it now counts wall-clock
+  seconds, kills only once its bound is exceeded, and refuses to start a command
+  under a bound that is not a decimal: on develop, an overflowing bound meant no
+  bound at all, and a non-numeric one failed or killed at once. It also hands
+  the command its input explicitly: in a script, bash starts a background
+  command on `/dev/null`, and bash 3.2 does so even when a pipe feeds it, so
+  under the stock macOS bash the compiler read nothing and no tool result was
+  ever compressed. Every numeric knob now refuses a leading zero, which shell
+  arithmetic reads as octal, and the hooks README and
+  `docs/guides/CONTEXT_COMPILER.md` say so once, above their tables. The
+  SessionStart freshness check did arithmetic on the first line of its cache
+  file, so a line `PATH[$(cmd)]` ran `cmd`; anything but a timestamp is now a
+  cache miss, and so is a timestamp later than now, which kept the cache a hit
+  forever. The suite also piped each payload into its hook: a hook that exits
+  without reading stdin, as the installer's positive control does, could kill
+  that writer with SIGPIPE, and under `set -euo pipefail` the suite then ended
+  with 141 instead of 1, which failed the installer's self-test on #2276. Every
+  hook now takes its payload as a here-string, and a call that exits non-zero
+  fails by name instead of ending the suite.
+
+- **A node could end up out of reach of every graph search, whatever its
+  `ef` (#2259).** HNSW links each new node to its neighbours and each
+  neighbour back, evicting from a full list to make room, and nothing checked
+  whether an eviction took a node's last in-edge. A breadth-first census from
+  the entry point found parallel batches leaving 5.63 % of a 4-D curve's nodes
+  unreachable on average (20.8 % at worst), 0.65 % of 10 000 random 128-D
+  vectors and 1.73 % of 100 000, and sequential inserts 0.31 % at 10 000.
+  Such a point stays stored and mapped; no search from the entry point
+  reaches it, only an exhaustive `Perfect` search or a multi-entry search
+  whose random probe lands on it. Every node now has an anchor — one base-layer edge from an
+  already-anchored node, or the entry point, that eviction skips — so the
+  anchors form a tree rooted at the entry point and the same census reads 0 in
+  every case. A promoted entry point takes the previous one into its subtree, and
+  `reorder_for_locality` renumbers anchors with their nodes. A loaded graph
+  rebuilds them from its base layer and anchors any node that walk missed, so
+  an index saved before this release is repaired when it is opened; anchors
+  are not persisted, and the file format is unchanged. A full list whose
+  every entry already protects a node sends the new edge one level down the
+  tree rather than grow, so exact duplicates no longer pile up on one node.
+  Two inserts racing for an empty graph's entry point could leave the loser
+  with no edge; the claim is now serialized with every promotion of the entry
+  point, and the loser connects through the winner. Anchors cost four bytes
+  per base-layer slot.
+
+- **A DotProduct neighbour list took in a farther node (#2259).** Choosing
+  which entry of a full list to evict started from a farthest distance of
+  `0.0`, above every DotProduct distance (`-dot`) between positively
+  correlated vectors, so a node farther than every entry still displaced
+  one. A full list now evicts only for a node closer than its farthest
+  entry.
+
+- **Three search paths turned an index error into an empty answer.**
+  `Collection::search`, `search_ids` and the post-filter fallback logged
+  `search_with_quality`'s error and returned `Vec::new()`, from functions that
+  all return `Result`: a failure read as "no match", the one failure a caller
+  cannot tell from a correct result. Nothing reaches it today — the entry
+  points check the dimension first — which is why nothing noticed. The error
+  is now returned (#2246, P5).
+
+- **`npm-audit-gate.py` reported non-findings with the advisory exit.**
+  `--attempts 0` and a report whose count is not a number both raised
+  `ValueError`, which `main` mapped to exit 1 — "this lockfile is
+  vulnerable"; a count of another type, a negative `--backoff-seconds` and an
+  `npm` that will not run all raised out of `main`, also exit 1. Bad flags are
+  now argparse's usage error (exit 2); an unreadable report or an npm that will
+  not run, the infrastructure exit (75) (#2246, P5).
+
+- **Six comments and docs asserted what the code does not.**
+  `scripts/local-ci.sh` said its default replays every gate job (it replays
+  `lint` and `hygiene`); `AGENTS.md` said `flush_backing` deliberately has no
+  caller (#2173 gave it one), credited `contiguous_file_arena.rs` with a
+  rationale it does not hold, and cited #2112 and #2106 as open design issues
+  when both are closed; `extract_wire.rs` said everything leaving the
+  process lives there (the prompts leave from `extract.rs`);
+  `GraphCollection::remove_edge` pointed users at `remove_edge_detailed`, which
+  is `pub(crate)`; `SearchConfig::resolved_quality` did not say it exists only
+  with `persistence`; and the `unused_self` allow in `native_inner.rs` named a
+  command that passes without it — the one it protects adds
+  `-D clippy::pedantic` (#2246, P5).
+- **`memory_status` dropped `autograph_failed` in the Node and Python bindings,
+  and the parity guard could not see it.** The field is required by the
+  published schema and documented in `MCP_TOOLS.md`, but both bindings built an
+  `extraction` object of three keys, and `binding_parity_bdd` compared only the
+  ROOT keys of each output schema. Both bindings now relay it (the Node
+  `ts_return_type` included), and the guard reads one level deeper, resolving
+  `$ref`s, with a control that fails if its nested reader sees nothing
+  (#2246, P4-b). Reading one level deeper found a second drop:
+  `compileTranscript`'s TypeScript return type hand-copied seven of `context`'s
+  eight fields and left out `warnings`, which the call does return; it is now
+  declared. Not as `CompiledContextJs`: that `napi(object)` type is
+  camelCased, while this call returns the wire's snake_case JSON.
+
+- **Two reference pages still described superseded behaviour.**
+  `NATIVE_HNSW.md` said downgrading past the `.vectors` v2 change requires
+  re-persisting the index — the CHANGELOG had been corrected, the reference
+  page had not, and the two contradicted each other. `MEMORY_EXTRACTOR_MODELS.md`
+  called its tier table "the settings the product sends today" when every row was
+  measured before the schema was sent as `format`; the table is now dated
+  (#2246, P4-c, P4-d).
+- **A compaction or a reorder with bulk inserts still pending could strand them
+  after a crash.** `upsert_bulk`'s V2 path registers each id and writes its
+  vector at once, and leaves the graph insert to the `AsyncIndexBuilder`.
+  `flush` drains the builder before saving; `compact_storage` and
+  `reorder_for_locality` (whose save #2247 added) did not, so a crash right
+  after either left points stored and mapped but never in the graph — and
+  recovery re-indexes only unmapped ids. Both now drain first. Reproduced with
+  a crash snapshot taken right after the save (#2246).
+- **Opening an adopted Cosine collection could write its `.vectors` file.**
+  Once adopted (#2173) the arena is the durable file, and the load-time norm
+  check normalized off-sphere vectors in it in place — an open that wrote the
+  store, which `velesdb-memory`'s migration resume, hashing these files, would
+  reject as corruption. The #2246 guard test only held because today's engine
+  writes vectors inside the tolerance. A payload that needs normalizing is now
+  copied first — into the arena its storage mode keeps, the heap or SQ8's and
+  RaBitQ's disposable file, under the load's raised allocation ceiling — so no
+  open can write the file whatever the engine or tolerance becomes (#2246, P5).
+- **Opening a collection re-indexes a mapped vector the graph never linked
+  (#2246).** A save that raced `upsert_bulk`'s async build — the builder's
+  drain returning while another build held it, or an upsert landing between
+  the drain and the save — persisted mappings for vectors the graph had not
+  linked yet. Recovery skipped every mapped id, so after a crash those points
+  stayed stored, mapped and unreachable by graph search. Recovery now checks
+  that each mapped id's node has a layer-0 neighbour, and re-indexes those
+  that do not — the entry point aside, since every search starts there.
+- **Two MCP tool descriptions no longer hide a placeholder (#2258).**
+  `relate`'s `relation` field read ``read as `from` <relation> `to` ``, and
+  `retrieve_context_source` read ``behind a ctx://source/<hash> handle``. A
+  Markdown renderer takes a bare placeholder for an HTML tag and drops it:
+  rustdoc did so with the field doc's `<relation>`, and an MCP client
+  displaying the tool schema would drop both. Both are code spans now,
+  ``read as `from <relation> to` `` and `` `ctx://source/<hash>` ``. The
+  descriptions ship in the tool schema clients receive; they are the sweep's
+  only wire-visible changes.
+- **A bulk load running beside single upserts could hand one vector slot to
+  two ids (#2246).** The id mappings predicted each insert's slot while the
+  graph's arena allocated its own, and `upsert_bulk`'s direct writer wrote at
+  the prediction without reconciling. Under concurrent `upsert_bulk` and
+  `upsert` the two diverged: each of three runs of
+  `tests/concurrent_bulk_slots.rs` lost 611 to 645 of 6 400 ids — unfindable
+  even by an exhaustive scan, or answering with another id's vector. The
+  arena is now the only allocator: every path places the vector, then maps
+  the id to the slot it got, under the read guard that keeps
+  `reorder_for_locality` and `vacuum` from renumbering the slot in between.
+  `vacuum` also rebuilds the mappings before releasing its write lock, where a
+  search could previously resolve ids through the old graph's slots. With
+  exact-distance features off (`new_fast_insert`), the direct writer no
+  longer maps an id to a slot it never wrote; the graph insert places the
+  vector and maps it. A mappings file saved before this change could count
+  predicted slots that were never filled: loading holds its `next_idx` to the
+  vectors present, so `tombstone_count`, `tombstone_ratio` and `needs_vacuum`
+  stop reading high on such an index. `VacuumError::VectorStorageDisabled`
+  now says the index's exact-distance features are off. Measured against
+  develop before #2256, the standard `upsert_bulk` path ran about 3.6%
+  slower (#2269); on the V2 path no difference showed above its run-to-run
+  noise, about ±5%.
+
+- **A delete could come back when it ran beside `reorder_for_locality` or a
+  `vacuum` re-map (#2246, #2262).** `remove` dropped an id's two map entries
+  holding no graph guard, so a renumber running at the same time could map
+  the deleted id again, or erase the reverse entry of the id that had taken
+  its slot. `remove` now holds the index's read guard across both writes. A
+  delete made while `vacuum` rebuilds is covered by the #2262 entry above.
+
+- **`reorder_for_locality` could leave a collection whose graph and vectors
+  disagree.** Since `.vectors` became the graph's arena, the permutation lands
+  in the **durable** store the moment it runs, while the adjacency it must stay
+  consistent with is only written by a later `save()` — and
+  `Collection::reorder_for_locality` returned without persisting. Measured on a
+  3 000-point collection reopened (so adopted): `reorder_for_locality()` → `Ok`,
+  `.vectors` modified, `.graph` untouched. A crash, `SIGKILL`, OOM or power loss
+  in that window left every node id resolving to the wrong vector, silently,
+  because both files still parse — the failure `graph/reorder.rs` already
+  measures as "recall@10 1.000 before, 0.000 after". Reachable through
+  `POST /collections/{name}/locality/reorder`.
+
+  Before the arena adoption the permutation touched a disposable
+  `hnsw-{token}.arena` and no such window existed, so this is a regression that
+  arrived with the adoption rather than a latent defect. The index is now saved
+  before the call returns, and `reorder_durability.rs` pins it — seen failing
+  with the save removed.
+
+- **Seven guards verified their result and never their premise.** The worst
+  reopened #2232 silently: `test_exactly_one_step_produces_the_verdict` matched
+  `steps\.\w+\.conclusion`, any identifier, so renaming the mirror step's `id:`
+  without its reference left all 106 tests green while `CI Success` went green
+  reading no `needs` result — GitHub evaluates an unknown step id to `''`. The id
+  is now read from the mirror itself. Alongside it: the lockfile set and
+  `DEFERRED_REMOVALS` gained non-vacuity checks, so an empty set can no longer
+  satisfy "nothing is missing"; the attribution guard's issue surface must now be
+  refused before the absence of its push remedy counts; the duplicate-heading
+  guard covers `crates/velesdb-memory/CHANGELOG.md`, which `release-memory.yml`
+  publishes and nothing guarded; `perfect_mode_semantics` compares Perfect with a
+  brute-force ground truth on a dispersed fixture instead of `top1 == 7` on a
+  collinear one every mode satisfies; and the `.vectors` no-write test runs under
+  Cosine, whose load path renormalises in place. Each was seen failing on the
+  mutation it names (#2246, P2).
+
+- **`Perfect` was still described by its old contract across the docs.**
+  `SearchQuality::Perfect` is an exhaustive scan capped by
+  `limits.max_perfect_mode_vectors` (#2238), but the `SearchMode::Perfect`
+  rustdoc — the copy #2239 missed — the `effective_ef_search` deprecation
+  note, the `index::hnsw::index` module doc, `SEARCH_MODES.md` (its Perfect
+  section, note, diagram, comparison rows and results table), `TUNING_GUIDE.md`,
+  `MOBILE_API.md`, `ECOSYSTEM_PARITY.md`, `CORE_PERFORMANCE.md`,
+  `VELESQL_SPEC.md`'s `mode` mapping, a tutorial table, the uniffi doc that
+  generates the Swift and Kotlin bindings and the Python `LimitsOptions` still
+  said it stayed on the graph at `ef_search = 4096`, or that its cap was not
+  enforced. Two neighbouring `LimitsOptions` fields claimed "not yet enforced"
+  for caps `RuntimeLimits` enforces; corrected with them. The cap is the
+  collection's — `HnswIndex` itself scans without one, and its module doc now
+  says so. `BENCHMARKS.md`'s 0.9994-at-1M row is `Perfect` — an exhaustive
+  scan, from `sift1m_recall.rs` (#1225) — and loses the `~8192` it showed, a
+  computed effort that never ran; why a scan reads 0.9994 rather than 1.0
+  against SIFT1M's ground truth is not established. What the scan returns is
+  stated as it runs — the exact top-k under the index's own distance, ties
+  aside — where `SEARCH_MODES.md` (FAQ included), `TUNING_GUIDE.md`,
+  `PYTHON_PERFORMANCE.md`, `SERVER_REST_TOUR.md`, `NATIVE_HNSW.md` and the core
+  and mobile doc comments said "100% recall" or "by construction"; an index
+  built with its exact-distance features off falls back to a graph search, and
+  its rustdoc says so. `Accurate`'s "~100% recall" label gives the measured
+  figures instead: 100% recall@10 in `recall_benchmark` and 0.98 on SIFT1M's
+  1M. The Fast and Balanced figures (~95% and ~99.5% in the docs; 92.2%
+  and 98.8% in the README, measured at the old ef 64 and 128) were
+  re-measured at today's presets, 97.4% and 99.8%, and every surface
+  cites that measurement. With the `gpu` feature, brute force on an index
+  whose exact-distance features are off took the GPU path anyway; it now
+  returns nothing there too. Two benchmarks printed the exhaustive scan as
+  `ef=4096`; relabelled `exhaustive`. The Adaptive and AutoTune figures no
+  run backs (a 2–4x median-latency gain, ~99% and 95%+ recall) leave the
+  guides and the `SearchQuality::Adaptive` rustdoc, which say instead that
+  nothing measures them yet (#2266); they also said Adaptive escalates to
+  `max_ef`, where it searches a hard query once more, at twice its starting ef
+  capped at `max_ef` (#2246, P3).
+
+- **`SearchQuality::Perfect` was documented as the opposite of what it does.**
+  Its rustdoc described a graph search at `ef_search = 4096` that "tunes the
+  HNSW graph's effort and is not exhaustive", with a ~0.9994 recall figure at
+  1M. It is exhaustive: `try_search_special_quality` routes the variant to
+  `search_brute_force` before `ef_search` is read, and a collection above
+  `limits.max_perfect_mode_vectors` (default 500 000) is refused with
+  `Error::GuardRail` rather than scanned — so a collection at the default
+  cap cannot produce the 1M figure; it came from an exhaustive scan run on
+  `HnswIndex` directly (#1225). The doc was written from `ef_search()` without checking
+  which arm runs. Corrected, and pinned by
+  `crates/velesdb-core/tests/perfect_mode_semantics.rs`, which sees the guard
+  rail refuse and sees `ef = 4096` accepted on the same collection.
+
+
+- **A description edit could make a pull request mergeable with no gate having
+  run.** `ci.yml` subscribes to `pull_request.edited` because a retarget emits
+  nothing else, and every job guards against title/body edits so a routine
+  description change does not cost a full CI run. `ci-success` carried that
+  guard too — so a body edit produced a run where all 27 gates *and the
+  required check* skipped, and branch protection accepts a skipped required
+  check. Measured on #2231: `CI Success: skipping`, `mergeStateStatus: CLEAN`,
+  mergeable on a commit nothing had verified.
+
+  `ci-success` now runs on every event and branches: on such a run it reports
+  the verdict of the real run for the same commit, waiting for one in flight
+  and refusing when none exists, rather than asserting over `needs` results
+  that are all `skipped`. Both paths can refuse; neither can pass on nothing.
+  Pinned by `NoOpEditCannotProduceAGreenCheckTests`, whose five assertions were
+  each seen failing against a deliberately broken workflow.
+
+- **`GeoPoint` coordinates were validated on insert but not on update.**
+  `update_by_pk`, `update_multi_by_pk` and `batch_update` could each write a
+  latitude or longitude outside `[-90, 90]` / `[-180, 180]`, which then fed
+  `GEO_DISTANCE`/`GEO_BBOX` filtering and the Haversine formula itself. The
+  range check now lives in the write primitive every validated write funnels
+  through, so a future path cannot forget it the way the third one already had.
+
+- **The `bytemuck` feature was removed from `velesdb-core`'s public surface**
+  by the change that made the dependency mandatory, since Cargo derives a
+  feature from `optional = true`. Any downstream manifest naming it — directly
+  or through `gpu` — stopped resolving. Restored as a real feature enabling
+  `bytemuck/derive`, which is what the 6.0.0 manifest gave, rather than a stub
+  that keeps the name valid and fails at compile time instead of at resolution.
+  Caught before release; no published version shipped without it.
+
+- **`velesdb-node`'s tests could not link on macOS**, which blocked every local
+  commit through the pre-commit hook whatever it touched. `napi_build::setup()`
+  emits `rustc-cdylib-link-arg`, which reaches the cdylib and nothing else,
+  while a test binary resolves its own Node-API symbols — supplied by the Node
+  executable at load time, never by a library. CI never saw it: the Node
+  binding job is path-filtered.
+
+- **30 broken rustdoc intra-doc links in `velesdb-core`, and the two lints that
+  let them accumulate.** Six were unresolved — all in a module's `//!` header,
+  which rustdoc merges into the `mod` declaration that pulls it in, so once
+  that declaration also carries `///` docs the paths resolve in the *parent's*
+  scope (the same trap as the 49 links fixed in `velesdb-memory`). Twenty-four
+  pointed at `pub(crate)`, `pub(super)` or private items a reader of the
+  published docs cannot reach; those stop being links and become plain code
+  spans rather than promising a page that would 404. No claim changed — only
+  link syntax and the line wrapping that demoting a link disturbs, which
+  `rustfmt` cannot re-flow (`wrap_comments` is nightly-only).
+
+  `rustdoc::broken_intra_doc_links` and `rustdoc::private_intra_doc_links` are
+  warn-by-default, which is why 30 here and 49 there went unnoticed. Both
+  published crates now `#![deny]` them at the crate root, so a plain
+  `cargo doc` fails for a contributor and on docs.rs — not only in the CI step
+  that exports `RUSTDOCFLAGS`. A matching Lint step for `velesdb-core` keeps
+  the docs actually built, since an attribute cannot fire if nobody builds
+  them. `[workspace.lints.rustdoc]` remains future work: 17 such links survive
+  in the crates that are not published to crates.io (`velesdb-wasm` 8,
+  `tauri-plugin-velesdb` 4, `velesdb-server` 3, `velesdb-migrate` 2).
+- **`npm advisories` no longer reads a registry outage as a vulnerability.**
+  `npm audit` exits 1 both when it finds an advisory and when it cannot reach
+  the advisory endpoint, and the gate ran it directly, so the two were
+  indistinguishable. On 2026-09-03 the npmjs.org bulk endpoint returned 503s
+  and then hung until npm's own five-minute network timeout for roughly eight
+  hours; the job went red three times on `develop` reporting a vulnerability
+  that did not exist — the lockfiles had not changed, and the same content had
+  been green at merge time hours earlier. `scripts/npm-audit-gate.py` now reads
+  the report (`metadata.vulnerabilities`, absent from npm's error payload)
+  instead of the exit code, retries only the attempts that produced no report
+  (four attempts, backoff 5s/10s/20s, each bounded at 120s), and still fails
+  closed when none ever does — with exit 75 (`EX_TEMPFAIL`) and a message
+  saying it is infrastructure, not a finding. An unaudited lockfile is not an
+  audited one; what changes is that the job says which of the two happened.
+  Registered in `scripts/guards.json` with a refusal vector whose accepted
+  control is an npm double that exits 1 in both states.
+
+- **The npm advisory gate audited four of the eight tracked lockfiles**, and
+  the four it omitted were audited by nothing. `js-yaml` was published
+  vulnerable (GHSA-2883-xcg3-v3hh, high: `maxTotalMergeKeys` does not bound CPU
+  for empty merge sources) on 2026-09-09 and reached the default branch inside
+  `crates/velesdb-node`, found by Dependabot rather than by the gate. Bumped
+  4.3.1 → 4.3.2, lockfile-only, same major. The matrix now lists all eight
+  roots, and the missing half of the check exists: the suite proved every
+  matrix entry was a real directory but never that the matrix was complete, so
+  `test_every_tracked_lockfile_is_audited` compares it against `git ls-files`
+  — no hard-coded count, which would pass the day a ninth lockfile appears.
+  The other three previously unaudited roots audit clean.
+
+- **`ProceduralMemory::reinforce`/`reinforce_with_strategy` could resurrect an
+  expired-but-unswept procedure.** Every other write path on the struct
+  (`relate`, `set_ttl`, `update_metadata`'s analog on `SemanticMemory`) rejects
+  a TTL-expired id via `memory_helpers::ensure_live` before touching it, but
+  `reinforce_with_strategy` fetched the point with a raw `collection.get`
+  instead, so reinforcing an id whose TTL had elapsed but had not yet been
+  swept by `auto_expire` silently mutated confidence, usage and success/failure
+  counters on a point already invisible to `recall`, `list_all` and `relate`.
+  It now shares `ensure_live` with the rest of the struct and returns
+  `NotFound`, matching every sibling accessor.
+
+### Changed
+
+- **BREAKING (Rust API, velesdb-migrate) — `Error::Yaml` now carries a `String`
+  (RUSTSEC-2024-0449).** The variant was `Yaml(serde_yaml::Error)`; it is
+  `Yaml(String)`, the parser's one-line message with its line and column, like
+  the crate's other message variants (`Config`, `Checkpoint`, ...). A third-party
+  parser type no longer appears in the public API, so the next parser swap is
+  not another breaking change. Under plain SemVer (workspace crates follow it)
+  this is a major bump, and the next release is already one (note above). The
+  `From<serde_yaml::Error>` conversion is gone with it. Migrating:
+  `Error::Yaml(e)` now binds a `String` (`e.to_string()` and `{e}` still work);
+  code that downcast the payload or called `e.location()` reads the line and
+  column from the message instead.
+  The CLI prints the same `YAML error: ...` prefix.
+- **velesdb-migrate YAML parsing: same files, same values, a few edges moved
+  (RUSTSEC-2024-0449).** The loader runs `serde-saphyr` with `strict_booleans`,
+  which keeps YAML 1.2 semantics: only `true`/`false` are booleans, so
+  `yes`/`no`/`on`/`off` stay strings exactly as before. Every shipped example
+  and every YAML block of `docs/guides/MIGRATE_SOURCES.md` parses to the same
+  values as before (checked against the old parser over those files and ~130
+  scalar-spelling probes, and now pinned by tests). The differences are at the
+  margins, none of them in a documented config:
+  - a source field holding an unquoted `1_000` or `010` (an `api_key`, say) is
+    read as a number and refused for a string field; quote it. (Under the old
+    parser the same field was refused for `12345`.)
+  - an unquoted `~`, `null` or empty value for a required string such as
+    `destination.collection` is refused instead of becoming the string `"~"`.
+  - accepted where it was refused: `options: null`, a quoted `"5"` for a number
+    or `"true"` for a boolean, `1_000` for a number, a UTF-8 BOM, and `<<` merge
+    keys.
+  - error messages are worded by the new parser.
+- **`velesdb-migrate` grows by about 1 MiB; its binary-size ceiling moves from
+  9 to 9.9 MiB (RUSTSEC-2024-0449).** 8.62 MiB at 6.0.0, 9.63 MiB on the
+  Binary Size Gate with the safe-Rust parser. The weight is the parser, not the
+  integration: serde-saphyr and its parser and error-rendering crates are about
+  690 KiB of the 903 KiB the code section gains. `scripts/check_binary_size.py`
+  records the measurement; `velesdb-server` and `velesdb` do not depend on the
+  parser outside tests and keep their ceilings.
+- **`docs/openapi.yaml` regenerated by `serde-saphyr` (RUSTSEC-2024-0449).** The
+  serializer quotes differently (`"200"` for `'200'`, `"/collections/{name}"`
+  for the bare path), so the file changes line by line while its content does
+  not: parsed, it is identical to the previous file and to `docs/openapi.json`.
+  `readme_rest_endpoint_count` in `docs/reference/promise-contract.json` counts
+  path keys with the quote now optional (`^  "?/`).
+- **The `velesdb` CLI reads `./velesdb.toml` when neither `--config` nor
+  `VELESDB_CONFIG` is given, as `velesdb-server` does (#2400).** It used to open
+  every database with the core defaults in that case, although
+  `docs/guides/CONFIGURATION.md` documents the fallback for both binaries. It
+  loads the same engine-only sections as `--config`: `[search]`, `[hnsw]`,
+  `[storage]`, `[limits]`, `[quantization]` and `[wal_batch]`, while `[server]`,
+  `[auth]`, `[tls]` and `[cors]` stay `velesdb-server`'s own and are ignored. A
+  `velesdb.toml` that is present but invalid now fails every command that opens
+  a database, the REPL included, until it is fixed or `--config <file>` points
+  elsewhere; the error says the file was read implicitly from the working
+  directory and how to override it. A directory with no `velesdb.toml`, and an
+  explicit `--config`, behave as before.
+- **BREAKING (Rust API, `openapi` feature) — velesdb-core's `utoipa` dependency
+  moves 5.3.0 → 6.0.0, and velesdb-server's `utoipa`/`utoipa-swagger-ui` move
+  5.3.0 → 6.0.0 and 9 → 10 with it (#2429).** `utoipa-swagger-ui` 9.0.2
+  requires `utoipa ^5`; 10.0.1 requires `utoipa ^6.0.0`, so the two bump
+  together or the build breaks on two incompatible `utoipa` crate instances.
+  Any downstream crate enabling velesdb-core's `openapi` feature while
+  depending on `utoipa 5` itself (e.g. to implement `ToSchema` on its own
+  types alongside velesdb-core's) no longer compiles; it must move to
+  `utoipa 6` too. `docs/openapi.json`/`docs/openapi.yaml` are regenerated:
+  utoipa 6.0.0 changed the variant order it emits for an `Option<T>` field's
+  `oneOf` schema (the `null` variant now comes after the `$ref` instead of
+  before it) — same schema, same semantics, nothing added or removed.
+- **velesdb-server checks its OpenAPI descriptions for rustdoc links with
+  pulldown-cmark, through the guard velesdb-memory already used (#2330).**
+  Its hand-written raw-text scan passed an autolink to a path
+  (`<crate::Point>`) and bare item paths (`[SegmentInfo]`, `[u64]`), which
+  rustdoc resolves or warns about, while failing code spans and web links
+  whose text holds code. The guard moves out of velesdb-memory's tests into
+  `velesdb-rustdoc-guard`, a test-only crate that is never published and that
+  both crates take as a dev-dependency. It reads each text twice, as rustdoc
+  does and as a client renders it, and reads a bare label in the order of
+  rustdoc 1.90's `preprocess_link`; against rustdoc on 22,621 generated
+  labels, it flags every one rustdoc links. It now also flags a label with
+  backticks inside (``[f`()`]``), the `[&]` and `[!]` primitives, generics
+  before one (`[!<u8>]`), a spaced call suffix (`[f ()]`, `[vec !]`), a kind
+  spaced from its `@` (`[struct @Foo]`, which rustdoc warns about), a
+  `mailto::X` path used as a link target, and the link a client renders
+  after a collapsed reference (`[a, b][](crate::Foo)`). It now passes the
+  labels rustdoc neither links nor warns about that the memory guard failed:
+  punctuation in a path (`[f(x)]`, `[a{}]`, `[Result<(), u8>]`), a code span
+  that holds no path (`` [`()`] ``), and a label holding a `/`, fragment
+  included (`[S0#a/b]`). velesdb-memory's schema rewrite, which removes such
+  links from the descriptions it publishes, reads every target the same way,
+  whether a label, an inline destination or a reference definition. It drops
+  every backtick first, as rustdoc does, and reads no path in a target that
+  holds a `/` anywhere or, generics included, a mark rustdoc never reads in
+  one. So it now leaves as written a label such as `[Result<(), u8>]` or
+  `[S0#a/b]`, as rustdoc shows it, and refuses a link whose destination or
+  definition is such a target (`[x](a#b/c)`, `[x](Foo<'a>)`, `[y]: a#b/c`),
+  which the guard flags; develop rewrote all of these. It now also removes a
+  link whose target holds backticks other than one enclosing code span
+  (``[f`()`]``, ``[``Foo``]``, ``[x](crate::`Foo`)``, ``[x](crate::Foo`)``),
+  which rustdoc links, and still removes one whose generics hold code
+  (`` [Vec<`u8`>] ``).
+- **The published crates declare dependency floors they can actually be built
+  with (#1987).** `-Z direct-minimal-versions` found requirements below what
+  the rest of the dependency graph, or the code itself, needs: `serde` "1.0"
+  where cargo-platform already requires 1.0.228, `figment` "0.10" whose 0.10.0
+  no longer compiles against serde, `tracing` "0.1" whose 0.1.37 drops the `%`
+  of a log field, `ureq` "2" whose 2.0.0 lacks `Transport::kind()`. Each moved
+  to the lowest version the resolve and the compile accept, not to the locked
+  one; only `pest` needed the lockfile to move, 2.9.0 to 2.9.1. `tar` moves to
+  0.4.3, the first release whose `st_mode` mask compiles on macOS: 0.4.0 to
+  0.4.2 mask with `libc::S_IFMT`, a `u16` there and a `u32` on Linux, which is
+  why a Linux-only check never saw it. A consumer who holds one of these crates
+  below its new floor has to update it. Several floors are still above what
+  `velesdb-core`'s or `velesdb-memory`'s own resolve needs (`serde` needs
+  1.0.220, `serde_json` 1.0.127, `time` 0.3.35 there): they come from a resolve
+  of the whole workspace, and lowering one needs a build at the lower version
+  to back it, which the per-crate job now makes possible. `time`'s figure is
+  `x509-parser`'s, reached through rcgen — not rcgen's own `^0.3.6`, which its
+  `x509-parser` feature raises.
+
+- **BREAKING (TypeScript SDK, WASM backend) — an argument the WASM backend
+  cannot apply is refused, and a search's inputs are checked as core checks
+  them (#2095).** Calls that used to succeed with the argument ignored now
+  throw `NOT_SUPPORTED`, naming the backend and the capability: a `filter`
+  on `textSearch`, `hybridSearch`, `multiQuerySearch` or a sparse
+  `search`; `sparseIndexName`; `includeVectors: true`; under
+  `relative_score`, `fusionParams.denseWeight` or `sparseWeight`; under
+  `weighted`, a triple given in part; `createCollection` with
+  `storageMode` `pq` or `rabitq` (velesdb-wasm stores both as SQ8), a
+  `collectionType` other than `vector`, or `hnsw`,
+  `pqRescoreOversampling`, `deferredIndexing` or `asyncIndexBuilder`;
+  `query` with `timeoutMs` or `stream: true`. A `fusionParams` field the
+  chosen strategy never reads is ignored, as core ignores it, but only
+  once it is well formed: every weight given must be a finite number
+  under every strategy, as REST's `f32` fields must, and `null` counts as
+  given, since the REST backend sends it as JSON `null`. Under
+  `weighted`, a triple core would reject (a negative or non-finite weight,
+  or a sum more than 0.001 from 1.0, computed in f32 as core computes it)
+  throws `BAD_REQUEST` instead of the binding's bare string.
+
+  Every search checks its inputs first, as core does. A query vector of
+  the wrong dimension throws `DIMENSION_MISMATCH` whatever `k` is, and
+  `multiQuerySearch` refuses a short or long vector instead of padding or
+  overflowing it. The WASM backend's `multiQuerySearch` takes 1 to 10
+  vectors, as core's does, and more than 10 now throw `BAD_REQUEST`.
+  `db.multiQuerySearch` still refuses an empty list with
+  `VALIDATION_ERROR` before any backend sees it; only a direct
+  `WasmBackend.multiQuerySearch` call, which returned `[]` for one, now
+  throws `BAD_REQUEST`. A non-integer or negative `k` throws
+  `BAD_REQUEST`, core's `k` being unsigned, and so does a `k` above
+  2^32 - 1, since velesdb-wasm's `usize` is 32-bit and the binding would
+  wrap it (a `k` of 2^32 returned no rows, 2^32 + 2 two). A `k` of 0
+  returns nothing without calling the binding (a sparse search used to
+  return live hits). `fusionParams.k` must be an integer from 0 to
+  2^32 - 1, core's `u32`, whichever strategy is named, where -1, 1.5 or
+  `'abc'` used to reach the binding. A `k`, a weight or a `vectorWeight`
+  that is not a number throws `BAD_REQUEST` naming its type, where the
+  binding coerced a string and an object with no prototype ended in a
+  `TypeError`. A weight or a `vectorWeight` that is NaN or infinite throws
+  `BAD_REQUEST` too, as REST refuses it (JSON sends each as `null`, which
+  an `f32` field does not accept), where the binding received it.
+  At runtime a fusion strategy name is read as core reads it, in any case
+  and with the aliases `avg`, `max` and `rsf`, spellings that only untyped
+  (JavaScript) callers can send, since the `FusionStrategy` type keeps the
+  canonical names. `null` or absent means `rrf`, and an unknown name, or
+  any other value that is not a string, throws `BAD_REQUEST`. `'rsf'` used
+  to let `denseWeight` through, and `'WEIGHTED'` dropped the caller's
+  triple. `query` no longer reads `params.k`, which REST ignores: a
+  statement without `LIMIT` returns core's default of 10 rows, `LIMIT` is
+  capped at core's 100,000, and one too large for a u64 throws
+  `BAD_REQUEST`, as core's parser refuses it.
+  A `quality` preset velesdb-wasm cannot parse now throws where it used to
+  be accepted and dropped: `search`, on every path, hands the string to the
+  binding's `search_with_quality`, whose `parse_search_quality` is the one
+  implementation of the grammar, so the SDK refuses `'nonsense'` where the
+  REST server answers `400` (#2267). The refusal is a `VelesDBError`
+  (`BAD_REQUEST`) naming the backend and quoting the binding's words: the
+  binding throws a bare string, which would otherwise reach the caller as a
+  value no `instanceof` narrows. `searchBatch` refuses in the same pre-loop
+  as a filter, before any entry searches, so no batch runs half-way. A dense
+  search runs under the named preset, `balanced` when none is named; the
+  preset still tunes nothing, WASM search being brute force, and a filtered
+  or sparse-only search validates it without applying it.
+  Every catch around a binding call reads the thrown value through one
+  reader, `describeWasmThrow`, including the memory wedge's `init()`: a
+  failed `@wiscale/velesdb-wasm` load or a failed `MemoryService`
+  construction now names its reason in the `ConnectionError`'s message,
+  where before the message said only that initialization had failed. On
+  6.0.0 those two reject with a `WebAssembly.CompileError`, which `cause`
+  does carry; the bare-string shape is the method-call path's, and the one
+  reader covers both rather than assuming either. That reader is total: a
+  prototype-less object or a hostile `toString` is named by its type rather
+  than coerced, so the reader can never replace the binding's reason with a
+  `TypeError` of its own.
+  On REST, `multiQuerySearchIds` with a `filter` now
+  fails with the server's `400` instead of returning unfiltered ids.
+
+- **BREAKING (REST, VelesQL, bindings) — an unparseable search `mode` now
+  fails instead of running silently at the default quality (#2267).**
+  `WITH (mode = '...')` in VelesQL and
+  `"mode": "..."` in a REST search body went through one parser
+  (`mode_to_search_quality`) that returns `None` for anything it cannot read —
+  a typo (`'acurate'`), a bare `adaptive` missing its `<min_ef>:<max_ef>`
+  bounds, or any other unknown string — and its callers read that `None` as
+  "no override given". `api_types::parse_search_mode` rejects such a mode with
+  a message naming the accepted forms, and every entry point now checks it:
+  - VelesQL checks `mode`, and its alias `quality`, in the query validator,
+    before any dispatch: every query shape fails with `V013`, the union,
+    `SPARSE_NEAR` and `NEAR_FUSED` paths and `EXPLAIN` included, and so does a
+    mode that is not a string (`mode = 5`) or one another entry shadows
+    (`mode = 'fast', quality = 'acurate'`). A collection's own
+    `execute_aggregate`, which the Tauri plugin and embedders call directly,
+    now runs the validator too;
+  - REST answers `400` on `/search` and `/search/ids`, whatever the request's
+    shape (dense, sparse, or both), and on `/search/batch`, naming the entry
+    (a batch checks each entry's mode but still applies none),
+    before the collection's circuit breaker counts the request, so a client
+    repeating a typo cannot make it answer `503` to every other client;
+    `/search/ids` sends any request carrying a mode past its fast path, which
+    has no quality dispatch of its own. The search endpoints with no `mode`
+    field (`/search/hybrid`, `/search/text`, `/search/multi`,
+    `/search/multi/ids`, `/graph/search`) ignore it, as they ignore any field
+    they do not know;
+  - the CLI REPL refuses such a mode at `\set mode`, accepts the aliases
+    `auto` and `auto_tune` as the server does, and no longer masks an inline
+    `quality` it cannot read with the session mode; the Tauri plugin reports a
+    bad mode with the same message.
+
+  This holds in every build with `persistence`. The WASM executor reads no
+  `WITH` option, so it neither applies nor checks a mode.
+
+  Breaking for a client, over REST, VelesQL or a binding, that sent an unknown
+  mode and silently got results at the default quality: it now needs a mode
+  from the documented list, in any letter case (`fast`, `balanced`, `accurate`,
+  `perfect`, `autotune`, `custom:<ef>`, `adaptive:<min_ef>:<max_ef>`). One more path
+  changes: a collection's own `execute_aggregate`, which the Tauri plugin and
+  embedders call directly, now refuses what `Database::execute_aggregate`
+  already refused, any query the validator rejects, such as `MAX(score)` under
+  a `GROUP BY` with no vector `NEAR` (`V006`), as the VelesQL spec documents.
+  The note at the top of `[Unreleased]` says what that means for the next
+  release's version.
+
+- **BREAKING (REST, VelesQL, bindings) — an `ef_search` outside `[16, 4096]`
+  now fails instead of running silently (#2274).** `WITH (ef_search = ...)`
+  in VelesQL read the option as `get("ef_search").and_then(as_integer)`, under
+  an `#[allow(clippy::cast_sign_loss)]` that hid the actual defect: the
+  grammar accepts a leading `-` on any integer, so `ef_search = -1` cast to
+  `usize::MAX` and ran an uncapped graph traversal, neither exhaustive nor
+  covered by `limits.max_perfect_mode_vectors`; a non-integer value (a typo,
+  `ef_search = 'high'`) was silently ignored. `api_types::validate_ef_search`
+  (input already known to be non-negative: REST, the CLI, the config file)
+  and `api_types::parse_with_ef_search` (VelesQL's signed grammar, and the
+  Python binding's `int`) now reject such a value, and every entry point
+  checks it:
+  - VelesQL checks `ef_search` in the query validator, before any dispatch:
+    every query shape fails with `V014`, mirroring `V013` for `mode` (#2267),
+    and so does a bad value a repeated `ef_search` key shadows.
+    `WithClause::ef_search` is the one validated reading; `get_ef_search`
+    keeps its silent-drop behavior for callers already past validation, and
+    now drops a negative value, as its documentation says, instead of casting
+    it to `usize::MAX`; `ef_search_value` reads whether an inline value was
+    given at all,
+    like `mode_value` does for `mode`;
+  - REST answers `400` on `/search` and `/search/ids`, before the collection's
+    circuit breaker counts the request, and on `/search/batch`, naming the
+    entry (a batch checks each entry's `ef_search` but still applies none); a
+    value that is not a non-negative integer fails the body's JSON parsing
+    with a `422`, as any mistyped field does. The OpenAPI document publishes
+    the range as the field's `minimum` and `maximum`, and that `422` on each
+    of the three paths;
+  - the CLI's `\set ef_search` and the config file's `[search].ef_search`
+    already enforced this same range independently; they now call the one
+    definition instead of a copy of the bound;
+  - `velesdb-python`'s `search_with_ef` raises `ValueError` for any `int`
+    outside the range, a negative one or one no `i64` holds included,
+    instead of passing it straight to the HNSW traversal or raising
+    `OverflowError`.
+
+  This holds in every build with `persistence`. The WASM executor reads no
+  `WITH` option, so it neither applies nor checks `ef_search`, matching `mode`.
+
+  Breaking for a client, over REST, VelesQL or the Python binding, that sent
+  an `ef_search` outside `[16, 4096]` and got either results at an uncapped or
+  near-useless traversal, or a silently ignored override: it now gets a `400`
+  (REST), a `422` with `V014` (VelesQL over `/query`) or a `ValueError`
+  (Python), each naming the accepted range. The CLI's `\set ef_search` and the
+  config file already refused such a value in v6.0.0. The note at the top of
+  `[Unreleased]` covers this alongside #2267.
+
+- **BREAKING (REST, VelesQL, bindings) — a `custom:<ef>` or
+  `adaptive:<min_ef>:<max_ef>` mode with an ef outside `[16, 4096]` now fails
+  (#2275).** #2274 bounded the `ef_search` option; these two spellings of the
+  same knob still reached the HNSW traversal unbounded, `custom:99999999` as
+  surely as `ef_search = 99999999` did. Every surface that turns such a mode
+  into a `SearchQuality` now checks each ef, and both adaptive bounds, against
+  `api_types::validate_ef_search`:
+  - `api_types::parse_search_mode`, which REST, VelesQL's `WITH (mode = ...)`,
+    the CLI's `\set mode` and the Tauri plugin all call, names the value —
+    `Search mode 'custom:5000': ef_search must be an integer between 16 and
+    4096, got 5000` — instead of calling a well-formed mode unknown; an
+    integer past `usize::MAX` is out of range too, not malformed.
+    `mode_to_search_quality` is now `parse_search_mode(..).ok()`, one
+    implementation instead of two. A negative ef is out of range too, as
+    `WITH (ef_search = -5)` is, and the range is checked before the order of
+    the adaptive bounds: `adaptive:5000:32` names 5000;
+  - `velesdb-python` drops its own copy of that parser and calls
+    `parse_search_mode`, raising `ValueError` with its message. A malformed
+    mode's message changes with it, from `Unknown search quality`,
+    `Invalid custom ef_search value`, `Invalid adaptive ...` or
+    `Adaptive min_ef ... must be <= max_ef` to core's
+    `Unknown search mode '...'. Valid values: ...`;
+  - `velesdb-wasm`'s `search_with_quality` applies no ef, but now refuses
+    what the server refuses: an ef outside the range throws;
+  - `velesdb-mobile`'s conversion to the core `SearchQuality` is now
+    `TryFrom` instead of `From`, and `search_with_quality` throws
+    `VelesError.Database` where `Custom { ef: u32::MAX }` used to run an
+    uncapped traversal. The Swift and Kotlin signatures are unchanged; a Rust
+    caller of the `From` impl moves to `try_from`.
+
+  Breaking for a client that sent such a mode and got results: it now gets a
+  `400` (REST), a `422` with `V013` (VelesQL over `/query`), a `ValueError`
+  (Python), a thrown `VelesError` (mobile) or a thrown error (WASM's
+  `search_with_quality`). The WASM executor reads no `WITH` option, so a
+  VelesQL query there neither applies nor checks these modes.
+
+- **`.vectors` now has a v2 format: the payload starts page-aligned at byte
+  4096 instead of byte 16.** The header fields are unchanged and at the same
+  offsets; only the payload moved, into a zero-filled reserved gap.
+
+  The gap is not padding for its own sake. The graph's f32 arena hands out
+  `&[f32]` built with `slice::from_raw_parts`, whose contract requires proper
+  alignment, so a payload starting at byte 16 could never be mapped as one.
+  Moving it is what lets the file *be* the arena rather than be copied into one.
+
+  **Downgrading works, and that was measured rather than reasoned about.** An
+  earlier draft of this entry said a `git checkout` of an older build "will not
+  open a database written by this one". That was read off the v1 reader — which
+  does refuse a v2 header with `Unsupported version: 2` — without checking
+  whether anything reaches it. Nothing does: a `v6.0.0` binary opens a database
+  written by this release and answers `len = 64` with the correct nearest
+  neighbour. Setting the version byte to 99, truncating the file to its header,
+  and deleting it outright all behave identically, because `.vectors` is a
+  derived artifact and the collection is rebuilt from `vectors.dat` / the WAL
+  when it cannot be used. The reverse direction is equally clean: this build
+  reads a v1 file and leaves it v1 rather than silently rewriting it.
+  `a_corrupt_vectors_file_does_not_prevent_opening` pins that fallback so this
+  paragraph is not prose anybody has to trust. `.vectors` had no version-compat mechanism at all before this, so
+  the v1 read path was written here rather than inherited.
+
+### Deprecated
+
+- **`StorageConfig::{data_dir, mmap_cache_mb, vector_alignment}` carry
+  `#[deprecated]`.** They were deprecated in prose only (#2220): a Rust caller
+  setting one got no compiler warning. The TOML keys load exactly as before
+  (#2246, P5).
+
+- **`[storage]` `data_dir`, `mmap_cache_mb` and `vector_alignment` — parsed
+  and validated, never applied.** Issue #2087's per-knob audit found these
+  three have no engine counterpart to wire them to at all (`data_dir` also
+  conflicts irreducibly with the path passed to `Database::open`), unlike
+  `storage_mode` and the rest of `[hnsw]`/`[search]`, which are still
+  pending a wiring decision. They now get the same warn-not-reject
+  deprecation cycle `[wal_batch]` (#2078) is already running — though
+  `[wal_batch]` has no validation at all, while `mmap_cache_mb` keeps its
+  pre-existing hard range check (left as is; loosening it is a separate
+  change). `VelesConfig::validate` logs a warning naming exactly which of
+  the three is set away from its default, and removal targets the next
+  major (tracked by `scripts/check-deferred-removals.py`). No behavior
+  changes — a config file setting them today keeps loading exactly as
+  before.
+
+### Performance
+
+- **Opening a Cosine collection no longer reads every vector.** Right after
+  adopting `.vectors` as its arena (#2173), a Cosine load checked every
+  vector's norm, faulting the whole mapped payload in inside `load` — the cost
+  a mapped load exists to defer — for exactly the embeddings case. A
+  pre-normalized engine's dump now sets a flag in the first byte of the v2
+  header's reserved padding, and a flagged payload is not re-checked. Files
+  written before the flag keep the check; readers that predate it seek past
+  the padding and never see it. `persistence_load_scale` timed Euclidean only,
+  which is what hid this; it now has a Cosine arm. The flag is only as true as
+  every writer into the arena: `upsert_bulk`'s direct writer stored raw
+  vectors into a cosine arena, and now normalizes them as the graph's own
+  insert path does (#2246, P5).
+
+- **A file-backed arena grows by an eighth, not by doubling.** Its capacity is
+  the durable `.vectors` file's length, reserved on disk for real, and no dump
+  shrinks it: the first insert after reopening an adopted collection reserved
+  a second payload's worth of disk and kept it. Slack is now bounded to 12.5 %
+  while growth stays geometric, and no growth step copies, so a push stays
+  amortised O(1). The heap arena, whose slack is memory, still doubles
+  (#2246, P5).
+
+- **The vectors dump writes each vector's bytes in one call rather than one per
+  `f32`** — 15.4 million calls at 20 000 nodes by 768 dimensions, each paying
+  `BufWriter` bookkeeping to move four bytes. Measured on
+  `persistence_save_scale` at 5 000 nodes by 3072d: **~34 % off the whole
+  `save()`**, and ~2.1x on the dump alone once the graph-and-sidecar constant
+  is subtracted.
+
+- **Loading no longer copies the vector payload** when the file is adopted as
+  the arena. The saving is real but its size depends on the query pattern, and
+  `persistence_load_scale`'s module docs carry the measurement with the two
+  caveats that bound it rather than a single flattering ratio.
+
 ## [6.0.0] - 2026-09-02
 
 ### Security
@@ -1495,6 +3179,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Ollama extractor constrains decoding with its own schema (#1944).**
+  Every `/api/generate` call now carries the extraction contract as Ollama's
+  `format`, so a schema-broken reply is structurally impossible rather than
+  merely discouraged by the prompt. Measured on the extraction campaign
+  (#1943), constrained decoding moved the 8 GB tier from no eligible model to
+  two, and took one model from zero valid replies to all of them. It repairs
+  **structure, not comprehension**: a constrained small model returns valid
+  JSON that is more often wrong about the passage. The published tier table in
+  [`docs/guides/MEMORY_EXTRACTOR_MODELS.md`](docs/guides/MEMORY_EXTRACTOR_MODELS.md)
+  is deliberately left as measured until a campaign is replayed against the
+  schema the crate now sends.
 - **HTTP inference features are named by role (#1766).** `embedder-http` and
   `extractor-http` are now the canonical build features. The former `ollama`
   and `extract` names remain compatibility aliases, so existing dependency

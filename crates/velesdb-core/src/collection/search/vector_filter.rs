@@ -42,7 +42,7 @@ impl Collection {
         let metric = config.metric;
         drop(config);
 
-        let quality = resolve_quality(opts);
+        let quality = opts.resolved_quality(self.runtime_search_quality());
 
         // Parity item E: gate Perfect-mode over-cap before any index dispatch
         // so a filtered `WITH (mode='perfect')` query cannot trigger an
@@ -203,16 +203,6 @@ pub(crate) fn ef_to_quality(ef_search: usize) -> crate::SearchQuality {
     crate::SearchQuality::Custom(ef_search)
 }
 
-/// Resolves the search quality from query options.
-fn resolve_quality(
-    opts: &crate::collection::search::query::QuerySearchOptions,
-) -> crate::SearchQuality {
-    opts.quality.unwrap_or_else(|| {
-        opts.ef_search
-            .map_or(crate::SearchQuality::Balanced, ef_to_quality)
-    })
-}
-
 /// Hard upper bound on the oversampled HNSW candidate budget.
 const OVERSAMPLE_CAP: f64 = 10_000.0;
 
@@ -256,6 +246,8 @@ fn estimate_filter_selectivity(filter: &crate::filter::Filter) -> f64 {
 /// (raw search paths). Constants come from the shared
 /// [`selectivity_defaults`](crate::collection::stats::selectivity_defaults)
 /// table so this path cannot drift from the stats-backed one.
+///
+/// [`CollectionStats`]: crate::collection::stats::CollectionStats
 fn estimate_condition_selectivity(cond: &crate::filter::Condition) -> f64 {
     use crate::collection::stats::selectivity_defaults as d;
     use crate::filter::Condition;

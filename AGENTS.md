@@ -21,11 +21,13 @@ Bias toward caution over speed. For trivial tasks, use judgment.
 
   The body of a pull request is the surface this rule loses on by default, and it has cost two CI cycles: some tooling appends a `Generated with …` footer **server-side, at publish time**, so a body that was clean when you wrote it arrives already violating with every commit in it clean. Strip it from the published body immediately after opening the PR — before CI reads it — and verify by re-reading the body back. Editing it later is necessary but not sufficient: `pr-governance.yml` reads `github.event.pull_request.body` from the *event payload*, and it ignores `edited` events, so a re-run replays the stale body and fails again. Only a new push (a `synchronize`) carries the corrected one. The guard says so itself: "If your tooling appends it on publish, strip it afterwards — the rule covers published prose, not just commits."
 
+  **No identity authors a commit here but the maintainer — a bot's least of all.** `dependabot[bot]`, `renovate[bot]` and `github-actions[bot]` are not exceptions: a GitHub squash-merge of a bot's pull request writes that bot as the author, so merging one directly puts a bot-authored commit into `develop`. The flow is the one used for #2326: review the bot's PR, take its diff as a maintainer-authored commit on a `chore/` branch, close the bot PR as superseded. `check-ai-attribution.py` enforces this on every PR range and forgives only the 174 bot-authored commits already published, by a single pinned SHA it names (#2336) — so the fix for a red attribution gate is to re-author (`git commit --amend --reset-author`), never to widen the amnesty.
+
 **6. The r/rust bar.** Every technical and implementation choice must survive scrutiny from a demanding Rust reviewer — "would r/rust tear this apart?" is the acceptance test, applied before the code is written. Concretely: an invariant belongs to the compiler first (const-derived discriminants, cfg-typed fields, newtypes), to a test second, to prose never — "kept in lock-step" as a comment is a bug report waiting to happen. Docs must describe what the code actually enforces, not what it aspires to. No `#[allow]` where a structural fix exists. A public item is a contract: never conscript a private hot-path mechanism into one, and never ship a public type whose reason to exist is undocumented. Worked examples to imitate: #2038 (lock-rank tables unified by const-fn discriminants instead of a synced-by-hand pair), #2034 (one struct shape, the varying part pushed into a cfg-typed field plus a drift test).
 
 **7. Complete the binding memory loop.** For VelesDB design and implementation, follow `velesdb-learning-loop`: recall before the first repository edit, remember non-trivial decisions, relate each decision or incident to its cause with an outgoing edge, and return feedback for every recalled memory that helped or misled. (`PreToolUse`/`PostToolUse` recall sentinel plus the blocking `Stop` checklist; `scripts/tests/test_learning_loop_policy.py`.) The edit guard is an opt-in guardrail, not a security boundary: shell mutations remain outside it, and the last three steps are enforced by policy plus the stop continuation rather than individual tool denials.
 
-**8. A recorded decision is not a defect.** Two places in this repository hold conclusions someone already reached with evidence, and both read like oversights if you skip them. **Open design issues carry their state in the most recent status comment** — #2112 lists five things deferred on purpose (each with the reason: an endianness constraint, a vacuum invariant, flash endurance, an unreachable path, a missing measurement), #2106 records which of its 19 findings are fixed and what survived the fix. **Module docs record *why*, not only what** — `contiguous_file_arena.rs` and `index/hnsw/native/arena_home.rs` explain that the arena is deliberately written twice per collection lifetime and that `flush_backing` deliberately has no caller. Read the issue comment and the module doc before "fixing" either. Reopening a documented deferral without *new* evidence is churn; if you believe one is wrong, say why with evidence and let the maintainer decide. And never claim a performance or memory win that has not been measured — #2112's own acceptance criteria say "demonstrated in a test or bench artifact — not asserted in prose".
+**8. A recorded decision is not a defect.** Two places in this repository hold conclusions someone already reached with evidence, and both read like oversights if you skip them. **Design issues carry their state in their status comments, closed ones included** — #2112's status of 2026-08-24 lists what it deferred on purpose, each with its reason, and #2173's closing comment records what shipped after it (the arena mapped from `.vectors` itself, which retired the second write) and what its own text got wrong; #2106 records which of its 19 findings were fixed and what survived the fix. **Module docs record *why*, not only what** — `index/hnsw/native/arena_home.rs` explains that a *disposable* arena, the path an adopted `.vectors` no longer takes, is deliberately written to disk roughly twice per collection lifetime, and why nothing should hurry its writeback. Read the status comment and the module doc before "fixing" either. Reopening a documented deferral without *new* evidence is churn; if you believe one is wrong, say why with evidence and let the maintainer decide. And never claim a performance or memory win that has not been measured — #2112's own acceptance criteria say "demonstrated in a test or bench artifact — not asserted in prose".
 
 **9. An omission needs a live guard, not a remembered one.** The counterweight to principle 8. A comment that justifies *not* doing something — "so we only need to handle X", "no production path takes Y yet", "Z is rejected earlier in validation" — is a claim about code somewhere else, and it stops being true the moment that other code moves. Three of them did, each hiding a silent defect: #2129 (the reorder deferral held while no path took a file-backed arena; #2118 wired one three PRs later), #2131 (`NOT similarity()` "is rejected earlier in validation" — until EPIC-044 US-003 enabled the full-scan path), #2132 ("points are always new inserts" on a path named `upsert_bulk`, whose own callers collect the pre-batch payloads *because* it overwrites). None failed a test; all three returned confident wrong answers. So: when you write such a comment, name the guard that makes it true and point at it, so a reader can check the guard still exists; when you read one, verify it against today's code before relying on it. What the comment licenses is the discriminator — prose that explains a fallback the code takes anyway, or an invariant local to the same function, held up every time it was checked (`ordering.rs`'s V008 claim, `log_payload`'s crash contract, `native_inner`'s total match).
 
@@ -58,9 +60,29 @@ Bias toward caution over speed. For trivial tasks, use judgment.
 
 ## Pre-push validation (CI runs on every PR — run this locally before every push to avoid red pipelines)
 
+**Run `bash scripts/local-ci.sh` first.** It does not reproduce the commands
+below from memory: it *reads* `.github/workflows/ci.yml` and replays the steps
+of the `lint` and `hygiene` jobs as written, reporting each one, and telling a
+missing tool (exit 127) apart from a refusal. 44 of the 48 declared gates run
+on a developer machine; the rest need the runner.
+
+The listing that follows is a reading aid — what the replay covers, and what to
+run in isolation while iterating on one thing. **It is a copy, and a copy
+drifts**: it had, measurably, until #2350 — its single clippy line was missing
+a whole second pass and four features CI lints, so a contributor following it
+ran a *weaker* check than CI and shipped red pipelines. Where the two disagree,
+`ci.yml` wins and this listing is the defect.
+
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets --features persistence,gpu,update-check \
+# Two workspace passes, and the pair is the point: between them they lint both
+# states of every feature that gates code. `scripts/check_feature_lint_coverage.py`
+# fails the build if a feature gating code is named by neither (#2348).
+cargo clippy --workspace --all-targets \
+  --features persistence,gpu,update-check,openapi,test-fault-injection \
+  --exclude velesdb-python --exclude velesdb-node -- -D warnings -D clippy::pedantic
+cargo clippy --workspace --all-targets \
+  --features persistence,update-check,internal-bench \
   --exclude velesdb-python --exclude velesdb-node -- -D warnings -D clippy::pedantic
 cargo clippy -p velesdb-node --lib -- -D warnings   # node is excluded above (N-API link), linted separately
 PYO3_PYTHON=python3 cargo clippy -p velesdb-python --lib -- -D warnings   # excluded above too (PyO3 link)
@@ -83,6 +105,22 @@ cargo check -p velesdb-memory --no-default-features
 cargo check -p velesdb-memory --no-default-features --features context
 cargo check -p velesdb-memory
 cargo check -p velesdb-memory --no-default-features --features mcp,persistence
+# Each velesdb-memory feature in ISOLATION, with --all-targets — mirrors the
+# Lint job's loop (#1765). `--all-targets` is the point: it compiles every
+# integration test and example under that one feature, which the four
+# shapes above never do. A test that imports a `persistence`-gated item
+# without a crate-level `#![cfg(feature = "persistence")]` passes all four
+# shapes and fails here (#2202 found this the hard way).
+for feat in mcp http context persistence embedder-http extractor-http ollama extract; do
+  cargo check -p velesdb-memory --no-default-features --features "$feat" --all-targets
+done
+# The published crates' rustdoc is what docs.rs serves, so a broken intra-doc
+# link is a dead link on a public page. Both crates now `#![deny]` the two link
+# lints at their crate root, so a plain `cargo doc` already fails on one; the
+# RUSTDOCFLAGS here and the matching Lint steps are what guarantee the docs are
+# BUILT — an attribute cannot fire if nobody builds them.
+RUSTDOCFLAGS="-D warnings" cargo doc -p velesdb-memory --no-deps --all-features --document-private-items
+RUSTDOCFLAGS="-D warnings" cargo doc -p velesdb-core --no-deps --all-features --document-private-items
 # Functional wasm gate — catches std APIs that abort on wasm32 (e.g. SystemTime::now):
 wasm-pack test --node crates/velesdb-wasm
 # Guards and contracts. Every one of these blocks a PR through `CI Success`, and
@@ -110,7 +148,7 @@ cargo deny check advisories licenses bans sources
 # Shipping a new surface? grep the READMEs/CHANGELOG for now-stale availability caveats.
 ```
 
-Shortcut: `.\scripts\local-ci.ps1` (full) or `-Quick` (fmt + clippy). Git hooks: `git config core.hooksPath .githooks`.
+Shortcut: `bash scripts/local-ci.sh` (derived from `ci.yml`, preferred) or `.\scripts\local-ci.ps1` on Windows. Git hooks: `git config core.hooksPath .githooks`.
 Benchmarks: `cargo bench -p velesdb-core --bench hnsw_benchmark` (also `simd_benchmark`, `sparse_benchmark`); end-to-end perf/recall via `python benchmarks/velesdb_benchmark.py --recall`.
 
 ---
@@ -133,7 +171,7 @@ goes red, the cause is not in what you just ran — go read that job.
 | `run-production-gates`, `propagation-guard` | cross-crate sweeps over every SDK, demo and example |
 | `bench-sift1m-compile` | compile-only check of the SIFT1M bench harness |
 | `perf-gate-e2e` | release wheel build + 10K recall/latency benchmark; no-ops green unless the search hot path changed |
-| `compat-matrix` | Windows, wasm32 and a nightly loom pass — runs on PRs but is *not* in `CI Success`'s `needs:`, so it cannot hold a merge |
+| `compat-matrix` | Windows, wasm32 and a loom check — runs on PRs but is *not* in `CI Success`'s `needs:`, so it cannot hold a merge |
 | node licence boundary | `cargo tree` assertion that `velesdb-node` never pulls `velesdb-core` |
 | `pr-governance` | branch prefix, and "not behind base" — properties of the PR, not of the tree |
 
@@ -166,9 +204,15 @@ typo fixtures, identifier tokenization). Configure the tool to the repo's
 reality (audited allowlist, the repo's own format style), pin its version so
 a dictionary update cannot flip the verdict, and only then wire the gate.
 
-**10. Local checks mirror CI flags exactly.** `cargo clippy --all-targets
---all-features` (a `--lib`-only run missed `-D pedantic` on test targets and
-shipped two red pipelines), `cargo fmt --check`, the guard scripts, and
+**10. Local checks mirror CI flags exactly — and the only way to be sure is
+to read `ci.yml`, not to remember it.** A `--lib`-only clippy run missed
+`-D pedantic` on test targets and shipped two red pipelines, which is why
+`--all-targets` is not optional. Do **not** substitute `--all-features`: this
+workspace has features CI never enables together (`loom` needs `--cfg loom`,
+`bench-sift1m` links a TLS stack), so `--all-features` answers a question CI
+never asks — this very rule said to use it until #2350, contradicting the
+block above and the workflow both. `bash scripts/local-ci.sh` exists so the
+flags come from the file rather than from anyone's memory; run it, and check
 `git branch --show-current` before trusting any validation run. For a new
 dependency advisory, bump the lockfile surgically (edit version+checksum,
 verify with `cargo metadata --locked`) — a full `cargo update -p` re-resolves
@@ -192,6 +236,60 @@ PR to not be behind `develop` *at CI time*. Merging PR A to develop invalidates
 PR B's freshness mid-run — so order the queue: land the independent PRs first,
 refresh the dependent one **once, last** (union-merge CHANGELOG conflicts),
 and never chase develop with repeated refresh pushes.
+
+**14. A positive control must survive the fix it accompanies.** Anchor it to
+the *cause*, never to the symptom being removed. `vacuum_swap_bounded`'s
+control was "ids copied under the write guard > 0" — proof that writes raced
+the vacuum. The fix moved that copy off the guard, so the count became 0 by
+design, indistinguishable from a run where nothing raced, and the control
+failed on correct code. It took a second counter, "ids settled under the
+seal", measuring the work the race actually caused rather than where it was
+paid: 60 000 before and after. A control a success can break was never a
+control.
+
+**15. Assert that the phenomenon happened before asserting anything about
+it.** `adaptive_resume_evals` printed `saved=62.5%` while escalating on
+**0 of 40** queries — a flattering number comparing a path that never
+escalates against a restart that never had to happen. Only a corpus guard
+placed *before* the result assertions stood between it and a green run
+measuring nothing. Every A/B harness asserts first that both arms were
+exercised, and that assertion is the first to fail. When it does, read why the
+phenomenon disappeared; never relax the threshold to get green — in that case
+the cause was a heuristic unreachable on the metric under test, and relaxing
+would have frozen the lie.
+
+**16. A scheduled job carries a manual trigger, or its fixes ship on credit.**
+`quality-deep` was red on `develop` for at least six consecutive weekly runs,
+invisible because none of its jobs is in `CI Success`. Two of the three causes
+were in the jobs, not the code: `cargo install` without `--locked` re-resolved
+a tool's dependencies onto an MSRV the pinned stable cannot build (identical
+failure six weeks apart), and a job running `--no-default-features` compiled
+doctests that include the README, which documents the default build. Every
+`cargo install` in CI takes `--locked`. Every scheduled job gets a
+`workflow_dispatch` input: `careful` was the only one without, so a repair to
+it could not be verified without waiting a week — which is how it stayed
+broken.
+
+**17. A gate that has never returned a verdict is decoration; audit before
+keeping, as method 9 audits before adding.** The `mutants` job ran on every
+`velesdb-core` pull request and was cut at the 45-minute limit on both runs
+that ever met a real diff — 2 of 22 mutants tested, then 0 of 59 after 105 s
+of build and 981 s of unmutated baseline. Meanwhile `QUALITY_BAR.md` described
+the partial report as coverage. It was removed (#2339) and the tool documented
+as what it had actually been worth: a reviewer aiming it at one area by hand.
+Before defending a gate's cost, read its last runs and ask what verdict it has
+ever produced.
+
+**18. A worktree isolates files, not the branch.** Several agents and sessions
+work this repository at once. Before starting a subject: `git fetch --prune`,
+then check whether the branch already exists on the remote and who is pushing
+to it. Two actors on one branch duplicate work silently — it cost a full
+commit and its hooks on #2293, where the same defect was fixed twice within
+minutes. On a branch someone else pushes, `git fetch` before *every* push and
+read the remote SHA before merging, not the local one. Develop subjects in
+parallel if their file sets are disjoint (`comm -13` the two
+`git diff --name-only`), but push one at a time: method 13's freshness gate
+means every merge costs each other open PR a full CI cycle.
 
 ---
 

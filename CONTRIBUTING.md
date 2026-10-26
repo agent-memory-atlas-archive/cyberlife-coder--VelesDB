@@ -89,6 +89,7 @@ New to the codebase? Start with these documents (in order):
 | `velesdb-memory` | MCP agent-memory server. Three tool families, not one: durable memory (`remember`/`recall`/`why`/`relate`/`feedback`…), the deterministic context compiler (`compile_context`, `compile_transcript`, `explain_compilation`, `retrieve_context_source`, `context_savings`, `suggest_budget`), and cross-session working-context resumption (`save_working_context`, `load_working_context`, `list_working_contexts`) |
 | `velesdb-node` | Node.js binding of the memory wedge (napi-rs; `@wiscale/velesdb-memory-node`) |
 | `tauri-plugin-velesdb` | Tauri desktop integration |
+| `velesdb-rustdoc-guard` | Test-only, never published: flags rustdoc link syntax left in the descriptions velesdb-memory (MCP schemas) and velesdb-server (OpenAPI) publish |
 
 ## Quality Gates
 
@@ -112,6 +113,28 @@ whether its failure blocks a merge, and whether it runs strict or advisory. Addi
 a `scripts/check-*.py` (or `verify-`/`gate-`) without an entry there fails
 `scripts/tests/test_ci_gate_reachability.py` — the registry is checked against the
 workflows *and* against the filesystem, so it cannot quietly shrink.
+
+Some of those guards need a Python package — `check-figure-sources.py` parses
+Markdown with a real parser rather than by regex, and the CI-wiring suites read
+the workflows with PyYAML. Every one of them, with its pin, is declared in
+[`scripts/requirements-guards.txt`](scripts/requirements-guards.txt):
+
+```bash
+python3 -m venv .venv-guards
+.venv-guards/bin/pip install -r scripts/requirements-guards.txt
+```
+
+Then run the guards with `.venv-guards/bin/python`. A virtualenv rather than a
+plain `pip install --user`, because a system Python that follows PEP 668 —
+Homebrew's, Debian's, and the CI runners' — refuses to install into itself;
+`ci.yml` builds a venv for the same reason. If your Python is not managed that
+way, `python3 -m pip install -r scripts/requirements-guards.txt` is enough.
+
+Without them a guard exits **2**, which means *it could not run* — not that it
+passed, and not that it refused. The workflows install from that same file, and
+`scripts/check_guard_python_pins.py` refuses a workflow that pins those packages
+inline again: the pins used to be repeated across `ci.yml` and
+`gate-contracts.yml`, where nothing kept them in step.
 
 ### Concurrency Rules
 
@@ -178,7 +201,9 @@ merge moved the repo ahead of your installed skills.
 ### Prerequisites
 
 - Rust 1.90+ (stable) — the workspace MSRV, declared in `Cargo.toml`
-  (`rust-version`) and pinned in `rust-toolchain.toml` so local matches CI.
+  (`rust-version`) and pinned in `rust-toolchain.toml` so local matches CI;
+  `scripts/tests/test_msrv_single_source.py` fails `CI Success` when the two
+  disagree or when a member crate declares its own `rust-version`.
   Two things force it: `avx512vpopcntdq` `target_feature`, stabilized in 1.89
   (see `crates/velesdb-core/src/simd_native/x86_avx512.rs`), and `roaring
   0.11.4`, which declares `rust-version = 1.90.0` — on 1.89 the workspace only
@@ -377,7 +402,7 @@ The three you interact with most:
 # 1. Bump every manifest in lock-step
 python3 scripts/bump_version.py <X.Y.Z>
 python3 scripts/check-version-sync.py   # every policed manifest must align
-python scripts/check-promise-contract.py # 19 claims must pass
+python scripts/check-promise-contract.py # every claim must pass
 cargo update --workspace                 # refresh Cargo.lock
 
 # 2. Open release/<vX.Y.Z> -> main, wait for ALL CI green on the merge commit

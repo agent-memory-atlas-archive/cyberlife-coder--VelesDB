@@ -1,4 +1,11 @@
 #![warn(clippy::significant_drop_tightening)]
+// Broken and private intra-doc links are warn-by-default, which is why 30 of
+// them accumulated here unnoticed. Denying them at the crate root is what makes
+// a plain `cargo doc` fail — for a contributor locally and for docs.rs, not
+// only inside the one CI step that sets `RUSTDOCFLAGS`. The CI step stays: an
+// attribute cannot fire if nobody builds the docs, and it is the step that
+// guarantees they are built on every PR.
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 // The crate README is pulled into the crate documentation verbatim. This is not
 // cosmetic: it makes `cargo test --doc --package velesdb-core` (CI step "Check
 // doctests compile") type-check every ```rust block in `README.md`. A README
@@ -24,12 +31,12 @@
 //!
 //! ## Features
 //!
-//! - **Blazing Fast**: HNSW index with explicit SIMD (4x faster)
+//! - **Blazing Fast**: HNSW index with explicit SIMD
 //! - **5 Distance Metrics**: Cosine, Euclidean, Dot Product, Hamming, Jaccard
 //! - **Hybrid Search**: Vector + BM25 full-text with RRF fusion
 //! - **Graph Engine**: typed edges on any collection, BFS/DFS, `MATCH` patterns
 //! - **`VelesQL`**: one SQL-like language across all three engines
-//! - **Quantization**: SQ8 (4x) and Binary (32x) memory compression
+//! - **Quantization**: SQ8 (4x compression) and Binary (32x compression)
 //! - **Persistent Storage**: Memory-mapped files for efficient disk access
 //!
 //! ## Quick Start
@@ -97,6 +104,7 @@ pub mod config;
 #[cfg(test)]
 mod config_env_tests;
 pub mod config_quantization;
+mod config_removed;
 #[cfg(test)]
 mod config_tests;
 mod config_validation;
@@ -124,6 +132,9 @@ mod filter_like_tests;
 #[cfg(test)]
 mod filter_tests;
 pub mod fusion;
+mod geo_distance;
+#[cfg(test)]
+mod geo_distance_tests;
 pub mod gpu;
 #[cfg(test)]
 mod gpu_tests;
@@ -166,8 +177,6 @@ pub mod sparse_index;
 pub mod simd_native;
 #[cfg(test)]
 mod simd_native_tests;
-#[cfg(target_arch = "aarch64")]
-pub mod simd_neon;
 #[cfg(target_arch = "aarch64")]
 pub mod simd_neon_prefetch;
 // simd_ops removed - direct dispatch via simd_native (EPIC-CLEANUP)

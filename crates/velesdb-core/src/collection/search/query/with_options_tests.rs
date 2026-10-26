@@ -40,7 +40,7 @@ fn test_query_search_options_from_with_clause_mode_accurate() {
         "mode",
         crate::velesql::WithValue::String("accurate".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Accurate)));
     assert!(opts.ef_search.is_none());
 }
@@ -51,7 +51,7 @@ fn test_query_search_options_from_with_clause_mode_fast() {
         "mode",
         crate::velesql::WithValue::String("fast".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Fast)));
 }
 
@@ -61,7 +61,7 @@ fn test_query_search_options_from_with_clause_mode_autotune() {
         "mode",
         crate::velesql::WithValue::String("autotune".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::AutoTune)));
 }
 
@@ -69,7 +69,7 @@ fn test_query_search_options_from_with_clause_mode_autotune() {
 fn test_query_search_options_from_with_clause_ef_search() {
     let with = crate::velesql::WithClause::new()
         .with_option("ef_search", crate::velesql::WithValue::Integer(256));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert_eq!(opts.ef_search, Some(256));
     // ef_search without mode should not set quality
     assert!(opts.quality.is_none());
@@ -79,7 +79,7 @@ fn test_query_search_options_from_with_clause_ef_search() {
 fn test_query_search_options_from_with_clause_rerank_true() {
     let with = crate::velesql::WithClause::new()
         .with_option("rerank", crate::velesql::WithValue::Boolean(true));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert_eq!(opts.force_rerank, Some(true));
 }
 
@@ -87,13 +87,13 @@ fn test_query_search_options_from_with_clause_rerank_true() {
 fn test_query_search_options_from_with_clause_rerank_false() {
     let with = crate::velesql::WithClause::new()
         .with_option("rerank", crate::velesql::WithValue::Boolean(false));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert_eq!(opts.force_rerank, Some(false));
 }
 
 #[test]
 fn test_query_search_options_from_none_with_clause() {
-    let opts = QuerySearchOptions::from_with_clause(None);
+    let opts = QuerySearchOptions::from_with_clause(None).expect("no WITH clause");
     assert!(opts.quality.is_none());
     assert!(opts.ef_search.is_none());
     assert!(opts.force_rerank.is_none());
@@ -101,29 +101,48 @@ fn test_query_search_options_from_none_with_clause() {
 }
 
 #[test]
-fn test_query_search_options_from_with_clause_invalid_mode_ignored() {
+fn test_query_search_options_from_with_clause_invalid_mode_is_rejected() {
     let with = crate::velesql::WithClause::new().with_option(
         "mode",
         crate::velesql::WithValue::String("invalid_xyz".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
-    // Invalid mode should be silently ignored (no quality set)
-    assert!(opts.quality.is_none());
+    // An unparseable mode is a query error, not a silently ignored override (#2267).
+    let err = QuerySearchOptions::from_with_clause(Some(&with))
+        .expect_err("unknown mode should be rejected");
+    assert!(err.to_string().contains("invalid_xyz"));
 }
 
 #[test]
-fn test_query_search_options_mode_overrides_ef_search() {
-    // When both mode and ef_search are set, mode takes precedence
+fn test_query_search_options_ef_search_overrides_mode() {
+    // When both mode and ef_search are set, both are captured and the
+    // explicit ef_search is the quality the search runs at (#2274).
     let with = crate::velesql::WithClause::new()
         .with_option(
             "mode",
             crate::velesql::WithValue::String("accurate".to_string()),
         )
         .with_option("ef_search", crate::velesql::WithValue::Integer(64));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Accurate)));
-    // ef_search still captured for backward compat
     assert_eq!(opts.ef_search, Some(64));
+    assert!(matches!(
+        opts.resolved_quality(crate::SearchQuality::Balanced),
+        crate::SearchQuality::Custom(64)
+    ));
+}
+
+#[test]
+fn test_resolved_quality_falls_back_to_the_given_default() {
+    // Options naming no quality (rerank only) resolve to the collection's
+    // runtime quality, not a hard-coded Balanced (#2399).
+    let opts = QuerySearchOptions {
+        force_rerank: Some(true),
+        ..QuerySearchOptions::default()
+    };
+    assert!(matches!(
+        opts.resolved_quality(crate::SearchQuality::Accurate),
+        crate::SearchQuality::Accurate
+    ));
 }
 
 // ============================================================================
@@ -207,6 +226,108 @@ fn test_with_ef_search_pure_near() {
         )
         .expect("query should succeed");
     assert_eq!(results.len(), 5);
+}
+
+/// An unparseable `mode` must fail the query rather than silently run it at
+/// the default quality (#2267).
+#[test]
+fn test_with_unknown_mode_returns_query_error() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    let err = col
+        .execute_query_str(
+            "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (mode='acurate')",
+            &params,
+        )
+        .expect_err("typo'd mode should be rejected");
+    assert!(err.to_string().contains("acurate"));
+}
+
+/// A bad mode fails every query shape, including those that return before
+/// the main search (union, `NEAR_FUSED`), the `quality` alias, and a bad mode
+/// an earlier, valid one shadows; so does a mode that is not a string. The
+/// same queries with a good mode run (#2267).
+#[test]
+fn test_with_bad_mode_fails_every_query_shape() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    params.insert("w".to_string(), serde_json::json!([0.1, 0.9, 0.5, 0.3]));
+    for shape in [
+        "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (mode = {m})",
+        "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (quality = {m})",
+        "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (mode = 'fast', quality = {m})",
+        "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (mode = 'fast', mode = {m})",
+        concat!(
+            "SELECT * FROM docs WHERE similarity(vector, $v) > 0.1 OR idx > 5 ",
+            "LIMIT 5 WITH (mode = {m})"
+        ),
+        "SELECT * FROM docs WHERE vector NEAR_FUSED [$v, $w] LIMIT 5 WITH (mode = {m})",
+    ] {
+        let good = shape.replace("{m}", "'fast'");
+        col.execute_query_str(&good, &params)
+            .unwrap_or_else(|e| panic!("{good}: {e}"));
+        for bad in ["'acurate'", "5", "true"] {
+            let query = shape.replace("{m}", bad);
+            let err = col.execute_query_str(&query, &params).expect_err(&query);
+            assert!(err.to_string().contains("V013"), "{query}: {err}");
+        }
+    }
+}
+
+/// `mode` wins over its alias `quality`, the first of a repeated key applies,
+/// and a bare identifier reads as a string; but every value given must be a
+/// mode, so a typo or a value that is not a string is an error even where
+/// another value applies (#2267).
+#[test]
+fn test_with_clause_search_quality() {
+    use crate::velesql::{WithClause, WithValue};
+    use crate::SearchQuality;
+    let string = |s: &str| WithValue::String(s.to_string());
+    let clause = |options: Vec<(&str, WithValue)>| {
+        options
+            .into_iter()
+            .fold(WithClause::new(), |with, (key, value)| {
+                with.with_option(key, value)
+            })
+    };
+    assert_eq!(WithClause::new().search_quality(), Ok(None));
+    for (options, quality) in [
+        (vec![("quality", string("fast"))], SearchQuality::Fast),
+        (
+            vec![("mode", string("fast")), ("quality", string("accurate"))],
+            SearchQuality::Fast,
+        ),
+        (
+            vec![("quality", string("accurate")), ("mode", string("fast"))],
+            SearchQuality::Fast,
+        ),
+        (
+            vec![("mode", string("fast")), ("mode", string("accurate"))],
+            SearchQuality::Fast,
+        ),
+        (
+            vec![("mode", WithValue::Identifier("accurate".to_string()))],
+            SearchQuality::Accurate,
+        ),
+    ] {
+        let with = clause(options);
+        assert_eq!(with.search_quality(), Ok(Some(quality)), "{with:?}");
+    }
+    for options in [
+        vec![("mode", string("acurate"))],
+        vec![("mode", WithValue::Integer(5))],
+        vec![("mode", WithValue::Float(0.5))],
+        vec![("mode", WithValue::Boolean(true))],
+        vec![("mode", string("fast")), ("quality", string("acurate"))],
+        vec![("quality", string("acurate")), ("mode", string("fast"))],
+        vec![("mode", string("fast")), ("mode", string("acurate"))],
+        vec![("MODE", string("fast")), ("Mode", WithValue::Integer(5))],
+    ] {
+        let with = clause(options);
+        assert!(with.search_quality().is_err(), "{with:?}");
+    }
 }
 
 // ============================================================================
@@ -342,7 +463,8 @@ fn test_no_with_clause_unchanged_behavior() {
 
 #[test]
 fn test_with_empty_clause_unchanged_behavior() {
-    let opts = QuerySearchOptions::from_with_clause(Some(&crate::velesql::WithClause::new()));
+    let opts = QuerySearchOptions::from_with_clause(Some(&crate::velesql::WithClause::new()))
+        .expect("empty WITH clause");
     assert!(opts.quality.is_none());
     assert!(opts.ef_search.is_none());
     assert!(opts.force_rerank.is_none());
@@ -360,7 +482,7 @@ fn test_mode_case_insensitive_uppercase() {
         "mode",
         crate::velesql::WithValue::String("ACCURATE".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Accurate)));
 }
 
@@ -370,7 +492,7 @@ fn test_mode_case_insensitive_mixed() {
         "mode",
         crate::velesql::WithValue::String("Perfect".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Perfect)));
 }
 
@@ -380,7 +502,7 @@ fn test_mode_autotune_alias_auto() {
         "mode",
         crate::velesql::WithValue::String("auto".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::AutoTune)));
 }
 
@@ -390,16 +512,17 @@ fn test_mode_autotune_alias_auto_tune() {
         "mode",
         crate::velesql::WithValue::String("auto_tune".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::AutoTune)));
 }
 
 #[test]
-fn test_mode_empty_string_ignored() {
+fn test_mode_empty_string_is_rejected() {
     let with = crate::velesql::WithClause::new()
         .with_option("mode", crate::velesql::WithValue::String(String::new()));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
-    assert!(opts.quality.is_none());
+    // An empty mode string is present but unparseable, so it is rejected the
+    // same as any other typo (#2267) rather than treated as "no mode given".
+    QuerySearchOptions::from_with_clause(Some(&with)).expect_err("empty mode should be rejected");
 }
 
 #[test]
@@ -408,26 +531,248 @@ fn test_mode_balanced_is_default_equivalent() {
         "mode",
         crate::velesql::WithValue::String("balanced".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Balanced)));
 }
 
 // --- ef_search edge cases ---
 
+/// Below the documented `[16, 4096]` range: rejected rather than passed
+/// through as a near-useless one-hop traversal (#2274).
 #[test]
-fn test_ef_search_zero() {
+fn test_ef_search_zero_is_rejected() {
     let with = crate::velesql::WithClause::new()
         .with_option("ef_search", crate::velesql::WithValue::Integer(0));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
-    assert_eq!(opts.ef_search, Some(0));
+    let err = QuerySearchOptions::from_with_clause(Some(&with))
+        .expect_err("out-of-range ef_search should be rejected");
+    assert!(err.to_string().contains('0'));
 }
 
+/// Above the documented range: rejected rather than run as an oversized
+/// traversal (#2274).
 #[test]
-fn test_ef_search_very_large() {
+fn test_ef_search_very_large_is_rejected() {
     let with = crate::velesql::WithClause::new()
         .with_option("ef_search", crate::velesql::WithValue::Integer(100_000));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
-    assert_eq!(opts.ef_search, Some(100_000));
+    let err = QuerySearchOptions::from_with_clause(Some(&with))
+        .expect_err("out-of-range ef_search should be rejected");
+    assert!(err.to_string().contains("100000"));
+}
+
+/// `ef_search = -1` must not cast to `usize::MAX` and run an uncapped
+/// traversal (#2274).
+#[test]
+fn test_ef_search_negative_is_rejected() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    let err = col
+        .execute_query_str(
+            "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = -1)",
+            &params,
+        )
+        .expect_err("negative ef_search should be rejected");
+    assert!(err.to_string().contains("V014"), "{err}");
+}
+
+/// An `ef_search` literal past `u64::MAX` now parses (as a float, #2304)
+/// instead of failing the query with a generic "Invalid integer" parse
+/// error, so it reaches the same V014 out-of-range check every other bad
+/// `ef_search` value gets.
+#[test]
+fn test_ef_search_integer_overflow_gets_v014() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    let err = col
+        .execute_query_str(
+            "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 18446744073709551616)",
+            &params,
+        )
+        .expect_err("an ef_search literal past u64::MAX should be rejected");
+    assert!(err.to_string().contains("V014"), "{err}");
+}
+
+/// A non-integer `ef_search` is ignored today; it must fail instead (#2274).
+#[test]
+fn test_ef_search_non_integer_is_rejected() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    let err = col
+        .execute_query_str(
+            "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 'high')",
+            &params,
+        )
+        .expect_err("non-integer ef_search should be rejected");
+    assert!(err.to_string().contains("V014"), "{err}");
+}
+
+/// `from_with_clause` refuses a bad `ef_search` itself, for a direct caller
+/// the query validator never saw (#2274).
+#[test]
+fn test_query_search_options_from_with_clause_bad_ef_search_is_rejected() {
+    for value in [
+        crate::velesql::WithValue::Integer(-1),
+        crate::velesql::WithValue::Integer(4097),
+        crate::velesql::WithValue::String("high".to_string()),
+    ] {
+        let with = crate::velesql::WithClause::new().with_option("ef_search", value);
+        let err = QuerySearchOptions::from_with_clause(Some(&with))
+            .expect_err("a bad ef_search should be rejected");
+        assert!(err.to_string().contains("ef_search"), "{err}");
+    }
+}
+
+/// A bad `ef_search` a repeated key shadows fails the query too, while two
+/// valid values run with the first (#2274).
+#[test]
+fn test_ef_search_shadowed_by_a_repeated_key_is_rejected() {
+    let (_dir, col) = setup_with_options_collection();
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!([0.5, 0.5, 0.5, 0.3]));
+    for with in [
+        "(ef_search = 64, ef_search = -1)",
+        "(ef_search = 'high', ef_search = 64)",
+    ] {
+        let query = format!("SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH {with}");
+        let err = col.execute_query_str(&query, &params).expect_err(&query);
+        assert!(err.to_string().contains("V014"), "{query}: {err}");
+    }
+    col.execute_query_str(
+        "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 64, ef_search = 128)",
+        &params,
+    )
+    .expect("two valid values run");
+}
+
+/// `WithClause::ef_search` checks every value a repeated key gives, applies
+/// the first, and accepts both ends of `[16, 4096]` (#2274).
+#[test]
+fn test_with_clause_ef_search_reads_every_value() {
+    use crate::velesql::{WithClause, WithValue};
+    let clause = |values: Vec<WithValue>| {
+        values.into_iter().fold(WithClause::new(), |with, value| {
+            with.with_option("ef_search", value)
+        })
+    };
+    assert_eq!(WithClause::new().ef_search(), Ok(None));
+    for (values, ef) in [
+        (vec![WithValue::Integer(64), WithValue::Integer(128)], 64),
+        (vec![WithValue::Integer(16)], 16),
+        (vec![WithValue::Integer(4096)], 4096),
+    ] {
+        assert_eq!(clause(values).ef_search(), Ok(Some(ef)));
+    }
+    for values in [
+        vec![WithValue::Integer(64), WithValue::Integer(-1)],
+        vec![
+            WithValue::Integer(64),
+            WithValue::String("high".to_string()),
+        ],
+        vec![WithValue::Integer(15)],
+        vec![WithValue::Integer(4097)],
+    ] {
+        let with = clause(values);
+        assert!(with.ef_search().is_err(), "{with:?}");
+    }
+}
+
+/// `get_ef_search` drops a negative literal, as its rustdoc says, instead of
+/// casting `-1` to `usize::MAX` (#2274).
+#[test]
+fn test_get_ef_search_drops_a_negative_value() {
+    let with = crate::velesql::WithClause::new()
+        .with_option("ef_search", crate::velesql::WithValue::Integer(-1));
+    assert_eq!(with.get_ef_search(), None);
+}
+
+/// A value that is not an integer gets the one message every out-of-range
+/// `ef_search` gets, naming the value in canonical `VelesQL` form, rather than a
+/// second message built apart (#2274).
+#[test]
+fn test_a_non_integer_ef_search_gets_the_one_range_message() {
+    use crate::velesql::{WithClause, WithValue};
+    let refusal = |value| {
+        WithClause::new()
+            .with_option("ef_search", value)
+            .ef_search()
+            .expect_err("refused")
+    };
+    let above = refusal(WithValue::Integer(4097));
+    for (value, shown) in [
+        (WithValue::String("high".to_string()), "'high'"),
+        (WithValue::String("it's".to_string()), "'it''s'"),
+        (WithValue::Identifier("high".to_string()), "high"),
+        (WithValue::Float(1.5), "1.5"),
+        (WithValue::Boolean(true), "true"),
+    ] {
+        assert_eq!(refusal(value), above.replace("4097", shown));
+    }
+    let query = "SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH (ef_search = 'it''s')";
+    let with = crate::velesql::Parser::parse(query)
+        .expect("parse")
+        .select
+        .with_clause
+        .expect("the WITH clause");
+    assert_eq!(with.ef_search(), Err(above.replace("4097", "'it''s'")));
+}
+
+/// The collection of [`setup_with_options_collection`], capped so that it
+/// refuses `perfect`: which quality a search runs at becomes observable.
+fn setup_perfect_refusing_collection() -> (TempDir, Collection) {
+    let (dir, col) = setup_with_options_collection();
+    col.set_runtime_limits(crate::collection::RuntimeLimits {
+        max_perfect_mode_vectors: 1,
+        ..crate::collection::RuntimeLimits::default()
+    });
+    (dir, col)
+}
+
+/// An explicit `ef_search` wins over `mode`, or its alias `quality`, when
+/// both are set, as `docs/VELESQL_SPEC.md` documents and REST resolves: over
+/// a collection that refuses `perfect`, `mode = 'perfect'` alone fails while
+/// adding `ef_search = 64` runs (#2274). The plain vector path runs the query
+/// end to end; the filtered one is driven directly, with the options the same
+/// `WITH` text gives, because the planner answers a filtered query over a
+/// collection this small with a scan that applies neither option.
+#[test]
+fn test_explicit_ef_search_wins_over_mode_in_the_search() {
+    let (_dir, col) = setup_perfect_refusing_collection();
+    let v = [0.5_f32, 0.5, 0.5, 0.3];
+    let mut params = HashMap::new();
+    params.insert("v".to_string(), serde_json::json!(v));
+    let filter = crate::filter::Filter::new(crate::filter::Condition::Gte {
+        field: "idx".to_string(),
+        value: serde_json::json!(0),
+    });
+    let filtered = |query: &str| {
+        let with = crate::velesql::Parser::parse(query)
+            .expect("parse")
+            .select
+            .with_clause;
+        let opts = QuerySearchOptions::from_with_clause(with.as_ref()).expect("valid options");
+        col.search_with_filter_and_opts(&v, 5, &filter, &opts)
+    };
+    let query = |with: &str| format!("SELECT * FROM docs WHERE vector NEAR $v LIMIT 5 WITH {with}");
+    let perfect = query("(mode = 'perfect')");
+    for refused in [col.execute_query_str(&perfect, &params), filtered(&perfect)] {
+        let err = refused.expect_err(&perfect);
+        assert!(
+            err.to_string().contains("max_perfect_mode_vectors"),
+            "{perfect}: {err}"
+        );
+    }
+    for with in [
+        "(mode = 'perfect', ef_search = 64)",
+        "(ef_search = 64, quality = 'perfect')",
+    ] {
+        let both = query(with);
+        let plain = col.execute_query_str(&both, &params).expect(&both);
+        assert_eq!(plain.len(), 5, "{both}");
+        let narrowed = filtered(&both).expect(&both);
+        assert_eq!(narrowed.len(), 5, "filtered {both}");
+    }
 }
 
 // --- timeout_ms edge cases ---
@@ -459,8 +804,8 @@ fn test_mode_and_ef_search_both_set() {
             crate::velesql::WithValue::String("fast".to_string()),
         )
         .with_option("ef_search", crate::velesql::WithValue::Integer(4096));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
-    // Both are available — search_with_opts() decides precedence
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
+    // Both are captured; `resolved_quality` lets the ef_search win (#2274).
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Fast)));
     assert_eq!(opts.ef_search, Some(4096));
 }
@@ -474,7 +819,7 @@ fn test_rerank_true_with_mode_fast() {
             crate::velesql::WithValue::String("fast".to_string()),
         )
         .with_option("rerank", crate::velesql::WithValue::Boolean(true));
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Fast)));
     assert_eq!(opts.force_rerank, Some(true));
 }
@@ -692,7 +1037,7 @@ fn test_with_quality_option_maps_to_search_quality() {
         "quality",
         crate::velesql::WithValue::String("fast".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(
         matches!(opts.quality, Some(crate::SearchQuality::Fast)),
         "quality='fast' should map to SearchQuality::Fast"
@@ -705,7 +1050,7 @@ fn test_with_quality_balanced() {
         "quality",
         crate::velesql::WithValue::String("balanced".to_string()),
     );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(matches!(opts.quality, Some(crate::SearchQuality::Balanced)));
 }
 
@@ -720,9 +1065,42 @@ fn test_with_mode_overrides_quality() {
             "mode",
             crate::velesql::WithValue::String("accurate".to_string()),
         );
-    let opts = QuerySearchOptions::from_with_clause(Some(&with));
+    let opts = QuerySearchOptions::from_with_clause(Some(&with)).expect("valid mode");
     assert!(
         matches!(opts.quality, Some(crate::SearchQuality::Accurate)),
         "mode should take precedence over quality"
     );
+}
+
+/// `mode_value` is `Some` whenever a query names a mode, a value that is not
+/// a string included, where `get_mode` is `None`: a caller deciding whether a
+/// mode was given tests the former (#2267).
+#[test]
+fn test_with_clause_mode_value_sees_a_mode_that_is_not_a_string() {
+    use crate::velesql::{WithClause, WithValue};
+    let with = WithClause::new().with_option("quality", WithValue::Integer(5));
+    assert!(with.mode_value().is_some());
+    assert!(with.get_mode().is_none());
+    assert!(WithClause::new().mode_value().is_none());
+}
+
+/// The collection's own aggregation entry point validates too: the Tauri
+/// plugin and embedders call it directly, not through the Database (#2267).
+#[test]
+fn test_collection_aggregate_rejects_a_bad_mode() {
+    let (_dir, col) = setup_with_options_collection();
+    let params = HashMap::new();
+    let parse = |q: &str| crate::velesql::Parser::parse(q).unwrap_or_else(|e| panic!("{q}: {e}"));
+    col.execute_aggregate(
+        &parse("SELECT COUNT(*) FROM docs WITH (mode = 'fast')"),
+        &params,
+    )
+    .expect("a good mode runs");
+    for bad in ["'acurate'", "5"] {
+        let query = format!("SELECT COUNT(*) FROM docs WITH (mode = {bad})");
+        let err = col
+            .execute_aggregate(&parse(&query), &params)
+            .expect_err(&query);
+        assert!(err.to_string().contains("V013"), "{query}: {err}");
+    }
 }

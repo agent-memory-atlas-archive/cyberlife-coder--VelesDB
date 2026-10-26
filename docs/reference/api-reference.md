@@ -2,7 +2,7 @@
 
 Complete REST API documentation for VelesDB.
 
-> **Last updated**: 2026-09-02 (VelesDB v6.0.0). The machine-readable source of
+> **Last updated**: 2026-09-02 (VelesDB v7.0.0). The machine-readable source of
 > truth is [`docs/openapi.yaml`](../openapi.yaml), regenerated from the server's
 > annotated handlers and drift-checked in CI; this page is the human-readable
 > companion.
@@ -58,7 +58,7 @@ Check server health status.
 ```json
 {
   "status": "ok",
-  "version": "6.0.0"
+  "version": "7.0.0"
 }
 ```
 
@@ -663,8 +663,10 @@ Hybrid search combining vector similarity and BM25 text relevance using Reciproc
 ### POST /collections/:name/search/ids
 
 Lightweight search returning only IDs and scores — no payload hydration.
-Accepts the same request body as `POST /collections/:name/search` (dense,
-sparse, and hybrid modes; `filter`, `ef_search`, `mode`, `fusion` are honored).
+Accepts the same request body as `POST /collections/:name/search`, for a
+dense, sparse or hybrid search. `mode` is checked on every shape but applied
+only to a dense search with neither a `filter` nor `ef_search`: `ef_search`
+wins over it, and a filtered search applies neither (#457).
 
 **Response:**
 ```json

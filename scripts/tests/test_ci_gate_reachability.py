@@ -17,11 +17,15 @@ the merge button stays green, and it is the same class of defect as
 So the invariant is mechanical, not a checklist: every job in ``needs`` is
 either read by the chain or listed in ``CHAIN_EXEMPT`` with its reason.
 
-Deliberately regex-based, not PyYAML: ``gate-contracts.yml`` runs these
-suites with a bare ``actions/setup-python`` and installs nothing, so a
-third-party import here would be an ImportError in CI — a guard that cannot
-run. The parsers are unit-tested RED-then-GREEN on synthetic workflow text
-below before being pointed at the real file.
+Deliberately regex-based, not PyYAML. ``gate-contracts.yml`` does now install
+one pinned wheel, for ``test_local_ci``'s workflow reader — but this suite is
+the guard that decides whether every OTHER guard can refuse, so it stays
+buildable from the standard library alone. An import here would put the
+meta-guard behind a PyPI fetch: an outage would then read as a red gate on a
+clean tree, which is how this repository's npm gate came to be rewritten
+(``gate-contracts.yml``, ``npm-audit``). The parsers are unit-tested
+RED-then-GREEN on synthetic workflow text below before being pointed at the
+real file.
 """
 
 from __future__ import annotations
@@ -119,9 +123,16 @@ def chain_failure_branch(text: str) -> str:
     # legitimately contain `||` — the retarget guard does. Scanning from the
     # shell block keeps this on the chain's own tail while still seeing a
     # branch neutered to something brace-less like `|| true`.
-    run_at = chain.find("run:")
+    # Anchored on the chain's own step. `ci-success` gained a second `run:`
+    # ahead of it (#2232's mirror), whose body legitimately contains `||` —
+    # taking the first `run:` in the job returned that instead, and this test
+    # then asserted `exit 1` against the wrong shell block.
+    step_at = chain.find("- name: Check results")
+    if step_at == -1:
+        raise AssertionError("the ci-success job has no `Check results` step")
+    run_at = chain.find("run:", step_at)
     if run_at == -1:
-        raise AssertionError("the ci-success job has no `run:` chain")
+        raise AssertionError("the ci-success `Check results` step has no `run:` chain")
     body = chain[run_at:]
     marker = body.find("||")
     if marker == -1:
@@ -671,6 +682,7 @@ class BlockingBehaviourTests(unittest.TestCase):
             "scripts.tests.test_check_mcp_doc_contract",
             "scripts.tests.test_ci_gate_reachability",
             "scripts.tests.test_skill_copies_are_identical",
+            "scripts.tests.test_ci_toolchain_pin",
         ):
             with self.subTest(suite=suite):
                 self.assertIn(suite, block)
@@ -1428,6 +1440,11 @@ JOB_ID_RE = re.compile(r"^  ([a-z][a-z0-9_-]*):$", re.MULTILINE)
 RETARGET_GUARD_EXEMPT = {
     "mcp-doc-contract": "runs the guard self-tests; must never be skippable",
     "pr-governance": "reads the title and body; skipping it on an edit is skipping its input",
+    "ci-success": (
+        "the required check itself: guarded, it reported `skipped` on a body edit and "
+        "branch protection accepted that as green (#2232). It runs always and mirrors "
+        "instead — see NoOpEditCannotProduceAGreenCheckTests"
+    ),
 }
 
 RETARGET_GUARD_RE = re.compile(
@@ -1513,14 +1530,244 @@ class RetargetRerunTests(unittest.TestCase):
                     "exemption, or the list is documenting a rule that no longer holds",
                 )
 
-    def test_ci_success_carries_the_guard_too(self) -> None:
-        block = self.ci[self.ci.index("\n  ci-success:") :]
-        self.assertRegex(
-            block.split("\n    steps:", 1)[0],
+    def test_ci_success_runs_on_a_no_op_edit_instead_of_skipping(self) -> None:
+        """The inversion of the rule this test used to assert, and why.
+
+        It used to require `ci-success` to carry the guard, reasoning that a
+        job asserting `result == 'success'` over needs that skip would turn
+        every description edit RED, and that skipping with them was safe
+        because "a skipped check-run is accepted by branch protection".
+
+        That acceptance is the hole. Measured on PR #2231: a body edit produced
+        a run where all 27 gates and `ci-success` skipped, the PR reported
+        `CI Success: skipping` and `mergeStateStatus: CLEAN`, and it was
+        mergeable with no gate having run on the head commit (#2232).
+
+        The premise stays true — an unguarded job asserting over skipped needs
+        would be red on every edit — so the job branches before the chain
+        rather than skipping. `NoOpEditCannotProduceAGreenCheckTests` pins that
+        branch; this test only pins that the job is reachable at all.
+        """
+        header = self.ci[self.ci.index("\n  ci-success:") :].split("\n    steps:", 1)[0]
+        self.assertNotRegex(
+            header,
             RETARGET_GUARD_RE,
-            "ci-success asserts `result == 'success'` for each of its needs, so leaving it "
-            "unguarded while its needs skip on a title edit turns every such edit RED. It "
-            "must skip with them — a skipped check-run is accepted by branch protection.",
+            "`ci-success` carries the title-edit guard again, so it skips on a body edit — "
+            "and branch protection reads a skipped required check as satisfied (#2232)",
+        )
+        self.assertRegex(
+            header,
+            r"(?m)^    if:\s*always\(\)\s*$",
+            "`ci-success` must run on every event; anything narrower reintroduces a state "
+            "where the required check is absent or skipped rather than earned",
+        )
+
+
+# ---------------------------------------------------------------------------
+# A no-op edit must not be able to produce a green required check
+# ---------------------------------------------------------------------------
+
+#: The condition identifying a run triggered by a title/body edit — the exact
+#: negation of `RETARGET_GUARD_RE`. Spelled once so the mirror step and the
+#: guard cannot drift into describing different sets of runs.
+NO_OP_EDIT_RE = re.compile(
+    r"github\.event\.action\s*==\s*'edited'\s*&&\s*github\.event\.changes\.base\s*==\s*null"
+)
+
+
+def ci_success_steps(text: str) -> "list[str]":
+    """The `- name:` step blocks of `ci-success`, in order."""
+    block = text[text.index("\n  ci-success:") :]
+    following = re.search(r"\n  (?=\S)", block[1:])
+    if following is not None:
+        block = block[: following.start() + 1]
+    steps = block.split("\n      - name:")
+    return [("- name:" + s) for s in steps[1:]]
+
+
+def mirror_binding(text: str) -> "tuple[str | None, bool]":
+    """(the id the mirror step declares, whether `Check results` reads THAT id).
+
+    GitHub evaluates `steps.<unknown>.conclusion` to '' rather than failing, so
+    a reference that no longer matches the declared id silences the chain
+    instead of breaking it. Only reading the id from the mirror itself catches
+    the drift.
+    """
+    steps = ci_success_steps(text)
+    mirror = next((s for s in steps if NO_OP_EDIT_RE.search(s)), "")
+    declared = re.search(r"^\s*id:\s*([\w-]+)\s*$", mirror, re.M)
+    if declared is None:
+        return None, False
+    chain = next((s for s in steps if "Check results" in s), "")
+    bound = re.search(
+        rf"^\s*if:\s*steps\.{re.escape(declared.group(1))}\.conclusion\s*==\s*'skipped'\s*$",
+        chain,
+        re.M,
+    )
+    return declared.group(1), bound is not None
+
+
+class NoOpEditCannotProduceAGreenCheckTests(unittest.TestCase):
+    """`CI Success` never reports a verdict no execution produced.
+
+    A run triggered by a description edit skips all 27 gate jobs, so their
+    `result`s say nothing. Before #2232 `ci-success` skipped with them and
+    branch protection accepted the skip: PR #2231 read `CI Success: skipping`,
+    `mergeStateStatus: CLEAN`, and was mergeable on a commit no gate had run
+    against.
+
+    It now runs always and takes one of two paths — mirror the real run's
+    verdict, or assert over needs that actually ran. Both can refuse; neither
+    can pass on nothing. These tests pin that shape.
+    """
+
+    def setUp(self) -> None:
+        self.ci = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.steps = ci_success_steps(self.ci)
+
+    def test_the_job_has_a_step_scoped_to_a_no_op_edit(self) -> None:
+        matching = [s for s in self.steps if NO_OP_EDIT_RE.search(s)]
+        self.assertEqual(
+            len(matching),
+            1,
+            "exactly one `ci-success` step may carry the no-op-edit condition; "
+            f"found {len(matching)}",
+        )
+
+    def test_the_mirror_never_judges_from_skipped_needs(self) -> None:
+        """Reading `needs.*.result` on a no-op run is reading nothing."""
+        mirror = next(s for s in self.steps if NO_OP_EDIT_RE.search(s))
+        self.assertNotIn(
+            "needs.",
+            mirror,
+            "the no-op step reads a `needs` result, but on the run it exists for "
+            "every one of them is `skipped`",
+        )
+
+    def test_the_mirror_can_refuse(self) -> None:
+        mirror = next(s for s in self.steps if NO_OP_EDIT_RE.search(s))
+        self.assertIn(
+            "exit 1",
+            mirror,
+            "the no-op step has no failing path, so it can only ever report success",
+        )
+
+    def test_every_refusal_says_a_new_commit_is_needed(self) -> None:
+        """Re-running is not enough, and the first version of these messages said it was.
+
+        Branch protection evaluates EVERY check-run carrying the required name
+        on a commit, not the most recent. So the failure this step records keeps
+        the pull request BLOCKED even once a green re-run lands beside it —
+        measured on #2243: two `CI Success` check-runs on one SHA, 23:18
+        failure and 23:54 success, `mergeStateStatus: BLOCKED` with no red check
+        visible to `gh pr checks`.
+
+        An error message that sends the reader down a path that cannot work
+        costs more than no message: they follow it, watch it fail, and stop
+        trusting the next one.
+        """
+        mirror = next(s for s in self.steps if NO_OP_EDIT_RE.search(s))
+        refusals = [line for line in mirror.splitlines() if "::error::" in line]
+        self.assertEqual(
+            len(refusals),
+            2,
+            f"expected the two refusal paths (no run, and timeout), found {len(refusals)}",
+        )
+        for line in refusals:
+            with self.subTest(refusal=line[:60]):
+                self.assertIn(
+                    "new commit",
+                    line,
+                    "a refusal must say that a new commit is required; re-running "
+                    "leaves the failed check-run on the same SHA",
+                )
+
+    def test_exactly_one_step_produces_the_verdict(self) -> None:
+        """The chain stands down exactly when the MIRROR ran — bound by its id.
+
+        The first version matched `steps\.\w+\.conclusion`, any identifier.
+        Renaming the mirror's `id:` without its reference then made the
+        reference evaluate to '', so `Check results` never ran and `CI Success`
+        went green having read no `needs` result — #2232 reopened, with every
+        test in this class green (#2246, P2-a, shown by mutation). The id is now
+        read from the mirror step itself.
+        """
+        ident, bound = mirror_binding(self.ci)
+        self.assertIsNotNone(
+            ident, "the mirror step declares no `id:`, so nothing can reference its conclusion"
+        )
+        self.assertTrue(
+            bound,
+            f"`Check results` must be conditioned on `steps.{ident}.conclusion`, the id "
+            "the mirror declares; any other identifier evaluates to '' and silences the chain",
+        )
+
+    def test_the_two_conditions_are_exact_negations(self) -> None:
+        """One spelling drifting from the other reopens the hole silently."""
+        mirror = next(s for s in self.steps if NO_OP_EDIT_RE.search(s))
+        self.assertIsNotNone(RETARGET_GUARD_RE.search(self.ci), "the guard vanished from ci.yml")
+        self.assertNotRegex(
+            mirror,
+            RETARGET_GUARD_RE,
+            "the no-op step carries the guard's own predicate as well as its negation",
+        )
+
+
+class NoOpEditParserTests(unittest.TestCase):
+    """RED-then-GREEN on synthetic text, per this module's parser contract."""
+
+    SYNTHETIC = """\
+jobs:
+  ci-success:
+    name: CI Success
+    if: always()
+    steps:
+      - name: Mirror
+        id: mirror
+        if: github.event.action == 'edited' && github.event.changes.base == null
+        run: exit 1
+      - name: Check results
+        if: steps.mirror.conclusion == 'skipped'
+        run: echo ok
+  next-job:
+    name: Something else
+"""
+
+    def test_step_parser_stops_at_the_next_job(self) -> None:
+        steps = ci_success_steps(self.SYNTHETIC)
+        self.assertEqual(len(steps), 2)
+        self.assertIn("Mirror", steps[0])
+        self.assertNotIn("Something else", steps[1])
+
+    def test_the_no_op_condition_is_recognised(self) -> None:
+        self.assertRegex(ci_success_steps(self.SYNTHETIC)[0], NO_OP_EDIT_RE)
+
+    def test_the_binding_holds_when_the_ids_match(self) -> None:
+        self.assertEqual(mirror_binding(self.SYNTHETIC), ("mirror", True))
+
+    def test_a_condition_widened_past_the_mirror_breaks_the_binding(self) -> None:
+        """`|| always()` after the skip test runs the chain on every edit too:
+        two steps would then produce a verdict, which is what this binding
+        exists to rule out. An unanchored match read it as bound."""
+        widened = self.SYNTHETIC.replace(
+            "conclusion == 'skipped'", "conclusion == 'skipped' || always()"
+        )
+        self.assertNotEqual(widened, self.SYNTHETIC, "CONTROL: the fixture carries the condition")
+        self.assertEqual(mirror_binding(widened), ("mirror", False))
+
+    def test_a_renamed_mirror_id_breaks_the_binding(self) -> None:
+        renamed = self.SYNTHETIC.replace("id: mirror", "id: mirror_verdict")
+        self.assertEqual(mirror_binding(renamed), ("mirror_verdict", False))
+
+    def test_a_missing_condition_is_detected(self) -> None:
+        without = self.SYNTHETIC.replace(
+            "if: github.event.action == 'edited' && github.event.changes.base == null",
+            "if: always()",
+        )
+        self.assertEqual(
+            [s for s in ci_success_steps(without) if NO_OP_EDIT_RE.search(s)],
+            [],
+            "the parser reports a condition the text does not carry",
         )
 
 
@@ -1613,19 +1860,130 @@ class NoOpRunCannotCancelRealCiTests(unittest.TestCase):
             "cancel another only when it is not itself a no-op.",
         )
 
-    def test_the_predicate_is_spelled_the_same_as_the_job_guard(self) -> None:
-        """Two spellings of \"this run is a no-op\" is how the two drift apart."""
+    def test_the_predicate_is_spelled_the_same_as_every_job_guard(self) -> None:
+        """Two spellings of \"this run is a no-op\" is how the two drift apart.
+
+        Compared against every guarded job rather than against `ci-success`,
+        which stopped carrying the guard in #2232. Generalising it is the
+        stronger test anyway: the old one would have missed a single job
+        spelling the predicate differently from all the others.
+        """
         guard_in_cancel = RETARGET_GUARD_RE.search(cancel_in_progress(self.ci))
-        self.assertIsNotNone(guard_in_cancel)
-        block = self.ci[self.ci.index("\n  ci-success:") :].split("\n    steps:", 1)[0]
-        guard_in_job = RETARGET_GUARD_RE.search(block)
-        self.assertIsNotNone(guard_in_job)
-        self.assertEqual(
-            guard_in_cancel.group(0),
-            guard_in_job.group(0),
-            "the concurrency predicate and the job guard must be character-identical, so "
-            "editing one and not the other cannot silently reopen the hole",
+        self.assertIsNotNone(guard_in_cancel, "`cancel-in-progress` lost the no-op predicate")
+        guarded, _unguarded = jobs_with_guard(self.ci)
+        self.assertGreater(len(guarded), 20, "job discovery looks broken, not the guard")
+        for job in sorted(guarded):
+            with self.subTest(job=job):
+                found = RETARGET_GUARD_RE.search(job_block(self.ci, job))
+                self.assertIsNotNone(found, f"`{job}` reads as guarded but the regex finds nothing")
+                self.assertEqual(
+                    guard_in_cancel.group(0),
+                    found.group(0),
+                    "the concurrency predicate and every job guard must be "
+                    "character-identical, so editing one and not the others cannot "
+                    "silently reopen the hole",
+                )
+
+
+CONCURRENCY_GROUP_RE = re.compile(r"^\s*group:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def concurrency_group(text: str) -> str:
+    """The workflow-level `group:` value, verbatim."""
+    match = CONCURRENCY_GROUP_RE.search(text)
+    return "" if match is None else match.group(1)
+
+
+def group_separates_no_op_runs(group: str) -> bool:
+    """True when the group keys a no-op run apart from a real one.
+
+    Structural, not evaluated: the value must carry the no-op predicate AND
+    `github.run_id`, so that a no-op edit lands in a group of its own while
+    every real run keeps sharing one. Checking only for the predicate would
+    accept a group that merely *mentions* it.
+    """
+    return bool(RETARGET_GUARD_RE.search(group)) and "github.run_id" in group
+
+
+class NoOpRunCannotDisplaceAPendingRealRunTests(unittest.TestCase):
+    """`cancel-in-progress` was necessary and not sufficient.
+
+    It governs a run already in flight and says nothing about a run still
+    PENDING. GitHub keeps at most one pending run per concurrency group and a
+    third arrival evicts the queued one regardless. Measured in production on
+    #2316 after `@dependabot rebase`, which pushes the rebased commit and
+    edits the body in the same second: run 35197905615 (`synchronize`) was
+    created 08:06:20Z and `cancelled` at 08:06:21Z having run 0 jobs, while
+    run 35197906019 (`edited`) skipped every gate. `ci-success` refused
+    correctly, so nothing merged on a false green -- but the pull request was
+    left with no CI at all and only a new commit brings it back (#2327).
+
+    The fix is the group, not the predicate: a no-op edit gets one of its own.
+    """
+
+    def setUp(self) -> None:
+        self.ci = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_the_group_keys_a_no_op_run_apart_from_the_real_one(self) -> None:
+        group = concurrency_group(self.ci)
+        self.assertTrue(group, "ci.yml declares no `group:` -- parser or workflow broke")
+        self.assertTrue(
+            group_separates_no_op_runs(group),
+            "a no-op edit shares the real run's concurrency group, so it can evict the "
+            "queued real run whatever `cancel-in-progress` says: key it by "
+            "`github.run_id` when the no-op predicate holds",
         )
+
+    def test_the_group_predicate_is_spelled_like_every_job_guard(self) -> None:
+        found = RETARGET_GUARD_RE.search(concurrency_group(self.ci))
+        self.assertIsNotNone(found, "the concurrency group lost the no-op predicate")
+        guarded, _unguarded = jobs_with_guard(self.ci)
+        self.assertGreater(len(guarded), 20, "job discovery looks broken, not the guard")
+        for job in sorted(guarded):
+            with self.subTest(job=job):
+                in_job = RETARGET_GUARD_RE.search(job_block(self.ci, job))
+                self.assertIsNotNone(in_job, f"`{job}` reads as guarded but the regex finds nothing")
+                self.assertEqual(found.group(0), in_job.group(0))
+
+    def test_the_check_refuses_the_shape_this_replaced(self) -> None:
+        """The positive control: the previous group must not pass.
+
+        A test that only ever sees the fixed file proves the file, not the
+        check.
+        """
+        self.assertFalse(
+            group_separates_no_op_runs("${{ github.workflow }}-${{ github.ref }}"),
+            "the pre-#2327 group is accepted, so this check would not have caught it",
+        )
+        self.assertFalse(
+            group_separates_no_op_runs(
+                "${{ github.workflow }}-${{ github.ref }}-"
+                "${{ github.event.action != 'edited' || github.event.changes.base != null }}"
+            ),
+            "a group that splits no-op from real but reuses ONE key for every no-op run "
+            "still lets the next body edit evict a queued one",
+        )
+        self.assertTrue(
+            group_separates_no_op_runs(concurrency_group(self.ci)),
+            "the shipped group must pass the same check that refuses those two",
+        )
+
+
+class ConcurrencyGroupParserTests(unittest.TestCase):
+    """RED-then-GREEN on synthetic text, per this module's parser contract."""
+
+    def test_parser_reads_a_literal_and_an_expression(self) -> None:
+        self.assertEqual(
+            concurrency_group("concurrency:\n  group: plain\n  cancel-in-progress: true\n"),
+            "plain",
+        )
+        self.assertEqual(
+            concurrency_group("concurrency:\n  group: ${{ a }}-${{ b }}\n"),
+            "${{ a }}-${{ b }}",
+        )
+
+    def test_parser_returns_empty_when_there_is_no_group(self) -> None:
+        self.assertEqual(concurrency_group("on:\n  push:\n"), "")
 
 
 class CancelInProgressParserTests(unittest.TestCase):
@@ -2047,3 +2405,122 @@ class CheckoutReachabilityRealWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PROPAGATION_GUARD = WORKFLOW_DIR / "propagation-guard.yml"
+TS_SDK_PACKAGE = REPO_ROOT / "sdks" / "typescript" / "package.json"
+TS_SDK_VITEST_CONFIG = REPO_ROOT / "sdks" / "typescript" / "vitest.config.ts"
+
+
+def npm_scripts_run_by(workflow_text: str, job_name: str) -> set[str]:
+    """The `npm run <script>` names a named job invokes.
+
+    Scoped to one job so a step in a neighbouring job cannot stand in for a
+    missing one here -- the failure this pins is a step absent from THIS job
+    while three others run npm in the same file.
+    """
+    block = job_block(workflow_text, job_name)
+    return set(re.findall(r"npm run ([A-Za-z0-9:_-]+)", block))
+
+
+class TypeScriptSdkIsLintedTests(unittest.TestCase):
+    """`npm run lint` is a step, and `lint` still means eslint.
+
+    `git grep -n eslint .github/` finds nothing in this repository and always
+    will: the workflow calls the package script, and the script calls eslint.
+    Reading the absence of the word as an absence of the gate is what #2328
+    reported -- correctly at the time it was written, since the SDK job ran
+    only typecheck and vitest, so eslint, typescript-eslint and @types/node
+    bumps were never exercised and a lint error merged green. #2282 added the
+    step. Nothing pinned it, which is the half that outlives the fix: a step
+    no test names can be dropped by the next person to tidy the job.
+
+    Two assertions, because either alone is satisfiable without linting
+    anything: the job must run the script, and the script must run eslint.
+    `"lint": "echo ok"` passes the first and fails the second.
+    """
+
+    JOB = "typescript-sdk"
+
+    def setUp(self) -> None:
+        self.workflow = PROPAGATION_GUARD.read_text(encoding="utf-8")
+        self.package = json.loads(TS_SDK_PACKAGE.read_text(encoding="utf-8"))
+
+    def test_the_sdk_job_runs_the_lint_script(self) -> None:
+        run = npm_scripts_run_by(self.workflow, self.JOB)
+        self.assertTrue(
+            run,
+            f"no `npm run` found in `{self.JOB}` -- the job was renamed or the parser broke",
+        )
+        self.assertIn(
+            "lint",
+            run,
+            "the TypeScript SDK job installs the SDK and never lints it, so an eslint "
+            "or typescript-eslint bump is never exercised and a lint error merges green "
+            f"(#2328). Steps found: {sorted(run)}",
+        )
+
+    def test_the_lint_script_still_runs_eslint(self) -> None:
+        script = self.package.get("scripts", {}).get("lint", "")
+        self.assertTrue(script, "sdks/typescript/package.json defines no `lint` script")
+        self.assertIn(
+            "eslint",
+            script,
+            f"`npm run lint` no longer runs eslint ({script!r}), so the workflow step "
+            "above passes while nothing is linted",
+        )
+
+    def test_the_job_s_other_two_gates_are_named_here_too(self) -> None:
+        """Typecheck and the vitest suite, equally unnamed by any test before.
+
+        Not scope creep: all three sit in one job and none was pinned. They
+        are asserted differently because the workflow spells them
+        differently -- `npm run typecheck` against `npm test`, npm's builtin
+        alias, which no `npm run` parser can see. A single parser that
+        appeared to cover all three would be the illusion, not the coverage.
+        """
+        run = npm_scripts_run_by(self.workflow, self.JOB)
+        self.assertLessEqual(
+            {"typecheck", "lint", "test:coverage"}, run, f"steps found: {sorted(run)}"
+        )
+
+    def test_the_suite_runs_under_coverage_so_the_thresholds_bind(self) -> None:
+        """`vitest.config.ts` declares per-file thresholds; only `--coverage` reads them.
+
+        The job ran `npm test` (`vitest run`), so the thresholds were evaluated
+        by nothing and three files drifted below them unseen (#2383). Three
+        links, each droppable on its own: the job runs `test:coverage`, the
+        script passes `--coverage`, and the config still declares thresholds.
+        """
+        self.assertIn("test:coverage", npm_scripts_run_by(self.workflow, self.JOB))
+        script = self.package.get("scripts", {}).get("test:coverage", "")
+        self.assertRegex(
+            script,
+            r"\bvitest run\b.*--coverage\b",
+            f"`npm run test:coverage` no longer runs vitest under coverage ({script!r})",
+        )
+        self.assertRegex(
+            TS_SDK_VITEST_CONFIG.read_text(encoding="utf-8"),
+            re.compile(r"^\s*thresholds\s*:\s*\{", re.MULTILINE),
+            "vitest.config.ts declares no `thresholds:` key, so running under "
+            "coverage enforces nothing",
+        )
+
+    def test_the_lint_script_covers_the_tests_too(self) -> None:
+        """`eslint src` left tests/ unlinted, 7 errors deep (#2364)."""
+        targets = self.package.get("scripts", {}).get("lint", "").split()[1:]
+        self.assertLessEqual({"src", "tests"}, set(targets), f"lint targets: {targets}")
+
+    def test_the_parser_refuses_a_job_that_lost_the_step(self) -> None:
+        """The positive control, on the shape this replaces."""
+        without_lint = self.workflow.replace(
+            "      - name: Lint\n"
+            "        working-directory: sdks/typescript\n"
+            "        run: npm run lint\n",
+            "",
+        )
+        self.assertNotEqual(
+            without_lint, self.workflow, "the Lint step was not found verbatim -- fixture drift"
+        )
+        self.assertNotIn("lint", npm_scripts_run_by(without_lint, self.JOB))
+        self.assertIn("lint", npm_scripts_run_by(self.workflow, self.JOB))

@@ -411,11 +411,15 @@ class Collection:
             vector: Query vector (list or numpy array).
             quality: One of 'fast', 'balanced', 'accurate', 'perfect', 'autotune',
                      'custom:<ef>' (e.g. 'custom:256'), or 'adaptive:<min>:<max>'
-                     (e.g. 'adaptive:32:512').
+                     (e.g. 'adaptive:32:512'), each ef in 16-4096.
             top_k: Number of results (default: 10).
 
         Returns:
             List of dicts with id, score, and payload.
+
+        Raises:
+            ValueError: If ``quality`` names no mode, or gives an ef outside
+                16-4096.
         """
         return self._inner.search_with_quality(vector, quality, top_k)
 
@@ -669,10 +673,11 @@ class Database:
                 - ``"full"`` (``"f32"``): Full f32 precision — best recall.
                 - ``"sq8"`` (``"int8"``): 8-bit scalar quantization — 4x compression.
                 - ``"binary"`` (``"bit"``): 1-bit binary quantization — 32x compression.
-                - ``"pq"`` (``"product_quantization"``): Product Quantization — 8x-16x
-                  compression via trained codebooks (requires a training step).
+                - ``"pq"`` (``"product_quantization"``): Product Quantization —
+                  compression to ``2 × dim / m`` via trained codebooks (dim/4 at the default m = 8;
+                  requires a training step).
                 - ``"rabitq"``: RaBitQ — 1-bit with rotation + scalar correction,
-                  32x compression with ~1-2% recall loss.
+                  32x compression; no recorded run measures its recall loss.
 
             hnsw: Optional :class:`HnswOptions` dataclass with typed HNSW
                 parameters. Replaces the legacy v1.12 flat kwargs
@@ -925,7 +930,8 @@ __all__ = [
     # Engine config sections (issue #1549). Each maps 1:1 to a `[section]`
     # of the core `VelesConfig` TOML; attach them to `VelesConfigOptions`
     # or load a whole file via `VelesConfigOptions.from_toml_path`.
-    # `wal_batch` is intentionally absent (velesdb-premium Enterprise —
+    # There is no `wal_batch` section (the core removed it in 7.0.0;
+    # concurrent WAL writing is velesdb-premium Enterprise —
     # docs/guides/WRITE_CONCURRENCY.md); `server`/`logging` configure
     # hosting shells, not the embedded engine.
     "SearchConfigOptions",

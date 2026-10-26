@@ -432,7 +432,7 @@ WITH (quantization = 'dual', oversampling = 4);
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `mode` | string | `fast`, `balanced`, `accurate`, `perfect`, `adaptive` |
+| `mode` | string | `fast`, `balanced`, `accurate`, `perfect`, `autotune`, `custom:<ef>`, `adaptive:<min_ef>:<max_ef>` (min ≤ max; each ef in 16–4096) |
 | `ef_search` | integer | HNSW ef_search (16–4096) |
 | `timeout_ms` | integer | Query timeout in milliseconds |
 | `rerank` | boolean | Enable reranking after quantized search |
@@ -455,4 +455,4 @@ SELECT "select", "from", "order" FROM docs LIMIT 10;
 
 ---
 
-Last updated: 2026-07-25 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-07-25 · Applies to: velesdb-core 7.0.0

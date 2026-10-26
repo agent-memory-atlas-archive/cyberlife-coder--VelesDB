@@ -97,7 +97,7 @@ WITH (ef_search = 512, timeout_ms = 5000);
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `mode` | string | `fast`, `balanced`, `accurate`, `perfect`, `adaptive` |
+| `mode` | string | `fast`, `balanced`, `accurate`, `perfect`, `autotune`, `custom:<ef>`, `adaptive:<min_ef>:<max_ef>` (min ≤ max; each ef in 16–4096) |
 | `ef_search` | integer | HNSW `ef_search` (higher = better recall, slower) |
 | `timeout_ms` | integer | Query timeout in milliseconds |
 | `rerank` | boolean | Enable result reranking |
@@ -132,4 +132,4 @@ EXPLAIN SELECT * FROM docs WHERE VECTOR NEAR $v LIMIT 10;
 
 ---
 
-Last updated: 2026-07-25 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-07-25 · Applies to: velesdb-core 7.0.0

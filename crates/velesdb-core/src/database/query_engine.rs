@@ -507,10 +507,9 @@ impl Database {
     /// query clone (Requirement 8.2 — Quality Bar Gate 2, p50 latency).
     ///
     /// Compiled only under `cfg(test)`, so it adds nothing to the production
-    /// surface. The full ≤ 450 µs wall-clock p50 contract is enforced
-    /// separately by the `Perf Gate (E2E)` workflow
-    /// (`.github/workflows/perf-gate-e2e.yml`); this accessor pins the
-    /// structural "zero-overhead when no observer" half of the gate
+    /// surface. Wall-clock p50 is checked separately, against a loose floor,
+    /// by the `perf-gate-e2e` job of `.github/workflows/ci.yml`; this accessor
+    /// pins the structural "zero-overhead when no observer" half of the gate
     /// deterministically, without a flaky timing threshold.
     #[cfg(test)]
     pub(crate) fn read_gate_cow_for_test<'q>(
@@ -768,22 +767,16 @@ impl Database {
 
     /// Resolves a collection that supports write operations (INSERT/UPDATE/TRAIN).
     ///
-    /// Checks vector, graph, and metadata collections. Metadata-only collections
-    /// support INSERT/UPDATE for metadata fields (no vectors).
+    /// Resolves the same registries as `resolve_collection` (vector, then
+    /// graph, then metadata) — the distinct name exists for call-site intent
+    /// (write path vs. read path), not a difference in what gets resolved.
+    /// Metadata-only collections support INSERT/UPDATE for metadata fields
+    /// (no vectors).
     pub(super) fn resolve_writable_collection(
         &self,
         name: &str,
     ) -> Result<crate::collection::Collection> {
-        if let Some(vc) = self.get_vector_collection(name) {
-            return Ok(vc.inner);
-        }
-        if let Some(gc) = self.get_graph_collection(name) {
-            return Ok(gc.inner);
-        }
-        if let Some(mc) = self.get_metadata_collection(name) {
-            return Ok(mc.inner);
-        }
-        Err(Error::CollectionNotFound(name.to_string()))
+        self.resolve_collection(name)
     }
 
     /// Executes a single SELECT (no compound), resolving JOINs if present.
@@ -878,6 +871,8 @@ impl Database {
     /// groups still inside the window. Otherwise downstream stages may reorder or
     /// drop rows, so we fall back to the conservative server-side ceiling
     /// [`JOIN_ROW_CEILING`] — still bounding OOM without affecting correctness.
+    ///
+    /// [`JOIN_ROW_CEILING`]: crate::collection::search::query::JOIN_ROW_CEILING
     pub(super) fn join_row_budget(
         select: &crate::velesql::SelectStatement,
         analysis: &crate::collection::search::query::pushdown::PushdownAnalysis,

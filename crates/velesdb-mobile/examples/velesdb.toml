@@ -3,8 +3,8 @@
 # There is no mobile-specific config format: this is the same file the server
 # and the CLI read, minus the sections that belong to them. Only the ENGINE
 # sections below are considered — [search], [hnsw], [storage], [limits],
-# [quantization], [wal_batch]. A [server] or [logging] table sitting in the
-# same shared file is dropped, not rejected.
+# [quantization]. A [server] or [logging] table sitting in the same shared
+# file is dropped, not rejected.
 #
 # Two ways to load it:
 #
@@ -30,10 +30,12 @@
 
 [search]
 # fast | balanced | accurate | perfect
-#   fast      ef_search 96,   ~95% recall
-#   balanced  ef_search 160,  ~99.5% recall — the default
-#   accurate  ef_search 512,  ~100% recall
-#   perfect   exhaustive brute force, 100% by construction, O(n)
+#   fast      ef_search 96,   97.4% recall@10 in recall_benchmark (10K, 128-D)
+#   balanced  ef_search 160,  99.8% there — the default
+#   accurate  ef_search 512,  100% there, 0.98 on SIFT1M's 1M
+#   perfect   per query only: as a global default it is applied as
+#             accurate, with a warning at load -- an exhaustive scan
+#             cannot be capped on every search path
 default_mode = "balanced"
 
 # Hard cap on results per query.
@@ -53,15 +55,9 @@ max_layers = 0
 
 [storage]
 # "mmap" or "memory". mmap keeps the resident set small, which is what you
-# want on a phone; "memory" trades RAM for latency.
+# want on a phone; "memory" trades RAM for latency. Reserved — parsed but
+# not yet applied by the engine (core issue #2087).
 storage_mode = "mmap"
-
-# Mmap cache in megabytes. 1024 is the desktop default and is far too generous
-# for a phone — 128 or 256 is a more realistic starting point.
-mmap_cache_mb = 256
-
-# Vector alignment in bytes; 64 matches the cache line on ARM64 and x86_64.
-vector_alignment = 64
 
 [limits]
 # Guard rails. The mobile binding can also raise or lower the per-query limits
@@ -85,11 +81,3 @@ rerank_enabled = true
 rerank_multiplier = 2
 auto_quantization = true
 auto_quantization_threshold = 10000
-
-[wal_batch]
-# RESERVED — parsed but not yet wired (issue #2078): enabling it changes
-# nothing today, and the engine logs a warning if you do. Batch writes
-# already pay one durability barrier per call.
-enabled = false
-commit_delay_us = 100
-max_batch_size = 128

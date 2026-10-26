@@ -95,7 +95,7 @@ pub enum ReindexEvent {
 /// serde default matching [`Default`] so a `config.json` written by an older
 /// VelesDB — or one that omits any field — deserializes without error. The
 /// [`cooldown`](Self::cooldown) `Duration` is stored as whole seconds via
-/// [`duration_secs`].
+/// `duration_secs`.
 ///
 /// `#[non_exhaustive]`: build from [`AutoReindexConfig::default`] and adjust
 /// fields so future additions stay backward compatible for downstream crates.
@@ -106,7 +106,7 @@ pub struct AutoReindexConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Threshold ratio for triggering reindex (`optimal_m` / `current_m`)
-    /// Default: 1.5 (trigger if optimal M is 50% higher than current)
+    /// Default: 1.5 (trigger when the optimal M reaches 1.5 times the current one)
     #[serde(default = "default_param_divergence_threshold")]
     pub param_divergence_threshold: f64,
     /// Minimum dataset size before considering reindex
@@ -114,11 +114,11 @@ pub struct AutoReindexConfig {
     #[serde(default = "default_min_size_for_reindex")]
     pub min_size_for_reindex: usize,
     /// Maximum acceptable latency regression (%) for rollback
-    /// Default: 10.0 (rollback if new index is >10% slower)
+    /// Default: 10.0 (roll back when latency regresses by more than this percentage)
     #[serde(default = "default_max_latency_regression_percent")]
     pub max_latency_regression_percent: f64,
     /// Maximum acceptable recall regression (%) for rollback
-    /// Default: 2.0 (rollback if recall drops by >2%)
+    /// Default: 2.0 (roll back when recall regresses by more than this percentage)
     #[serde(default = "default_max_recall_regression_percent")]
     pub max_recall_regression_percent: f64,
     /// Cooldown period between reindex attempts

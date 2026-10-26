@@ -6,12 +6,12 @@
 
 ## Performance
 
-*Benchmarked March 20, 2026 — Intel Core i9-14900KF, 64GB DDR5, Windows 11, Rust 1.92.0*
+*A historical comparison against `hnsw_rs`, recorded on 2026-01-08 while it was still an optional backend and published in the 1.0.0 changelog, the release that removed it. The machine is not recorded, and the comparison can no longer be re-run; current figures are in [BENCHMARKS.md](../BENCHMARKS.md#5-hnsw-vector-search).*
 
-| Operation | Native HNSW | External libs | Improvement |
-|-----------|-------------|---------------|-------------|
-| **Search (100 queries)** | 26.9 ms | ~32 ms | **1.2x faster** ✅ |
-| **Parallel Insert (5k)** | 1.47 s | ~1.6 s | **1.07x faster** ✅ |
+| Operation | Native HNSW | `hnsw_rs` | Improvement |
+|-----------|-------------|-----------|-------------|
+| **Search (100 queries, 5K vectors)** | 26.9 ms | 32.4 ms | **1.2x faster** ✅ |
+| **Parallel Insert (5K vectors)** | 1.47 s | 1.57 s | **1.07x faster** ✅ |
 | **Recall** | ~99% | baseline | Parity ✓ |
 
 > **Key insight**: Native HNSW excels at **search operations** — the most critical path for production workloads.
@@ -22,7 +22,7 @@ No feature flags needed. Native HNSW is the only implementation:
 
 ```toml
 [dependencies]
-velesdb-core = "6.0.0"
+velesdb-core = "7.0.0"
 ```
 
 ## API
@@ -65,8 +65,8 @@ let loaded = NativeHnswIndex::load("./my_index", 768, DistanceMetric::Cosine)?;
 │  distance: SimdDistance      (AVX2/SSE/NEON optimized)          │
 │  vectors: RwLock<ContiguousVectors>  (64-byte aligned storage)  │
 │  layers: RwLock<Vec<Layer>>  (hierarchical graph)               │
-│  entry_point: AtomicUsize    (lock-free CAS promotion)          │
-│  max_layer: AtomicUsize      (lock-free CAS promotion)          │
+│  entry_point: AtomicUsize    (lock-free reads, locked moves)    │
+│  max_layer: AtomicUsize      (lock-free reads, locked moves)    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,10 +76,14 @@ let loaded = NativeHnswIndex::load("./my_index", 768, DistanceMetric::Cosine)?;
 
 | Method | Params | Recall | Speed | Description |
 |--------|--------|--------|-------|-------------|
-| `new(dim, metric)` | M=32, ef=400 | ≥95% | Baseline | Production workloads |
+| `new(dim, metric)` | `auto(dim)`: M=24, ef_construction=300 up to 256 dims; M=32, 400 above | ≥95% target¹ | Baseline | Production workloads |
 | `with_params(dim, metric, params)` | Custom | Custom | Custom | Full control |
-| `new_turbo(dim, metric)` | M=12, ef=100 | ~85% | 3-5x faster | Bulk import, dev, benchmarks |
-| `new_fast_insert(dim, metric)` | M/2, ef/2 | ~90% | 2-3x faster | Streaming, no vector storage |
+| `new_turbo(dim, metric)` | M=12, ef=100 | Lower (not measured) | 4.9x faster ² | Bulk import, dev, benchmarks |
+| `new_fast_insert(dim, metric)` | as `new` | as `new` | as `new` | `new` with exact-distance features off: `brute_force_search_parallel` returns nothing |
+
+¹ The collection default path (`auto()` parameters) measured 97.6% recall@10 end to end (10K × 384D clustered set, Balanced then at ef 128; 2026-03-27 on 1.7.2).
+
+² Sequential inserts against `new`, measured on `HnswIndex` with the same parameters (1K × 768D, 2026-03-23 on 1.6.0): [BENCHMARKS.md](../BENCHMARKS.md#index-constructor-insert-speed).
 
 ### Operations
 
@@ -89,10 +93,9 @@ let loaded = NativeHnswIndex::load("./my_index", 768, DistanceMetric::Cosine)?;
 | `insert_batch(&[(id, vec)])` | Batch insert |
 | `insert_batch_parallel(items)` | Parallel batch insert |
 | `search(query, k)` | Standard search (Balanced mode) |
-| `search_with_quality(query, k, quality)` | Search with quality preset (Fast/Balanced/Accurate/Perfect/Adaptive/AutoTune) |
-| `search_with_ef(query, k, ef_search)` | Search with explicit ef_search value |
-| `search_batch_parallel(queries, k, ef_search)` | Batch parallel search |
-| `brute_force_search_parallel(query, k)` | Exact search (100% recall) |
+| `search_with_quality(query, k, quality)` | Search with quality preset (Fast/Balanced/Accurate/Perfect/Adaptive/AutoTune). On this type every preset walks the graph: `Perfect` at its large ef, `Adaptive` at `max(min_ef, k)` without escalating, `AutoTune` at Balanced's ef — each scaled up to 2x its ef above 10K vectors by `ef_search_for_scale`; `brute_force_search_parallel` is the exhaustive path |
+| `search_batch_parallel(queries, k, quality)` | Batch parallel search, each query as `search_with_quality` |
+| `brute_force_search_parallel(query, k)` | Exact search: the exact top-k under the index's distance; nothing on an index built with `new_fast_insert` or loaded from one |
 | `remove(id)` | Remove vector |
 
 ### Persistence
@@ -101,6 +104,69 @@ let loaded = NativeHnswIndex::load("./my_index", 768, DistanceMetric::Cosine)?;
 |--------|-------------|
 | `save(path)` | Save index to disk |
 | `load(path, dim, metric)` | Load index from disk |
+
+#### `.vectors` on-disk layout
+
+| bytes | field |
+|---|---|
+| 0..4 | format version, `u32` LE |
+| 4..12 | vector count, `u64` LE |
+| 12..16 | dimension, `u32` LE |
+| 16 | flags (v2 only): bit 0 set = every vector is unit-norm cosine, written by a pre-normalized engine, so a load skips the norm check; 0 in files written before the flag (#2246) |
+| 17..*data_offset* | reserved, zero-filled (v2 only) |
+| *data_offset*.. | `count * dimension` values, `f32` LE |
+
+`data_offset` is **16 in v1** and **4096 in v2**. Both versions are read; only
+v2 is written.
+
+The v2 gap is not padding for its own sake. The graph's f32 arena hands out
+`&[f32]` built with `slice::from_raw_parts`, whose contract requires proper
+alignment, so a payload starting at byte 16 could never be mapped as one. v2
+moves it to a page boundary, which is the precondition for retiring the
+duplicate arena copy entirely (#2173). Until a later version claims part of the
+gap for header fields, it is zero-filled so that version can tell an unset field
+from a set one.
+
+The payload is explicitly little-endian on every target — `.vectors` is
+portable, unlike the native-endian arena file beside it, and anything that later
+maps it directly inherits that constraint and must gate on `target_endian`.
+
+**Downgrading works, and that was measured rather than reasoned about.** A
+current binary reads v1 and v2, and a binary from before v2 opens a v2 database
+too. Its reader refuses a v2 header with `Unsupported version: 2`, and the open
+path treats that like any unreadable `.vectors`: a warning, then the index is
+rebuilt from `vectors.dat` / the WAL, because `.vectors` is a derived artifact.
+Checked against a real `v6.0.0` build; the rebuild is pinned by
+`a_corrupt_vectors_file_does_not_prevent_opening`, the warning by
+`reopening_with_unusable_vectors_file_warns` (#2245).
+This page said the opposite until #2246; the CHANGELOG had been corrected first.
+
+#### The file may be the arena
+
+Since #2173 a v2 `.vectors` is mapped directly as the graph's f32 arena instead
+of being read into a second buffer, when three conditions hold:
+
+1. the file is v2, so its payload starts page-aligned;
+2. the target is little-endian, matching the payload's declared byte order;
+3. the store holds at least `ContiguousVectors::MIN_ARENA_CAPACITY` vectors.
+
+The third is not a performance threshold. Below it an arena is sized up to that
+floor and the file grows to match, so adoption would *write* — and **opening a
+collection must never write to it**, because `velesdb-memory`'s migration resume
+proves a source store unchanged by hashing these files.
+
+Anything outside those conditions falls back to a disposable arena and the copy
+path, with a warning. A mapped arena is an optimisation, never a requirement: a
+filesystem that refuses the mapping costs the optimisation and nothing else.
+
+Two consequences worth knowing when reading this code:
+
+- A graph that adopted `.vectors` holds **no `ArenaHome`**. `ArenaHome::drop`
+  removes its file unconditionally, so the durable store is protected by the
+  absence of a home rather than by a flag telling it not to delete.
+- `save()` does not truncate an adopted file. It flushes the mapped pages, then
+  rewrites the header in place — pages before header, so a reader never sees a
+  header claiming more vectors than the file holds.
 
 #### Load-time validation (untrusted file safety)
 
@@ -272,8 +338,8 @@ POST /collections
 
 ### Search Flow
 
-1. **Query preparation**: Rotate the query vector using the learned orthogonal rotation matrix. Cost: ~60 us for 768D (amortized over hundreds of distance evaluations per search).
-2. **Binary traversal**: Traverse the HNSW graph using XOR + popcount binary distances with affine correction factors. Oversampling ratio of 6x compensates for coarser binary fidelity (vs 4x for SQ8). Cost: ~2 ns per candidate.
+1. **Query preparation**: Rotate the query vector using the learned orthogonal rotation matrix. Cost: one matrix-vector product, amortized over the hundreds of distance evaluations of a search (not benchmarked on its own).
+2. **Binary traversal**: Traverse the HNSW graph using XOR + popcount binary distances with affine correction factors. Oversampling ratio of 6x compensates for coarser binary fidelity (SQ8 oversamples 4x). Cost: an XOR and a popcount per candidate (not benchmarked on its own).
 3. **Float32 re-ranking**: Collect `k * 6` coarse candidates, then compute exact f32 distances from the inner `NativeHnsw` vector store. Return the top-k with exact distances.
 
 If the quantizer is not yet trained, search falls back transparently to standard f32 distances.
@@ -309,8 +375,8 @@ rabitq_hnsw.force_train_quantizer()?;
 | Metric | Standard (f32) | RaBitQ | Ratio |
 |--------|---------------|--------|-------|
 | Memory bandwidth per candidate | 1x | 1/32x | **32x reduction** |
-| Distance computation | ~10 ns (f32 SIMD) | ~2 ns (XOR + popcount) | **5x faster** |
-| Query preparation | 0 | ~60 us (768D) | One-time per query |
+| Distance computation | f32 SIMD | XOR + popcount | Cheaper per candidate (not benchmarked) |
+| Query preparation | 0 | One query rotation (not benchmarked) | One-time per query |
 | Minimum index size | N/A | 5000 vectors | Below threshold: f32 fallback |
 
 ## Cosine: Pre-Normalized Dot-Product Kernel
@@ -382,7 +448,7 @@ The pipelined path produces **identical results** to the non-pipelined path. Onl
 
 ## AutoTune Search
 
-`SearchQuality::AutoTune` computes optimal `ef_search` range from collection statistics, then delegates to the adaptive two-phase search algorithm. This is the recommended quality setting for applications that want good recall without manual ef tuning.
+On an `HnswIndex` and on a collection, `SearchQuality::AutoTune` computes an `ef_search` range from collection statistics, then delegates to the adaptive two-phase search algorithm; some search paths run it in one pass, scan exactly or ignore the mode instead (see [Search Modes — When the two phases run](../guides/SEARCH_MODES.md#when-the-two-phases-run)). `NativeHnswIndex::search_with_quality` does not: it walks the graph once at Balanced's ef (see Operations). No recorded run measures its latency or recall (#2266).
 
 ### How It Works
 
@@ -391,12 +457,12 @@ The pipelined path produces **identical results** to the non-pipelined path. Onl
      - 0--1K vectors: `k * 2`
      - 1K--10K vectors: `k * 4`
      - 10K--100K vectors: `k * 8`
-     - 100K+ vectors: `k * 12`
-   - **Dimension factor**: high-dimensional spaces (>512) apply a 1.5x multiplier for sparser neighborhoods.
+     - more than 100K vectors: `k * 12`
+   - **Dimension factor**: high-dimensional spaces (>512) multiply the base ef by 1.5 for sparser neighborhoods.
    - **`min_ef`** is clamped to at least `k` (never fewer candidates than requested results).
-   - **`max_ef`** is set to `4 * min_ef`, giving the adaptive second phase ample headroom for hard queries.
+   - **`max_ef`** is set to `4 * min_ef`, a cap the second phase stays under: it doubles `min_ef` once.
 
-2. **Adaptive two-phase search**: starts with `min_ef`, escalates to `max_ef` if the query is hard (same algorithm as `SearchQuality::Adaptive`).
+2. **Adaptive two-phase search**: searches at `min_ef` and, if the query is hard, searches once more at `2 * min_ef`, capped at `max_ef` (same algorithm as `SearchQuality::Adaptive`).
 
 ### Usage
 
@@ -405,6 +471,7 @@ The pipelined path produces **identical results** to the non-pipelined path. Onl
 ```rust
 use velesdb_core::SearchQuality;
 
+// `index` is an `HnswIndex`.
 let results = index.search_with_quality(&query, 10, SearchQuality::AutoTune);
 ```
 
@@ -435,8 +502,8 @@ POST /collections/documents/search
 |----------|-------------------|
 | Fixed workload, known recall target | `Balanced` or `Accurate` with explicit `ef_search` |
 | Variable collection sizes, no tuning budget | **`AutoTune`** |
-| Latency-critical, recall > 90% acceptable | `Fast` |
-| Must guarantee 100% recall | `Perfect` |
+| Latency-critical, a small recall loss acceptable | `Fast` |
+| Needs the exact top-k | `Perfect` on a collection, or on an `HnswIndex` whose exact-distance features are on (an exhaustive scan); `brute_force_search_parallel` on a `NativeHnswIndex` not built with `new_fast_insert` (nor loaded from one) |
 
 ## Benchmarks
 

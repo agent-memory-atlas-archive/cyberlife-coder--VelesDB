@@ -392,11 +392,12 @@ class Collection:
         The numpy array must be C-contiguous (row-major). If not,
         a ValueError is raised.
 
-        Performance ranking (fresh collection, 384D, i9-class CPU)::
+        Performance ranking, slowest first, by the copies each makes (no
+        recorded run measures their rates)::
 
-            upsert (list of dicts)       ~5 000 vec/s
-            upsert_bulk (list of dicts)  ~12 000 vec/s
-            upsert_bulk_numpy            ~17 000 vec/s   <-- this method
+            upsert (list of dicts)
+            upsert_bulk (list of dicts)
+            upsert_bulk_numpy            <-- this method
 
         Best practices:
             * Always pass float32 numpy arrays (float64 forces a conversion).
@@ -527,7 +528,13 @@ class Collection:
         principal: Optional[str] = None,
         tenant: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search with custom HNSW ef_search parameter."""
+        """Search with custom HNSW ef_search parameter.
+
+        Raises:
+            ValueError: if ef_search is outside [16, 4096], a negative int
+                or one beyond 64 bits included.
+            TypeError: if ef_search is not an int.
+        """
         ...
 
     def search_ids(
@@ -736,11 +743,15 @@ class Collection:
             vector: Query vector (list or numpy array).
             quality: One of 'fast', 'balanced', 'accurate', 'perfect', 'autotune',
                      'custom:<ef>' (e.g. 'custom:256'), or 'adaptive:<min>:<max>'
-                     (e.g. 'adaptive:32:512').
+                     (e.g. 'adaptive:32:512'), each ef in 16-4096.
             top_k: Number of results (default: 10).
 
         Returns:
             List of dicts with id, score, and payload.
+
+        Raises:
+            ValueError: If ``quality`` names no mode, or gives an ef outside
+                16-4096.
         """
         ...
 
@@ -2923,7 +2934,7 @@ class HnswOptions:
 
     @staticmethod
     def turbo() -> "HnswOptions":
-        """Preset for maximum insert throughput (~85% recall)."""
+        """Preset for maximum insert throughput, at a lower recall."""
         ...
 
     @staticmethod
@@ -3041,22 +3052,17 @@ class HnswConfigOptions:
 class StorageOptions:
     """Storage engine settings mapped to core `StorageConfig` (`[storage]`).
 
-    Unspecified fields fall back to the engine defaults
-    (data_dir="./velesdb_data", storage_mode="mmap", mmap_cache_mb=1024,
-    vector_alignment=64).
+    Unspecified, `storage_mode` falls back to the engine default ("mmap").
+    It is reserved: parsed but not yet applied by the engine.
+    `data_dir`, `mmap_cache_mb` and `vector_alignment` were removed in
+    7.0.0 (they had no engine counterpart); passing one raises `TypeError`.
     """
 
-    data_dir: Optional[str]
     storage_mode: Optional[str]
-    mmap_cache_mb: Optional[int]
-    vector_alignment: Optional[int]
 
     def __init__(
         self,
-        data_dir: Optional[str] = None,
         storage_mode: Optional[str] = None,
-        mmap_cache_mb: Optional[int] = None,
-        vector_alignment: Optional[int] = None,
     ) -> None: ...
 
 
@@ -3100,9 +3106,9 @@ class VelesConfigOptions:
     and `quantization`. Unset sections stay at their engine defaults.
     Load a TOML file with :meth:`from_toml_path` / :meth:`from_toml`
     (engine-only semantics: a shell-owned `[server]`/`[logging]` table
-    is ignored). `wal_batch` is intentionally not exposed — the
-    concurrent WAL writer is a velesdb-premium Enterprise feature
-    (docs/guides/WRITE_CONCURRENCY.md).
+    is ignored). There is no `wal_batch` section: the core removed that
+    never-wired table in 7.0.0, and the concurrent WAL writer is a
+    velesdb-premium Enterprise feature (docs/guides/WRITE_CONCURRENCY.md).
     """
 
     limits: Optional[LimitsOptions]

@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::{open_controller, sample, ControllerConfig, ConvergenceController, EPOCH};
 
 const STATE_FILE: &str = "online-migration-controller.json";
+#[cfg(unix)]
 const STAGING_FILE: &str = "online-migration-controller.json.tmp";
 
 #[test]
@@ -83,8 +84,83 @@ fn symlinked_state_is_refused_without_touching_its_target() {
     let error = ConvergenceController::open(root.path(), EPOCH, config())
         .err()
         .expect("symlink");
-    assert!(error.to_string().contains("regular file"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("controller path must be a regular file"),
+        "{error}"
+    );
     assert_eq!(fs::read(&victim).expect("victim"), b"untouched");
+}
+
+/// `StateStore::save` writes a fresh staging file and renames it over the
+/// state, never reopening the final path to write, so a hard link there
+/// intercepts nothing. A hard-link backup (`cp -al`) leaves `nlink > 1` on an
+/// untampered record, which must load. Proven by mutation: reverting
+/// `read_state_bytes` to `open_regular_file` makes this fail (#2426).
+#[cfg(unix)]
+#[test]
+fn a_state_file_hard_linked_from_outside_is_loaded_not_refused() {
+    let root = tempfile::tempdir().expect("root");
+    let outside = tempfile::tempdir().expect("outside");
+    drop(open_controller(root.path()));
+    let path = root.path().join(STATE_FILE);
+    let alias = outside.path().join("state-alias.json");
+    fs::rename(&path, &alias).expect("move state out");
+    fs::hard_link(&alias, &path).expect("hard link state back");
+
+    ConvergenceController::open(root.path(), EPOCH, config())
+        .expect("a hard-linked controller state must load, not be refused");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_staging_file_is_refused_at_open_and_left_in_place() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("root");
+    let victim = root.path().join("victim");
+    fs::write(&victim, b"untouched").expect("victim");
+    let staging = root.path().join(STAGING_FILE);
+    symlink(&victim, &staging).expect("symlink");
+
+    let error = ConvergenceController::open(root.path(), EPOCH, config())
+        .err()
+        .expect("linked staging");
+    assert!(
+        error
+            .to_string()
+            .contains("controller path must be a regular file"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&victim).expect("victim"), b"untouched");
+    assert!(fs::symlink_metadata(&staging)
+        .expect("the link is still there")
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_workspace_is_refused_by_the_controller() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("root");
+    let real = root.path().join("real");
+    fs::create_dir(&real).expect("real");
+    let link = root.path().join("link");
+    symlink(&real, &link).expect("symlink");
+
+    let error = ConvergenceController::open(&link, EPOCH, config())
+        .err()
+        .expect("linked workspace");
+    assert!(
+        error
+            .to_string()
+            .contains("controller workspace must be a real directory"),
+        "{error}"
+    );
+    assert_eq!(fs::read_dir(&real).expect("real").count(), 0);
 }
 
 #[cfg(unix)]

@@ -46,7 +46,7 @@ Global options:
 | `--dry-run` | Extract and transform, never write to the destination |
 | `-v, --verbose` | Raise the log level from `INFO` to `DEBUG` |
 | `--batch-size <N>` | Override `options.batch_size` from the config |
-| `-h, --help` / `-V, --version` | Help / version (`velesdb-migrate 6.0.0`) |
+| `-h, --help` / `-V, --version` | Help / version (`velesdb-migrate 7.0.0`) |
 
 Signatures are generated on
 [docs.rs/velesdb-migrate](https://docs.rs/velesdb-migrate); this page documents
@@ -206,7 +206,7 @@ files — are **not** part of the schema and have no effect.
 | `collection` | string | required | Destination collection, created if absent |
 | `dimension` | integer | required | Vector dimension; must equal the source dimension |
 | `metric` | enum | `cosine` | `cosine`, `euclidean`, `dot` (aliases `dot_product`, `DotProduct`), `hamming`, `jaccard` |
-| `storage_mode` | enum | `full` | `full`, `sq8` (4x), `binary` (32x), `pq` (alias `product_quantization`), `rabitq` |
+| `storage_mode` | enum | `full` | `full`, `sq8` (1 byte per dimension), `binary` (1 bit per dimension), `pq` (alias `product_quantization`), `rabitq` |
 | `graph_collection` | string | none | Graph collection receiving the edges declared in `relations` |
 
 `dimension` has no default: omitting it fails with
@@ -275,4 +275,4 @@ elsewhere) before re-running.
 
 ---
 
-`velesdb-migrate v6.0.0` · Last updated: 2026-09-02 · Applies to: velesdb-core 6.0.0 · [Report a docs error](https://github.com/cyberlife-coder/VelesDB/issues)
+`velesdb-migrate v7.0.0` · Last updated: 2026-09-02 · Applies to: velesdb-core 7.0.0 · [Report a docs error](https://github.com/cyberlife-coder/VelesDB/issues)

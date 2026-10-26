@@ -1032,9 +1032,12 @@ fn test_load_working_context_does_not_mutate_the_index() {
         .iter()
         .map(|entry| entry.session.as_str())
         .collect();
+    // Most-recently-saved first is the index's STORED order (the writer
+    // moves each saved entry to the front), so two saves persist as
+    // [beta, alpha]. The read must leave exactly that in place.
     assert_eq!(
         persisted,
-        vec!["alpha", "beta"],
+        vec!["beta", "alpha"],
         "load_working_context must not rewrite the shared index"
     );
 
@@ -1159,5 +1162,546 @@ fn oversized_fragment_compiles_and_embeds_a_capped_text() {
     assert_eq!(
         source.content, big,
         "the STORED content must stay whole — only the embedded text is capped"
+    );
+}
+
+/// Returns an unparseable index body only while `armed` — a transient read
+/// failure (a torn page, a partial write later repaired), the case that
+/// separates "the listing is gone because the data is gone" from "the
+/// listing is gone because the write path threw it away".
+struct TransientlyCorruptStore {
+    inner: NativeStore,
+    torn: u64,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl FactStore for TransientlyCorruptStore {
+    delegate_untouched_store_methods!();
+
+    fn get(&self, id: u64) -> Result<Option<(String, Vec<f32>)>, MemoryError> {
+        if id == self.torn && self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Some(("}{ not json".to_owned(), vec![0.0; DIM])));
+        }
+        self.inner.get(id)
+    }
+
+    fn get_metadata_batch(&self, ids: &[u64]) -> Result<Vec<Option<Metadata>>, MemoryError> {
+        self.inner.get_metadata_batch(ids)
+    }
+
+    fn list(
+        &self,
+        cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<(Vec<crate::storage::RawListedFact>, Option<u64>), MemoryError> {
+        self.inner.list(cursor, limit)
+    }
+}
+
+#[test]
+fn test_a_transient_index_corruption_does_not_erase_the_listing() {
+    // Given three saved sessions and a healthy listing
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let native = NativeStore::open(dir.path(), DIM).expect("open native store");
+    let svc = MemoryService::with_store(
+        TransientlyCorruptStore {
+            inner: native,
+            torn: working_index_id("veles"),
+            armed: std::sync::atomic::AtomicBool::new(false),
+        },
+        HashEmbedder::new(DIM),
+    );
+    for session in ["alpha", "beta", "gamma"] {
+        svc.save_working_context("veles", session, &minimal_working())
+            .expect("save");
+    }
+    assert_eq!(svc.list_working_contexts("veles").expect("list").len(), 3);
+
+    // When one save coincides with an unreadable index
+    svc.store
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    svc.save_working_context("veles", "delta", &minimal_working())
+        .expect("a corrupt index must never brick saving");
+    svc.store
+        .armed
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Then every session is still listed. Before the rebuild the write path
+    // started from an EMPTY index and overwrote the corrupt one with a
+    // single entry: alpha, beta and gamma left the listing forever while
+    // their facts sat intact on disk, and the read-path error a human was
+    // supposed to act on was destroyed by that same write.
+    let mut listed: Vec<String> = svc
+        .list_working_contexts("veles")
+        .expect("list after")
+        .into_iter()
+        .map(|s| s.session)
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["alpha", "beta", "delta", "gamma"]);
+
+    // And the facts themselves were never in doubt.
+    for session in ["alpha", "beta", "gamma", "delta"] {
+        assert!(svc
+            .load_working_context("veles", session)
+            .expect("load")
+            .is_some());
+    }
+}
+
+/// A store that can hold facts but cannot walk them — `FactStore::list` is
+/// defaulted to `Unsupported` precisely so an out-of-crate backend keeps
+/// compiling, and the recovery must degrade rather than fail.
+struct UnwalkableStore {
+    inner: NativeStore,
+    torn: u64,
+}
+
+impl FactStore for UnwalkableStore {
+    delegate_untouched_store_methods!();
+
+    fn get(&self, id: u64) -> Result<Option<(String, Vec<f32>)>, MemoryError> {
+        if id == self.torn {
+            return Ok(Some(("}{ not json".to_owned(), vec![0.0; DIM])));
+        }
+        self.inner.get(id)
+    }
+
+    fn get_metadata_batch(&self, ids: &[u64]) -> Result<Vec<Option<Metadata>>, MemoryError> {
+        self.inner.get_metadata_batch(ids)
+    }
+}
+
+#[test]
+fn test_a_backend_that_cannot_enumerate_still_saves_through_a_corrupt_index() {
+    // Given a backend whose `list` is the defaulted refusal, and a corrupt index
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let native = NativeStore::open(dir.path(), DIM).expect("open native store");
+    let svc = MemoryService::with_store(
+        UnwalkableStore {
+            inner: native,
+            torn: working_index_id("veles"),
+        },
+        HashEmbedder::new(DIM),
+    );
+
+    // The FIRST save cannot reach the corruption path: no index fact exists
+    // yet, so `working_index` answers `Ok(None)` on the absent marker and
+    // never reads a body. It is what PUTS the marker there.
+    svc.save_working_context("veles", "alpha", &minimal_working())
+        .expect("first save creates the index");
+
+    // When a second save reads that now-marked index and finds it unreadable
+    let saved = svc.save_working_context("veles", "beta", &minimal_working());
+
+    // Then the save still succeeds. The listing cannot be recovered here —
+    // nothing can walk the facts — but refusing the save would brick the
+    // project forever, which is the outcome the rebuild exists to avoid, not
+    // to introduce.
+    assert!(
+        saved.is_ok(),
+        "a backend that cannot enumerate must still save: {saved:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Working-context key cap (MAX_WORKING_CONTEXT_KEY_BYTES).
+//
+// `project` and `session` are ids, and they were the one caller string that
+// reached storage past every other ceiling: into the fact's metadata (past
+// MAX_METADATA_BYTES, which only `remember`'s metadata path checks), into the
+// embedder (past MAX_EMBEDDABLE_TEXT_BYTES, likewise), and ×1000 into the
+// project index rewritten whole on every save. Measured before the cap: a
+// 600 KiB session id was accepted, stored 614 677 bytes of metadata, and the
+// SECOND such save was refused by the backend's 1 MiB payload cap AFTER its
+// fact was stored — durable, unlisted, and reported to the caller as failed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_a_session_id_over_the_cap_is_refused_before_anything_is_written() {
+    let (_dir, svc) = open_service();
+    let over = "s".repeat(crate::limits::MAX_WORKING_CONTEXT_KEY_BYTES + 1);
+
+    let refused = svc.save_working_context("proj", &over, &minimal_working());
+
+    assert!(
+        matches!(
+            refused,
+            Err(MemoryError::WorkingContextKeyTooLong { key: "session", len, max })
+                if len == crate::limits::MAX_WORKING_CONTEXT_KEY_BYTES + 1
+                    && max == crate::limits::MAX_WORKING_CONTEXT_KEY_BYTES
+        ),
+        "an over-cap session id must be refused as WorkingContextKeyTooLong: {refused:?}"
+    );
+    // Nothing was written: no fact under that id, no index for the project.
+    assert!(svc
+        .store
+        .get_metadata(working_id("proj", &over))
+        .expect("read")
+        .is_none());
+    assert!(svc.list_working_contexts("proj").expect("list").is_empty());
+}
+
+#[test]
+fn test_a_project_id_over_the_cap_is_refused_and_names_the_key() {
+    let (_dir, svc) = open_service();
+    let over = "p".repeat(crate::limits::MAX_WORKING_CONTEXT_KEY_BYTES + 1);
+    let refused = svc.save_working_context(&over, "sess", &minimal_working());
+    assert!(
+        matches!(
+            refused,
+            Err(MemoryError::WorkingContextKeyTooLong { key: "project", .. })
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn test_an_id_exactly_at_the_cap_is_accepted() {
+    // The cap is inclusive: 256 bytes is an id, 257 is a payload.
+    let (_dir, svc) = open_service();
+    let at_cap = "s".repeat(crate::limits::MAX_WORKING_CONTEXT_KEY_BYTES);
+    svc.save_working_context("proj", &at_cap, &minimal_working())
+        .expect("an id exactly at the cap is accepted");
+    let listed = svc.list_working_contexts("proj").expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session, at_cap);
+}
+
+#[test]
+fn test_the_empty_check_still_wins_over_the_length_check() {
+    // Whitespace-only and short: the EMPTY refusal is the right one. A
+    // whitespace-only id over the cap is also empty first — the emptiness is
+    // the more fundamental defect, and the error a caller can act on.
+    let (_dir, svc) = open_service();
+    let blank_and_long = " ".repeat(crate::limits::MAX_WORKING_CONTEXT_KEY_BYTES + 1);
+    let refused = svc.save_working_context("proj", &blank_and_long, &minimal_working());
+    assert!(
+        matches!(
+            refused,
+            Err(MemoryError::EmptyWorkingContextKey { key: "session" })
+        ),
+        "{refused:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// "Most-recently-saved first" must hold where `saved_at` cannot decide.
+//
+// `saved_at` is whole seconds, so two saves in one second tie; on wasm32 it
+// is always 0, so EVERY entry ties. The old tiebreak was `session`
+// ascending — alphabetical — so on wasm the whole listing was alphabetical
+// while five surfaces promised recency. Now the index's vector ORDER is
+// recency (the writer moves the saved entry to the front), the read path
+// and `bound_sessions` sort stably by `saved_at` alone, and ties keep it.
+// ---------------------------------------------------------------------------
+
+fn tied(sessions: &[&str]) -> Vec<WorkingContextSession> {
+    sessions
+        .iter()
+        .map(|s| WorkingContextSession {
+            session: (*s).to_owned(),
+            saved_at: 0,
+        })
+        .collect()
+}
+
+#[test]
+fn test_bound_sessions_evicts_by_recency_not_by_name_when_timestamps_tie() {
+    use crate::limits::MAX_WORKING_SESSIONS_PER_PROJECT as CAP;
+    // CAP + 1 entries, ALL at saved_at 0 (the wasm case), in recency order:
+    // index 0 is the most recent. Names are chosen so that alphabetical
+    // order is the REVERSE of recency: the most recent is named "1000", the
+    // oldest "0000". The pinned (just-saved) entry is in the middle so the
+    // pin cannot mask the tiebreak.
+    let names: Vec<String> = (0..=CAP).map(|i| format!("{:04}", CAP - i)).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut sessions = tied(&refs);
+    let pinned = names[CAP / 2].clone();
+
+    bound_sessions(&mut sessions, &pinned);
+
+    let kept: Vec<&str> = sessions.iter().map(|s| s.session.as_str()).collect();
+    assert_eq!(kept.len(), CAP);
+    assert!(
+        kept.contains(&"1000"),
+        "the most recent entry must survive eviction on a timestamp tie"
+    );
+    assert!(
+        !kept.contains(&"0000"),
+        "the OLDEST entry is the one to evict on a timestamp tie — the old \
+         alphabetical tiebreak evicted the most recent instead"
+    );
+    assert!(
+        kept.contains(&pinned.as_str()),
+        "the pinned entry always survives"
+    );
+}
+
+#[test]
+fn test_bound_sessions_keeps_the_just_saved_entry_at_the_front() {
+    use crate::limits::MAX_WORKING_SESSIONS_PER_PROJECT as CAP;
+    // In the real flow the writer has just put the saved entry at index 0.
+    // Past the cap it is removed to be pinned, and it must come BACK to
+    // index 0 — not to the end — because on wasm32 (every saved_at 0) the
+    // stored order is the only order there is.
+    let names: Vec<String> = (0..=CAP).map(|i| format!("s{i:04}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut sessions = tied(&refs);
+    let just_saved = names[0].clone();
+
+    bound_sessions(&mut sessions, &just_saved);
+
+    assert_eq!(sessions.len(), CAP);
+    assert_eq!(
+        sessions[0].session, just_saved,
+        "the just-saved session must stay first after eviction at the cap"
+    );
+    assert_eq!(
+        sessions[CAP - 1].session,
+        names[CAP - 1],
+        "the oldest survivor is last"
+    );
+    assert!(
+        !sessions.iter().any(|s| s.session == names[CAP]),
+        "the entry past the cap is the one evicted"
+    );
+}
+
+#[test]
+fn test_listing_keeps_recency_order_when_every_saved_at_ties() {
+    // Three real sessions so `live_sessions` keeps them, then the index is
+    // overwritten with all three at saved_at 0 in recency order [c, b, a]
+    // (c most recent), named so that alphabetical order is the opposite.
+    let (_dir, svc) = open_service();
+    for session in ["a", "b", "c"] {
+        svc.save_working_context("proj", session, &minimal_working())
+            .expect("save");
+    }
+    let index = WorkingContextIndex {
+        sessions: tied(&["c", "b", "a"]),
+    };
+    let content = serde_json::to_string(&index).expect("encode");
+    let embedding = svc
+        .embedder
+        .embed("working context index proj")
+        .expect("embed");
+    svc.write_working_index("proj", &content, &embedding)
+        .expect("write index");
+
+    let listed: Vec<String> = svc
+        .list_working_contexts("proj")
+        .expect("list")
+        .into_iter()
+        .map(|s| s.session)
+        .collect();
+
+    assert_eq!(
+        listed,
+        ["c", "b", "a"],
+        "with every saved_at tied, the listing must follow the index's recency \
+         order — alphabetical would be [a, b, c]"
+    );
+}
+
+#[test]
+fn test_a_resave_moves_the_session_to_the_front_of_the_index() {
+    // The writer's half of the contract: saving an EXISTING session moves it
+    // to index 0, so the stored order stays recency even when the clock
+    // cannot tell (wasm) or does not move (same second).
+    let (_dir, svc) = open_service();
+    for session in ["a", "b", "c"] {
+        svc.save_working_context("proj", session, &minimal_working())
+            .expect("save");
+    }
+    svc.save_working_context("proj", "a", &minimal_working())
+        .expect("resave a");
+    let index = svc
+        .working_index("proj")
+        .expect("read index")
+        .expect("index present");
+    let order: Vec<&str> = index.sessions.iter().map(|s| s.session.as_str()).collect();
+    assert_eq!(
+        order,
+        ["a", "c", "b"],
+        "stored order must be recency, most recent first"
+    );
+}
+
+/// A rebuilt index carries each session's real `saved_at`, most recent first
+/// (#2246, P5).
+///
+/// It used to list sessions in the store's enumeration order with every
+/// `saved_at` at 0: a second writer of the index order, with the opposite
+/// meaning of the first, which the next save's cap then cut blindly — the
+/// session it evicted was whichever the store listed last, not the oldest.
+#[test]
+fn test_a_rebuilt_index_keeps_the_real_recency_order() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let svc = MemoryService::with_store(
+        NativeStore::open(dir.path(), DIM).expect("open native store"),
+        HashEmbedder::new(DIM),
+    );
+    let content = serde_json::to_string(&minimal_working()).expect("encode");
+    for (session, saved_at) in [("alpha", 100_u64), ("beta", 300), ("gamma", 200)] {
+        let meta = system_meta(&[
+            (CTX_WORKING_FIELD, serde_json::Value::Bool(true)),
+            (
+                CTX_PROJECT_FIELD,
+                serde_json::Value::String("veles".to_owned()),
+            ),
+            (
+                CTX_SESSION_FIELD,
+                serde_json::Value::String(session.to_owned()),
+            ),
+            (CTX_SAVED_AT_FIELD, serde_json::Value::from(saved_at)),
+        ]);
+        let embedding = svc.embedder.embed(session).expect("embed");
+        svc.store
+            .store_with_metadata(working_id("veles", session), &content, &embedding, &meta)
+            .expect("store a working context");
+    }
+
+    let rebuilt = svc
+        .rebuild_working_index("veles")
+        .expect("walk the store")
+        .expect("a native store can enumerate");
+
+    let order: Vec<(&str, u64)> = rebuilt
+        .iter()
+        .map(|s| (s.session.as_str(), s.saved_at))
+        .collect();
+    assert_eq!(order, [("beta", 300), ("gamma", 200), ("alpha", 100)]);
+}
+
+/// `save_working_context` stamps the session's own fact with the `saved_at`
+/// its index entry carries — what the rebuild above reads back.
+#[test]
+fn test_a_saved_working_context_carries_its_saved_at() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let svc = MemoryService::with_store(
+        NativeStore::open(dir.path(), DIM).expect("open native store"),
+        HashEmbedder::new(DIM),
+    );
+    svc.save_working_context("veles", "alpha", &minimal_working())
+        .expect("save");
+
+    let stamped = svc
+        .store
+        .get_metadata_batch(&[working_id("veles", "alpha")])
+        .expect("metadata")
+        .into_iter()
+        .next()
+        .flatten()
+        .and_then(|meta| {
+            meta.get(CTX_SAVED_AT_FIELD)
+                .and_then(serde_json::Value::as_u64)
+        });
+    let listed = svc.list_working_contexts("veles").expect("list");
+    assert_eq!(
+        stamped,
+        Some(listed[0].saved_at),
+        "the fact and its index entry agree on when it was saved"
+    );
+}
+
+/// A store whose index is torn while armed, and which records — from another
+/// thread — whether the process-wide index lock was free while the recovery
+/// walk ran.
+struct LockObservingStore {
+    inner: NativeStore,
+    torn: u64,
+    armed: std::sync::atomic::AtomicBool,
+    walks: parking_lot::Mutex<Vec<bool>>,
+}
+
+impl FactStore for LockObservingStore {
+    delegate_untouched_store_methods!();
+    fn get(&self, id: u64) -> Result<Option<(String, Vec<f32>)>, MemoryError> {
+        if id == self.torn && self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Some(("}{ not json".to_owned(), vec![0.0; DIM])));
+        }
+        self.inner.get(id)
+    }
+    fn get_metadata_batch(&self, ids: &[u64]) -> Result<Vec<Option<Metadata>>, MemoryError> {
+        self.inner.get_metadata_batch(ids)
+    }
+    fn list(
+        &self,
+        cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<(Vec<crate::storage::RawListedFact>, Option<u64>), MemoryError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            // From another thread: the lock is not re-entrant, so a `try_lock`
+            // here would fail on this thread's own guard and nothing else. The
+            // wait is bounded, not a sleep — other tests hold it for
+            // milliseconds, while a walk under it would hold it for this whole
+            // observation.
+            let free = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        WORKING_INDEX_WRITE
+                            .try_lock_for(std::time::Duration::from_secs(5))
+                            .is_some()
+                    })
+                    .join()
+                    .expect("observer thread")
+            });
+            self.walks.lock().push(free);
+        }
+        self.inner.list(cursor, limit)
+    }
+}
+
+/// The recovery walk runs with the process-wide index lock released (#2246).
+///
+/// The walk visits the whole store, and `WORKING_INDEX_WRITE` serializes the
+/// index writes of every project in the process: held across the walk, one
+/// project's recovery stalled everyone's saves for the length of a full scan.
+#[test]
+fn test_the_recovery_walk_does_not_hold_the_process_wide_index_lock() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let svc = MemoryService::with_store(
+        LockObservingStore {
+            inner: NativeStore::open(dir.path(), DIM).expect("open native store"),
+            torn: working_index_id("veles"),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            walks: parking_lot::Mutex::new(Vec::new()),
+        },
+        HashEmbedder::new(DIM),
+    );
+    svc.save_working_context("veles", "alpha", &minimal_working())
+        .expect("save");
+
+    svc.store
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    svc.save_working_context("veles", "beta", &minimal_working())
+        .expect("a torn index must never brick saving");
+    svc.store
+        .armed
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let walks = svc.store.walks.lock().clone();
+    assert!(
+        !walks.is_empty(),
+        "CONTROL: the save over a torn index must have walked the store"
+    );
+    assert!(
+        walks.iter().all(|&free| free),
+        "the recovery walk ran under WORKING_INDEX_WRITE: {walks:?}"
+    );
+    let mut listed: Vec<String> = svc
+        .list_working_contexts("veles")
+        .expect("list")
+        .into_iter()
+        .map(|s| s.session)
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        ["alpha", "beta"],
+        "and the listing survived the recovery"
     );
 }

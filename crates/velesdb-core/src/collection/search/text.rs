@@ -41,6 +41,12 @@ fn validated_hybrid_params(
     Ok((metric, weight, text_weight, rrf_constant))
 }
 
+/// Fused RRF scores per id, and each id's `(vector, bm25)` component scores.
+type HybridScored = (
+    rustc_hash::FxHashMap<u64, f32>,
+    rustc_hash::FxHashMap<u64, (f32, f32)>,
+);
+
 /// Fetches vector + BM25 candidates and fuses them with weighted RRF.
 ///
 /// Returns `(fused_scores, component_map)`. Both branches use `overfetch_k`
@@ -56,24 +62,26 @@ fn compute_hybrid_scored(
     weight: f32,
     text_weight: f32,
     rrf_constant: f32,
-) -> (
-    rustc_hash::FxHashMap<u64, f32>,
-    rustc_hash::FxHashMap<u64, (f32, f32)>,
-) {
-    use crate::index::VectorIndex;
-    let raw = collection.storage.index.search(vector_query, overfetch_k);
+) -> Result<HybridScored> {
+    // `search_with_quality`, not `search`: the latter pins `Balanced` and so
+    // ignores the configured `[search]` quality (#2430).
+    let raw = collection.storage.index.search_with_quality(
+        vector_query,
+        overfetch_k,
+        collection.runtime_search_quality(),
+    )?;
     let vec_res = collection.merge_delta(raw, vector_query, overfetch_k, metric);
     let text_res = collection
         .storage
         .text_index
         .search(text_query, overfetch_k);
-    Collection::compute_rrf_scores_with_components(
+    Ok(Collection::compute_rrf_scores_with_components(
         &vec_res,
         &text_res,
         weight,
         text_weight,
         rrf_constant,
-    )
+    ))
 }
 
 /// Attaches RRF component scores to a `SearchResult` from the component map.
@@ -237,10 +245,15 @@ impl Collection {
             weight,
             text_weight,
             rrf_constant,
-        );
+        )?;
 
         let scored_ids = Self::top_k_from_scores(fused_scores, k);
-        Ok(self.resolve_scored_ids_with_components(&scored_ids, &component_map))
+        Ok(self.resolve_scored_ids_with_components(
+            &scored_ids,
+            &component_map,
+            |_| true,
+            usize::MAX,
+        ))
     }
 
     /// Computes RRF fused scores and per-component score breakdowns.
@@ -302,26 +315,34 @@ impl Collection {
         // allocation failure aborts the whole process rather than the request.
         // This changes no result: the `heap.len() > k` trim below is untouched.
         let cap = k.min(fused_scores.len()).saturating_add(1);
-        let mut heap: BinaryHeap<Reverse<(OrderedFloat, u64)>> = BinaryHeap::with_capacity(cap);
+        // The heap drops its least entry: the lowest score and, among equal
+        // scores, the highest id, so a tie cut by `k` keeps the ids
+        // `sort_fused_results` puts first (#2297).
+        let mut heap: BinaryHeap<Reverse<(OrderedFloat, Reverse<u64>)>> =
+            BinaryHeap::with_capacity(cap);
         for (id, score) in fused_scores {
-            heap.push(Reverse((OrderedFloat(score), id)));
+            heap.push(Reverse((OrderedFloat(score), Reverse(id))));
             if heap.len() > k {
                 heap.pop();
             }
         }
         let mut scored: Vec<(u64, f32)> = heap
             .into_iter()
-            .map(|Reverse((OrderedFloat(s), id))| (id, s))
+            .map(|Reverse((OrderedFloat(s), Reverse(id)))| (id, s))
             .collect();
-        scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        crate::fusion::sort_fused_results(&mut scored);
         scored
     }
 
-    /// Resolves scored IDs to `SearchResult` with per-component score breakdown.
+    /// Resolves scored IDs to `SearchResult` with per-component score
+    /// breakdown, keeping the first `limit` results `keep` accepts, in
+    /// `scored_ids` order.
     fn resolve_scored_ids_with_components(
         &self,
         scored_ids: &[(u64, f32)],
         component_map: &rustc_hash::FxHashMap<u64, (f32, f32)>,
+        keep: impl Fn(&SearchResult) -> bool,
+        limit: usize,
     ) -> Vec<SearchResult> {
         let vector_storage = self.storage.vector_storage.read();
         let payload_storage = self.storage.payload_storage.read();
@@ -337,9 +358,13 @@ impl Collection {
                     &*vector_storage,
                     &*payload_storage,
                 )?;
+                if !keep(&result) {
+                    return None;
+                }
                 attach_rrf_components(&mut result, component_map);
                 Some(result)
             })
+            .take(limit)
             .collect()
     }
 
@@ -384,19 +409,24 @@ impl Collection {
             weight,
             text_weight,
             rrf_constant,
-        );
+        )?;
 
         let mut scored_ids: Vec<_> = fused_scores.into_iter().collect();
-        scored_ids.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        crate::fusion::sort_fused_results(&mut scored_ids);
 
-        Ok(
-            self.resolve_scored_ids_filtered_with_components(
-                &scored_ids,
-                filter,
-                k,
-                &component_map,
-            ),
-        )
+        // A point without a payload matches no filter.
+        Ok(self.resolve_scored_ids_with_components(
+            &scored_ids,
+            &component_map,
+            |result| {
+                result
+                    .point
+                    .payload
+                    .as_ref()
+                    .is_some_and(|payload| filter.matches(payload))
+            },
+            k,
+        ))
     }
 
     /// Hybrid search restricted to `anchor_ids` in both vector and BM25 branches.
@@ -431,7 +461,12 @@ impl Collection {
         );
 
         let scored_ids = Self::top_k_from_scores(fused_scores, k);
-        Ok(self.resolve_scored_ids_with_components(&scored_ids, &component_map))
+        Ok(self.resolve_scored_ids_with_components(
+            &scored_ids,
+            &component_map,
+            |_| true,
+            usize::MAX,
+        ))
     }
 
     /// Builds the anchor-restricted vector-similarity and BM25 score streams
@@ -470,43 +505,5 @@ impl Collection {
             .collect();
 
         Ok((vector_scored, text_results))
-    }
-
-    /// Resolves scored IDs with filter and optional per-component score breakdown.
-    fn resolve_scored_ids_filtered_with_components(
-        &self,
-        scored_ids: &[(u64, f32)],
-        filter: &crate::filter::Filter,
-        k: usize,
-        component_map: &rustc_hash::FxHashMap<u64, (f32, f32)>,
-    ) -> Vec<SearchResult> {
-        let vector_storage = self.storage.vector_storage.read();
-        let payload_storage = self.storage.payload_storage.read();
-        let now_secs = now_unix_secs();
-
-        scored_ids
-            .iter()
-            .filter_map(|&(id, score)| {
-                let vector = vector_storage.retrieve(id).ok().flatten()?;
-                let payload = payload_storage.retrieve(id).ok().flatten();
-                if is_payload_expired(payload.as_ref(), now_secs) {
-                    return None;
-                }
-                let payload_ref = payload.as_ref()?;
-                if !filter.matches(payload_ref) {
-                    return None;
-                }
-                let point = Point {
-                    id,
-                    vector,
-                    payload,
-                    sparse_vectors: None,
-                };
-                let mut result = SearchResult::new(point, score);
-                attach_rrf_components(&mut result, component_map);
-                Some(result)
-            })
-            .take(k)
-            .collect()
     }
 }

@@ -9,6 +9,294 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`OpenAiExtractor::with_chat_template_kwargs`** and the
+  **`VELESDB_MEMORY_EXTRACTOR_CHAT_TEMPLATE_KWARGS`** daemon variable: a JSON
+  object sent as `chat_template_kwargs` in every chat request of the
+  `openai` extraction backend, e.g. `{"enable_thinking": false}` to stop a
+  thinking model behind a llama.cpp-compatible server from spending the
+  generation budget on thinking and truncating the JSON the extractor parses.
+  Absent by default, so the request body is unchanged for everyone who does
+  not set it. The library never reads the environment for it: the daemon reads
+  the variable alongside the other `VELESDB_MEMORY_EXTRACTOR_*` ones and
+  refuses to start when it is not a JSON object, naming the variable and
+  never echoing the value. The value is redacted from
+  `OpenAiExtractor`'s `Debug` output, as `Auth`'s credential is.
+
+- **`http::router_with_session_policy`** (`#[doc(hidden)]`, like its
+  `router_with_limits*` siblings): `router_with_limits_and_keep_alive` plus
+  an explicit eviction floor, so the HTTP transport's integration tests can
+  observe idle-session eviction without waiting out the 300 s default. The
+  public API otherwise grows only by the `VELESDB_MEMORY_HTTP_EVICT_MIN_IDLE_SECS`
+  environment variable described under Fixed (#2289), and by
+  `MemoryError::NotARegularFile` described below.
+
+- **`MemoryError::NotARegularFile { entity }`**: a path backing one of this
+  crate's own state files, or a diagnostic-copy source file, turned out not
+  to be a lone regular file — a symlink for any of the journal, controller
+  state, online-migration job, migration lock, extraction job record, or
+  diagnostic copy; also a directory for all of those on unix (on Windows,
+  `CreateFileW` cannot open a directory at all without
+  `FILE_FLAG_BACKUP_SEMANTICS`, which this crate does not set, so a
+  directory surfaces as a generic open failure there instead — unverified,
+  Windows CI only type-checks this crate, no test runs there); also a hard
+  link (unix only — the only platform that checks `nlink`) for the journal
+  alone (the controller state, the online-migration job, the migration lock,
+  the extraction job record, and the diagnostic copy accept a hard link
+  instead, see Fixed below). The
+  journal, controller state, and online-migration job surface this
+  variant's own wording unchanged; the extraction job store and the
+  diagnostic copy each specifically match this variant and build their
+  own message instead. The migration lock does neither: it treats this
+  variant the same as any other open failure, including an unrelated
+  I/O error, collapsing both into one generic refusal from whichever
+  caller asked — `release`'s own, or `MigrationState::write`'s through
+  `verify_workspace`. Split out of the shared `MigrationCapture`
+  variant so a caller that does match on it can give this one
+  specific, expected refusal its own wording without also relabeling
+  an unrelated I/O failure (permission denied, too many open files)
+  the same open can raise (#2409).
+
+### Fixed
+
+- **A controller-state or online-migration-job record that a hard-link backup
+  left with `nlink > 1` now loads instead of being refused (#2426).**
+  `mutation::controller::state::read_state_bytes` and
+  `online_migration::job_state::read_limited` opened their record through
+  `open_regular_file`, which refuses a hard link. Both records are only ever
+  replaced by renaming a fresh staging file over them, never reopened to write,
+  so a hard link planted there intercepts nothing, while `cp -al` /
+  `rsync --link-dest` leave one on an untampered record and recovery from that
+  backup failed. Both now use `open_regular_file_allow_hard_links`; the
+  symlink-swap protection (#2404) is unchanged. A regression test per store
+  loads a hard-linked record, and each fails with the fix reverted.
+
+- **Three more check-then-open races outside #2404/#2405's five sites are now
+  closed, and a migration lock, a job-record read, or a diagnostic copy
+  still accepts a hard-linked source.** `mcp::extraction_job_store`'s
+  job-record reads, `migration::state::lock`'s ownership check
+  (`owns_current_lock`; its public `holder` lookup followed, see the
+  #2424 entry below), and `migration::diagnostic_copy`'s source copies
+  each still decided a path was safe from a separate `symlink_metadata`
+  call and then reopened the same path by name afterward — the same
+  check-then-open shape #2404 closed elsewhere. All three now route
+  through `mutation::atomic_file`'s handle-based guards, refusing a
+  symlink swap or any other non-regular type, but not a hard link: a
+  migration lock and an extraction job record — each only ever replaced
+  wholesale by rename or removed outright, never reopened to write into
+  — and the diagnostic copy — read-only, over a tree it does not own —
+  all accept the `nlink > 1` a hard-link based backup (`cp -al`, `rsync
+  --link-dest`) routinely produces on an ordinary file (#2406, #2409).
+
+- **`MigrationLock::holder`, and the "record remains" refusal of
+  `MigrationLock::acquire` that quotes it, no longer read through a symlinked
+  `migration.lock` nor echo a foreign file's content (#2424).** `holder` still
+  reopened the record by name with `std::fs::read_to_string`, so a symlink
+  planted there surfaced its target's content in `acquire`'s error. It now
+  reads through the same symlink-refusing, size-bounded handle as
+  `owns_current_lock` (`None` for a symlink). That handle accepts a hard link
+  (hard-link backups), so `holder` now echoes a record only when it is a lock
+  record or a single short legacy `held_by=` line, and otherwise reports an
+  unrecognised record without its content. A record past the 4 KiB read bound
+  is refused whole instead of being parsed truncated, and `acquire` refuses up
+  front a holder name whose record would exceed that bound ("holder name too
+  long"), so no record that could never be read back, hence never released,
+  is ever written.
+
+- **`BoundedSessionManager` dropped the inner session manager's event store.**
+  It wraps `rmcp`'s `SessionManager` to cap concurrent MCP HTTP sessions but
+  did not forward `event_store()`, so it reported the trait's default
+  (`None`) whatever the inner manager was configured with. Harmless today,
+  since `velesdb-memory` configures no event store on its
+  `LocalSessionManager` — but as soon as one is configured for resumable SSE
+  streams (`Last-Event-ID` replay), resumption would silently stop working
+  behind the cap wrapper, with no error. `event_store()` is now forwarded to
+  `inner` like every other method the wrapper does not deliberately override
+  (#2331).
+
+- **At its session cap, the HTTP daemon locked every new client out for up to
+  an hour instead of evicting an idle one.** A client that dies without
+  sending `DELETE` (a killed agent, a crashed process, a host restart) left
+  its slot occupied until `keep_alive` finally expired it — and at the cap,
+  every OTHER live client was refused in the meantime, told to "close an
+  existing session" it had no way to reach. `BoundedSessionManager` now
+  evicts the least-recently-active session that has nothing in flight (no
+  request being served, no open stream), has finished its own `initialize`,
+  and has been idle for at least `VELESDB_MEMORY_HTTP_EVICT_MIN_IDLE_SECS`
+  (new, default 300 s, never above the keep-alive) to admit the new one; it
+  refuses only when no live session qualifies (#2289). The floor is the flood
+  guard: the transport authenticates no one, so without it any local process
+  repeating `initialize` at the cap would evict every client that was merely
+  between two requests. The trade-off left: at the cap, a client silent and
+  streamless for longer than the floor can be evicted by another client's
+  `initialize`, and must re-initialize on the `404` its next request gets.
+  A session whose `initialize` never arrived becomes evictable once rmcp's
+  handshake deadline (`init_timeout`, 60 s) has passed. A request arriving
+  while its session is being evicted gets `404`; one that arrived just before
+  marks the session active, so it is not picked while that request is served.
+
+- **`autograph_failed` counted failing steps, not failed enrichments.** Its doc
+  and `memory_status` promise enrichments, but one extraction failing at two
+  hub writes counted two, and the entity stage counted once per extracted
+  fact. It now moves by one per enrichment, however many of its stages
+  failed — proven by a new case beside the file's first control whose store
+  accepts, without which a counter bumped on every `remember` passed every
+  test (#2246, P5).
+
+- **A recovered working-context index forgot which sessions were recent.**
+  Rebuilding an unreadable index from the facts gave every session
+  `saved_at: 0`, in the store's enumeration order, and stopped at the cap: the
+  next save's cap then evicted whichever session the store listed last, not
+  the oldest, and the listing silently lost a real session.
+  `save_working_context` now stamps `saved_at` on the session's own fact as
+  well as in the index; the rebuild reads it back, orders by it, then caps.
+  Sessions saved before this version carry no stamp and read as the oldest
+  (#2246, P5).
+
+- **That recovery walked the whole store under a process-wide lock.**
+  `WORKING_INDEX_WRITE` serializes every project's index writes, and the
+  rebuild ran under it — one project's recovery stalled every save in the
+  process for a full scan, while its doc called the walk bounded. It now runs
+  with the lock released, and the index is read again once the lock is retaken,
+  so a concurrent repair wins over the walk (#2246, P5).
+
+- **Tool schemas published rustdoc link syntax as text.** schemars copies each
+  field's doc comment into its JSON Schema `description`, so the schemas every
+  MCP client reads carried intra-doc links only rustdoc resolves:
+  ``[`Name`]``, ``[`Name`](crate::path)``. The input and output schemas now
+  show each such link as its text, read with pulldown-cmark rather than a
+  hand-written scan: ``[`Name`](crate::path)`` becomes `` `Name` ``. A
+  shortcut or collapsed link shows its path as rustdoc does, without a
+  disambiguator or a `#` fragment: ``[`fn@f`]`` becomes `` `f` ``,
+  `[struct@Foo]` becomes `Foo` and `[Foo#method.id]` becomes `Foo`. A link is
+  a rustdoc link when its destination reads as an item path, a `#` fragment
+  allowed: an inline or reference-style link to one, a definition of one, and
+  a reference no definition resolves whose label is one, a bare `[Name]` or
+  `[optional]` included, as rustdoc 1.90 reads it. A definition is removed
+  with its line, or alone when that line is all its block quote holds. Web
+  links, images, autolinks, code spans, code blocks, escaped brackets and
+  prose brackets that name no item (`[0, 1]`) stay. The rewrite is fail
+  closed: the rewritten description must parse to the original with those
+  links dropped, or it stays as written. Only `description` strings are
+  rewritten, never instance data such as a `default`. A test reads every
+  description of every tool's live input and output schema, and of
+  `docs/reference/mcp-tools.json`, with pulldown-cmark and fails on a rustdoc
+  link. (#2261)
+
+### Changed
+
+- **MCP tool and field descriptions condensed (#2442).** The descriptions
+  served in `tools/list` are shorter: the compact JSON drops from 142,211 to
+  122,740 bytes (about 14%). No tool name, schema, type, default, `required`
+  flag or wire format changes; only the prose an agent reads does. The
+  `recall_where` description now says that `ne` also matches facts lacking
+  the field.
+- **HTTP session limiter: the live-session map uses `parking_lot::Mutex`.**
+  It was the crate's one `std::sync::Mutex`. `parking_lot`
+  does not poison, so the poison-recovery shim is gone; behavior is unchanged.
+
+- **Dependency floors the crate can actually be built with (#1987).** Each was
+  measured on this crate's own resolve — the workspace cut down to it, as the
+  `minimal-versions` job does — and not on a resolve of every workspace member.
+  Seven are exactly what that graph requires: `tempfile` 3.14 (the workspace
+  bound velesdb-core declares; the old "3" could never be selected next to it),
+  `reqwest` 0.13.2 and `ureq` 2.5.0 and `parking_lot` 0.12.3 (velesdb-core
+  again), `hyper` 1.6.0 (hyper-util 0.1.12 requires it), and, through the
+  `reqwest` dev-dependency, `hyper-util` 0.1.12 and `rustls` 0.23.27
+  (rustls-platform-verifier 0.6.2). Two are above what it requires and are
+  declared so deliberately: `schemars` 1.0.2, where rmcp 3.1.0 asks only for
+  `^1`, and `time` 0.3.47, where rcgen's `x509-parser` requires `^0.3.35`.
+  `ureq` and `tracing` also carry a compile reason: 2.x before 2.4.0 has no
+  public `Transport::kind()` and 2.4.0 leaves its `rustls` bound open, and
+  `tracing` 0.1.37 and 0.1.38 drop the `%` of the HTTP request log's first
+  field, so 0.1.39. A consumer holding one of them lower has to update it.
+
+## [0.14.2] - 2026-09-03
+
+### Fixed
+
+- **`project`/`session` ids reached storage past every declared cap.**
+  `save_working_context` wrote them into the fact's metadata (bypassing
+  `MAX_METADATA_BYTES`, checked only on `remember`'s own `metadata`), fed them
+  to the embedder (bypassing `MAX_EMBEDDABLE_TEXT_BYTES`, likewise), and copied
+  the session id into the project index — one fact rewritten whole on every
+  save, up to 1000 ids wide. Measured: a 600 KiB session id was accepted and
+  stored 614 677 bytes of metadata; the SECOND such save was refused by the
+  backend's 1 MiB payload cap AFTER its fact was stored — durable, unlisted,
+  and reported to the caller as failed. Both ids are now capped at
+  `MAX_WORKING_CONTEXT_KEY_BYTES` (256 bytes, the idempotency-key precedent)
+  and refused up front with `MemoryError::WorkingContextKeyTooLong` — additive
+  on the `#[non_exhaustive]` enum. Reads are not capped: a store written
+  before this release may hold longer ids, and they stay loadable.
+
+- **`list_working_contexts` was alphabetical wherever `saved_at` tied.**
+  `saved_at` is whole seconds, so two saves in one second tie; on WASM it is
+  always 0 (no clock), so every entry tied and the whole listing — promised
+  "most-recently-saved first" on five surfaces, including the MCP tool
+  description the model reads — came back in `session` order. An agent taking
+  `sessions[0]` as "where I left off" resumed the alphabetically-first
+  session. The index's stored order is now recency (the writer moves the saved
+  entry to the front), and the read path and the eviction at the cap sort
+  stably by `saved_at` alone, so the order holds on every target; the
+  `saved_at` VALUE stays 0 on WASM and every surface now says so.
+
+- **Autograph enrichments that failed part-way were invisible.** The wiring
+  helpers propagate with `?`, so the first failing write ended the stage —
+  and `autograph` discarded that error with `let _`: not counted, not logged,
+  and `memory_status` reported a healthy worker while the fact's graph
+  structure was partial. The doc's "never silent" covered the QUEUE (drops)
+  only. Such failures are now counted in `MemoryService::autograph_failed`,
+  logged once per failed stage, and reported by `memory_status` as
+  `extraction.autograph_failed`, distinct from `autograph_dropped` (never
+  ran): re-remembering the fact completes its wiring.
+
+- **A failed online-migration worker was silent, and could lose its error.**
+  The worker recorded its failure on the job record for `migration_status`
+  and nothing else; when that record could not be read or written — a disk
+  that just failed a migration is a disk likely to fail this write too — the
+  error was gone from every channel, and status showed a non-terminal phase
+  with no worker and no `last_error`, indistinguishable from a pause. The
+  failure is now logged, and each degraded step is logged on its own so the
+  original error is never masked by the one that hid it.
+
+- **A corrupt working-context index erased the whole project's listing.**
+  `update_working_index` rebuilt an unreadable index from EMPTY and wrote that
+  over it. Every other session under the project left `list_working_contexts`
+  for good while its fact sat intact on disk, reachable only by someone who
+  already knew the exact `project` + `session`. The read path's error — what
+  the code's own comment said a human would act on — was destroyed by the
+  very next save, and in an agent workload that save is moments away. The
+  index is a derived cache and the facts are the ground truth, so it is now
+  rebuilt FROM the facts: `MemoryError::WorkingContextCodec` triggers a
+  bounded walk (`FactStore::list`, capped at the same
+  `MAX_WORKING_SESSIONS_PER_PROJECT` every other write honors) for the facts
+  carrying this project's working-context markers. `saved_at` is not
+  recoverable — it lives in the index alone, never on a fact — so recovered
+  entries carry 0, sorting after anything stamped since. A backend whose
+  `list` is the defaulted `Unsupported` refusal degrades to the previous
+  empty rebuild rather than failing: not bricking saves was the original
+  code's one legitimate goal, and it is preserved.
+
+- **The working-context index grew without bound (#2193).** A project's index
+  is one fact rewritten whole on every `save_working_context`; it gained an
+  entry per distinct session and shed one only when that session's fact was
+  forgotten. A long-lived project therefore paid O(sessions) per save, and
+  nothing capped the fact's size. `MAX_WORKING_SESSIONS_PER_PROJECT = 1000`:
+  past it the oldest-saved entries leave the *listing* — their facts stay on
+  disk and stay loadable by exact `project` + `session` — and the session being
+  saved is pinned, so a same-second flood can never evict the write in
+  progress. Eviction runs under the lock already held: no new lock, map, or
+  per-project state.
+
+- **An empty `project` or `session` was accepted and then unrecoverable.**
+  Both are the id the state is filed under and listed by; an empty one hashed,
+  encoded and listed fine — as `""` — and nobody who had not thought to ask for
+  the empty string could reach it again. `save_working_context` now refuses an
+  empty or whitespace-only key up front with
+  `MemoryError::EmptyWorkingContextKey`. The variant is additive: `MemoryError`
+  is `#[non_exhaustive]`, so downstream already matches it with a wildcard arm.
+
 ### Deprecated
 
 - **The `MemoryStore` supertrait alias (#2018).** Since the 0.14 facet split

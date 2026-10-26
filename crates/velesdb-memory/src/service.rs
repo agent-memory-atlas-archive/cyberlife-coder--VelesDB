@@ -143,7 +143,7 @@ const ABOUT_RELATION: &str = "about";
 /// default and every caller names its own storage backend explicitly. The
 /// duplication stops at the type-parameter list: the field lists are
 /// identical by contract — what varies per feature is the *type* of
-/// [`GenerationGate`], never the shape of the service — and
+/// `GenerationGate`, never the shape of the service — and
 /// `tests/service_field_drift.rs` fails the build of any change that lets
 /// them diverge again (#2017).
 #[cfg(feature = "persistence")]
@@ -196,8 +196,8 @@ struct AutographJob {
 /// `closing` is the shutdown latch: the handle's drop raises it BEFORE
 /// removing the sender, so the worker finishes the job in flight and SKIPS
 /// what is still queued (counted, one aggregated warning) instead of
-/// draining a queue of generations — 64 × a 46 s model would hold the
-/// daemon's exit for tens of minutes. Re-armed by each spawn.
+/// draining a queue of generations — 64 of them at 46 s each would hold
+/// the daemon's exit for tens of minutes. Re-armed by each spawn.
 #[derive(Default)]
 // `closing` is read only by the worker/drop path, absent on wasm32 — same
 // rationale as `AutographJob` above.
@@ -205,6 +205,9 @@ struct AutographJob {
 struct AutographQueue {
     tx: parking_lot::Mutex<Option<std::sync::mpsc::SyncSender<AutographJob>>>,
     dropped: std::sync::atomic::AtomicU64,
+    /// Enrichments that RAN and failed part-way through wiring — distinct
+    /// from `dropped` (never ran). See `MemoryService::autograph_failed`.
+    failed: std::sync::atomic::AtomicU64,
     closing: std::sync::atomic::AtomicBool,
 }
 
@@ -350,24 +353,6 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
             validate_relation(&link.relation)?;
         }
         self.ensure_link_targets_exist(links)
-    }
-
-    /// How many autograph enrichments a FULL queue refused since this
-    /// service was built (#1846). The facts themselves were stored; only
-    /// their graph wiring was skipped, and re-remembering a fact rebuilds it.
-    #[must_use]
-    pub fn autograph_dropped(&self) -> u64 {
-        self.autograph_queue
-            .dropped
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Whether the background autograph queue is OPEN — a worker is spawned
-    /// and `remember` enqueues instead of running the enrichment inline.
-    /// Turns false the moment a worker handle's drop closes the queue.
-    #[must_use]
-    pub fn autograph_queue_open(&self) -> bool {
-        self.autograph_queue.tx.lock().is_some()
     }
 
     /// Whether an autograph extractor is configured at all.

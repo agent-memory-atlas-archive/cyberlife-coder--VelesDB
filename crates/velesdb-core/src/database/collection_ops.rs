@@ -1,9 +1,9 @@
 //! Collection CRUD dispatcher: create, delete, list, get, and diagnostics.
 //!
 //! Type-specific operations are in sibling modules:
-//! - [`vector_ops`] — vector collection create/get
-//! - [`graph_ops`] — graph collection create/get
-//! - [`metadata_ops`] — metadata-only collection create/get
+//! - [`vector_ops`](super::vector_ops) — vector collection create/get
+//! - [`graph_ops`](super::graph_ops) — graph collection create/get
+//! - [`metadata_ops`](super::metadata_ops) — metadata-only collection create/get
 
 use crate::collection::AnyCollection;
 use crate::{CollectionType, DistanceMetric, Error, Result, StorageMode};
@@ -64,6 +64,10 @@ impl Database {
         coll.set_runtime_limits(crate::collection::RuntimeLimits::from_config(
             &self.config.limits,
         ));
+        // `[search]` alongside `[limits]`, same contract: resolved here because
+        // `Database` is the only component holding a `VelesConfig`, pushed on
+        // every open, never persisted (#2087).
+        coll.set_runtime_search_quality(self.config.search.resolved_quality());
     }
 
     /// Checks whether a collection name exists in any of the typed registries.

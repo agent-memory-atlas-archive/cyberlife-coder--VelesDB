@@ -40,8 +40,8 @@ layer itself (`why()` recall trails) lives in
   semantic + BM25 hybrid retrieval with no connectivity.
 - An on-device agent that keeps a semantic memory of past interactions
   (`VelesSemanticMemory`) and a small knowledge graph (`MobileGraphStore`).
-- An IoT/edge build where binary quantization trades ~5–10% recall for 32x less
-  memory per vector.
+- An IoT/edge build where binary quantization trades some recall for
+  32x less memory per vector.
 - A read-audited app: a Swift/Kotlin `MobileObserver` sees every read and can **deny**
   it (`MobileAccessDecision`), for consent gating or per-tenant isolation.
 
@@ -139,7 +139,7 @@ format. Environment variables (`VELESDB_*`) still layer on top of a loaded file.
 | Entry point | Effect |
 |---|---|
 | `VelesDatabase.open(path)` | Core defaults |
-| `VelesDatabase.openWithConfig(path, configPath)` | Loads a TOML file, **engine sections only** (`[search]`, `[hnsw]`, `[storage]`, `[limits]`, `[quantization]`, `[wal_batch]`); fails fast, never falls back to defaults |
+| `VelesDatabase.openWithConfig(path, configPath)` | Loads a TOML file, **engine sections only** (`[search]`, `[hnsw]`, `[storage]`, `[limits]`, `[quantization]`); fails fast, never falls back to defaults |
 | `VelesDatabase.openWithConfigToml(path, configToml)` | Same, from an in-memory string (bundled asset, remote config) |
 | `updateGuardrails(limits)` | Live-updates depth / cardinality / memory / timeout / rate-limit / circuit-breaker caps (`MobileQueryLimits`) |
 | `enableStreaming(config)` | Bounded ingestion channel; defaults `bufferSize=10000`, `batchSize=128`, `flushIntervalMs=50` |
@@ -210,8 +210,8 @@ Cross-compilation targets, as declared in `crates/velesdb-mobile/Cargo.toml`.
 | `x86_64-linux-android` | Supported, build from source | x86_64 emulator; not CI-built |
 | `i686-linux-android` | Declared in `Cargo.toml` | x86 emulator; never exercised in this repository |
 
-ARM64 devices get core's NEON paths (`velesdb_core::simd_neon`,
-`simd_neon_prefetch`) for distance computation and prefetching.
+ARM64 devices get core's NEON distance kernels (`velesdb_core::simd_native`,
+dispatched at runtime) and its NEON prefetching (`simd_neon_prefetch`).
 
 ## Troubleshooting
 
@@ -230,4 +230,4 @@ the VelesDB engine and are governed by that license.
 
 ---
 
-`velesdb-mobile v6.0.0` · Last updated: 2026-09-02 · Applies to: velesdb-core 6.0.0 · [Report a docs error](https://github.com/cyberlife-coder/velesdb/issues)
+`velesdb-mobile v7.0.0` · Last updated: 2026-09-02 · Applies to: velesdb-core 7.0.0 · [Report a docs error](https://github.com/cyberlife-coder/velesdb/issues)

@@ -4,10 +4,11 @@ A practical, actionable guide to getting the most throughput out of the VelesDB 
 bindings. Every recommendation here maps directly to a real method in the API —
 nothing is hypothetical.
 
-**Baseline:** A naive insert loop using Python lists yields ~9 000 vec/s.
-**Achievable with the right patterns:** ~15 000–17 000 vec/s on typical hardware
-(i9-class CPU, 384D, batch 1 000–5 000). The gap is almost entirely Python overhead,
-not VelesDB's core engine.
+**Measured:** batched `upsert` calls (5 000 points each, with a payload, WAL on)
+inserted 10K × 384D vectors at 18,595 vec/s from Python (i9-14900KF, 1.7.2,
+2026-03-27 — [report](../../benchmarks/report_1.7.2_2026-03-27.json)). No recorded
+run compares a naive per-point loop or the bulk methods below, so this guide ranks
+them by the copies each makes, not by a measured rate.
 
 ---
 
@@ -91,14 +92,13 @@ your data is shaped, not by intuition.
 | `upsert_bulk([{...}, ...])` | List of point dicts | Vec only (no per-row PyDict→struct) | Medium batches without numpy already in memory |
 | `upsert_bulk_numpy(arr, ids)` | numpy `(n, dim)` float32 + ids | **One flat-buffer copy** (no per-row copies) | Large numpy-native pipelines (embeddings, model output) |
 
-**Throughput rule of thumb on a 384D collection** (i9-class CPU, fresh collection,
-no payload):
+**Memory overhead by method** (no recorded run compares their throughput):
 
-| Method | ~10K vec batch | Peak memory overhead per 100K @ 768D |
-|--------|----------------|--------------------------------------|
-| `upsert` (list of dicts) | ~5 000 vec/s | +~600 MB (list + dict + Vec copies) |
-| `upsert_bulk` (list of dicts) | ~12 000 vec/s | +~300 MB (Vec copies only) |
-| `upsert_bulk_numpy` | ~17 000 vec/s | + one transient flat-buffer copy (`n × dim × 4` bytes, ~293 MB per 100K @ 768D, freed when the call returns) |
+| Method | Peak memory overhead per 100K @ 768D |
+|--------|--------------------------------------|
+| `upsert` (list of dicts) | +~600 MB (list + dict + Vec copies) |
+| `upsert_bulk` (list of dicts) | +~300 MB (Vec copies only) |
+| `upsert_bulk_numpy` | + one transient flat-buffer copy (`n × dim × 4` bytes, ~293 MB per 100K @ 768D, freed when the call returns) |
 
 Compared to the list-of-dicts paths, `upsert_bulk_numpy` eliminates all
 per-row Python-object conversions and `Vec` allocations; the remaining cost is
@@ -106,8 +106,8 @@ a single bulk copy of the flat buffer (made so the GIL can be released during
 the insert). Chunking (below) bounds that transient copy.
 
 **Memory tuning when batches are very large (> 50 000):** chunk into 5 000-row
-sub-batches. The total throughput is identical (~17 000 vec/s) but peak RSS
-stays bounded by `~5 000 × dimension × 4 bytes` rather than the full batch.
+sub-batches. Peak RSS then stays bounded by `~5 000 × dimension × 4 bytes`
+rather than the full batch; no recorded run measures what chunking does to throughput.
 
 ```python
 import numpy as np
@@ -135,17 +135,20 @@ for start in range(0, len(all_vectors), CHUNK):
 
 ### Choose the right `SearchQuality` profile
 
-`search_with_quality()` selects the HNSW `ef_search` parameter. The default
+`search_with_quality()` selects the HNSW `ef_search` parameter, except for
+`perfect`, which scores every vector instead. The default
 (`balanced`) is conservative. For latency-sensitive serving, `fast` is often
 sufficient. Use `accurate` or `perfect` only for offline evaluation.
 
 | Profile | ef_search (top-10) | Recall | Typical latency |
 |---------|-------------------|--------|-----------------|
-| `"fast"` | 96 | ~95% | Lowest |
-| `"balanced"` | 160 | ~99.5% | Default |
-| `"accurate"` | 512 | ~100% | 4x slower than balanced |
-| `"perfect"` | 4 096 | 100% | Exhaustive — evaluation only |
-| `"autotune"` | Adaptive | ~95%+ | Scales with collection size |
+| `"fast"` | 96 | 97.4%* | Lowest |
+| `"balanced"` | 160 | 99.8%* | Default |
+| `"accurate"` | 512 | 100%*; 0.98 on SIFT1M's 1M | ~2x slower than balanced in BENCHMARKS.md's native index-level p50s (130 vs 57 µs, March 2026, Balanced then at ef 128) |
+| `"perfect"` | — (exhaustive scan) | exact top-k | Exhaustive — evaluation only; refused above `max_perfect_mode_vectors` |
+| `"autotune"` | Adaptive | — (no run measures it) | Scales with collection size |
+
+\* Recall@10 in `recall_benchmark` (10K random 128-D vectors, an index built with `HnswParams::max_recall`, 100 queries), measured 2026-09-10 on 6.0.0; see [BENCHMARKS.md](../BENCHMARKS.md#hnsw-recall-profiles-10k128d).
 
 ```python
 # For production serving where sub-millisecond latency matters
@@ -331,7 +334,7 @@ A single number is not meaningful. Report at minimum:
 
 - `p50` (median): typical user experience
 - `p95`: worst case for 19 out of 20 requests
-- `p99`: near-worst case (often 2–5x p50 for HNSW)
+- `p99`: near-worst case (1 request in 100 is slower)
 - Throughput: total vectors / total wall time (not per-batch time)
 
 ```python
@@ -409,7 +412,7 @@ eliminates 31 redundant GIL release/acquire and argument-parsing cycles.
 import time
 t0 = time.time()
 collection.search_request(velesdb.SearchOptions(vector=query.tolist(), k=10))
-print(f"Latency: {(time.time() - t0) * 1e6:.1f} µs")  # may read 0 µs
+print(f"Latency: {(time.time() - t0) * 1e6:.1f} µs")  # a coarse clock may print 0.0
 
 # Correct: perf_counter_ns() has nanosecond resolution
 t0 = time.perf_counter_ns()
@@ -423,7 +426,7 @@ print(f"Latency: {(time.perf_counter_ns() - t0) / 1_000:.1f} µs")
 # Unreliable: first call includes cold-start overhead (page faults, branch predictor)
 t0 = time.perf_counter_ns()
 results = collection.search_request(velesdb.SearchOptions(vector=query.tolist(), k=10))
-print(f"{(time.perf_counter_ns() - t0) / 1_000:.1f} µs")  # 3-10x the steady-state
+print(f"{(time.perf_counter_ns() - t0) / 1_000:.1f} µs")  # slower than the steady state
 ```
 
 Correct: warm up, then measure over many iterations:
@@ -445,10 +448,10 @@ for _ in range(100):  # measure
 
 | Change | Effort | Expected gain |
 |--------|--------|---------------|
-| `dtype=np.float32` on all vectors | 1 line | 5–15% on search latency |
-| `upsert_bulk_numpy()` instead of dict loop | 3 lines | 1.5–3x insert throughput |
+| `dtype=np.float32` on all vectors | 1 line | Lower search latency (not measured here) |
+| `upsert_bulk_numpy()` instead of dict loop | 3 lines | Higher insert throughput (not measured here) |
 | Batch size 1 000–5 000 | 1 constant | Eliminates per-call overhead |
-| `search_with_quality("fast")` vs default | 1 argument | 2x lower latency at ~95% recall |
+| `search_with_quality("fast")` vs default | 1 argument | Lower latency at 97.4% recall@10 in `recall_benchmark` |
 | `batch_search()` for multiple queries | Refactor | Eliminates N-1 GIL cycles per batch |
 | `ThreadPoolExecutor` for parallel search | ~10 lines | Near-linear scaling up to core count |
 
@@ -457,4 +460,4 @@ See also: [TUNING_GUIDE.md](TUNING_GUIDE.md) for HNSW parameter tuning and
 
 ---
 
-Last updated: 2026-08-08 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-09-10 · Applies to: velesdb-core 7.0.0

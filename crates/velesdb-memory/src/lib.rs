@@ -1,4 +1,9 @@
 #![deny(unsafe_code)]
+// Same gate as velesdb-core: these lints are warn-by-default, so #2205's 49
+// broken links accumulated without anything going red. Denying at the crate
+// root makes a plain `cargo doc` fail, not only the CI step that sets
+// `RUSTDOCFLAGS`. Kept on both published crates so the two cannot drift.
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 //! # VelesDB-memory
 //!
 //! Local-first **memory** layer for AI agents, exposed through a single MCP
@@ -143,7 +148,7 @@ pub mod http_client;
 mod openai;
 /// Is a configured remote inference backend actually reachable? (#1751 D2)
 ///
-/// Gated exactly like [`openai`], which it builds its URL with, and like the
+/// Gated exactly like `openai`, which it builds its URL with, and like the
 /// `ureq` agent it probes through: without either role's feature there is no
 /// remote backend to be unreachable, and no transport to ask with. Declaring
 /// it unconditionally compiled here and nowhere else — the default build has

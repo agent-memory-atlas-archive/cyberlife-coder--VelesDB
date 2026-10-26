@@ -5,7 +5,7 @@ use crate::distance::DistanceMetric;
 use crate::error::Result;
 use crate::index::hnsw::params::HnswParams;
 use crate::index::hnsw::sharded_mappings::ShardedMappings;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
@@ -40,20 +40,29 @@ impl HnswIndex {
     ///
     /// # Performance
     ///
-    /// - **~2-3x faster inserts** than `new()` (M/2, ef/2)
-    /// - **Recall**: ~90% (vs ≥95% with standard params)
+    /// - **Faster inserts** than `new()` (M/2, ef/2; measured in `docs/BENCHMARKS.md`)
+    /// - **Recall**: lower than with `new()`'s parameters (not measured)
     ///
     /// # Limitations
     ///
-    /// - No SIMD re-ranking support (`search_with_rerank` falls back to standard search)
-    /// - No brute-force search (`search_brute_force` falls back to HNSW search)
-    /// - Cannot `vacuum()` the index (returns error)
+    /// Exact-distance features are off:
+    ///
+    /// - `search_with_quality` and `search_batch_parallel` skip their automatic
+    ///   two-stage re-rank; an explicit `search_with_rerank` or
+    ///   `search_with_rerank_quality` call still re-ranks, from the graph's
+    ///   stored vectors (`search_with_rerank` from the caller's `rerank_k`
+    ///   candidates, not the pool the index would size)
+    /// - the same two answer `SearchQuality::Perfect`, and any quality on an
+    ///   index of at most 100 vectors, from the graph instead of an exact scan
+    /// - `search_brute_force` falls back to a graph search, and
+    ///   `brute_force_search_parallel` and the GPU scans return nothing;
+    ///   `full_scan_with_bitmap` scans regardless
+    /// - `vacuum()` is refused (returns an error)
     ///
     /// # Use Cases
     ///
     /// - High-velocity streaming data
     /// - Large-scale indexing where recall is more important than perfect precision
-    /// - Memory-constrained environments
     ///
     /// # Errors
     ///
@@ -65,7 +74,7 @@ impl HnswIndex {
     /// use velesdb_core::index::HnswIndex;
     /// use velesdb_core::DistanceMetric;
     ///
-    /// // Fast insert mode: lighter graph params, no exact-distance features
+    /// // Fast insert mode: lighter graph params, exact-distance features off
     /// let index = HnswIndex::new_fast_insert(768, DistanceMetric::Cosine)?;
     /// ```
     pub fn new_fast_insert(dimension: usize, metric: DistanceMetric) -> Result<Self> {
@@ -77,8 +86,9 @@ impl HnswIndex {
     ///
     /// # Trade-offs
     ///
-    /// - **~3-5x faster inserts** than `new()` (M=12, ef=100 vs M=32, ef=400)
-    /// - **Recall**: ~85% (vs ≥95% with standard params)
+    /// - **Faster inserts** than `new()` (M=12, ef=100 vs `auto()`'s
+    ///   M=24/300 up to 256 dims, M=32/400 above; measured in `docs/BENCHMARKS.md`)
+    /// - **Recall**: lower than with `new()`'s parameters (not measured)
     /// - **Best for**: Bulk loading, development, benchmarking
     ///
     /// After bulk loading, consider rebuilding with higher params for production.
@@ -135,7 +145,8 @@ impl HnswIndex {
         Self::with_params_internal(dimension, metric, params, true)
     }
 
-    /// Internal constructor with vector storage toggle.
+    /// Internal constructor with the exact-distance-features toggle
+    /// (`enable_vector_storage`).
     ///
     /// Honours `params.storage_mode`: `RaBitQ` selects the binary-traversal
     /// backend; every other mode uses the Standard f32 backend (SQ8/Binary
@@ -193,6 +204,9 @@ impl HnswIndex {
             metric,
             inner: RwLock::new(ManuallyDrop::new(inner)),
             mappings,
+            maintenance: Mutex::new(()),
+            publishing: RwLock::new(()),
+            saving: Mutex::new(()),
             enable_vector_storage,
             rerank_latency_target_us: AtomicU64::new(0),
             rerank_latency_ema_us: AtomicU64::new(0),
@@ -210,7 +224,11 @@ impl HnswIndex {
     /// * `dimension` - Vector dimension
     /// * `metric` - Distance metric
     /// * `params` - Custom HNSW parameters
-    /// * `enable_vector_storage` - Whether to store vectors for re-ranking
+    /// * `enable_vector_storage` - Whether exact-distance features are on: the
+    ///   automatic two-stage re-rank, the exact scan for `Perfect` and for an
+    ///   index of at most 100 vectors, `search_brute_force`,
+    ///   `brute_force_search_parallel`, the GPU scans and `vacuum` (see
+    ///   [`Self::new_fast_insert`]); the graph keeps its vectors either way
     ///
     /// # Errors
     ///
@@ -318,6 +336,9 @@ impl HnswIndex {
             metric: meta.metric,
             inner: RwLock::new(ManuallyDrop::new(inner)),
             mappings,
+            maintenance: Mutex::new(()),
+            publishing: RwLock::new(()),
+            saving: Mutex::new(()),
             enable_vector_storage: meta.enable_vector_storage,
             rerank_latency_target_us: AtomicU64::new(0),
             rerank_latency_ema_us: AtomicU64::new(0),
@@ -407,12 +428,21 @@ impl HnswIndex {
     ///
     /// * `path` - Path to the index directory
     ///
+    /// Runs beside searches, writes and a [`Self::vacuum`]'s rebuild. The
+    /// mappings it writes are copied under the read guard the graph is dumped
+    /// under, before the dump, so each id they name resolves to a slot of the
+    /// saved graph holding that id's vector (#2262). Two saves of this index
+    /// run one at a time: they would rewrite the same files under one
+    /// generation.
+    ///
     /// # Errors
     ///
     /// Returns an error if the write fails.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> std::result::Result<(), std::io::Error> {
         use crate::index::hnsw::persistence::{self, HnswMeta};
 
+        // Held to the end: see `saving`.
+        let _saving = self.saving.lock();
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
 
@@ -423,11 +453,11 @@ impl HnswIndex {
         // follow-up).
         let new_gen = persistence::next_generation(path)?;
 
-        // Dump the HNSW graph itself (caller-specific — see persistence::save_sidecars).
-        let storage_mode = {
+        // Dump the HNSW graph, with the mappings copied under the same guard,
+        // before it (see `persistence::dump_graph`).
+        let (mappings, storage_mode) = {
             let inner = self.inner.read();
-            inner.file_dump(path, "native_hnsw")?;
-            inner.storage_mode()
+            persistence::dump_graph(&inner, &self.mappings, path, "native_hnsw")?
         };
 
         // Graph-generation marker is written IMMEDIATELY after the graph dump
@@ -441,7 +471,7 @@ impl HnswIndex {
         // (a RaBitQ index reloads with the RaBitQ backend).
         persistence::save_sidecars(
             path,
-            &self.mappings,
+            mappings,
             &HnswMeta {
                 dimension: self.dimension,
                 metric: self.metric,
@@ -482,7 +512,10 @@ impl HnswIndex {
         self.mappings.is_empty()
     }
 
-    /// Returns whether vector storage is enabled.
+    /// Returns whether exact-distance features are on — `false` for an index
+    /// built with [`Self::new_fast_insert`] or `with_params_full(.., false)`, and
+    /// for one loaded from such an index's files. The graph stores its vectors
+    /// either way.
     #[inline]
     #[must_use]
     pub fn has_vector_storage(&self) -> bool {

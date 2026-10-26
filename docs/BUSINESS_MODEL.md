@@ -103,7 +103,7 @@ This design ensures:
 |------------|---------|---------------------|
 | Unified Vector + Graph engine | Yes | Separate systems |
 | Self-contained single binary (~14 MB) | Yes | Containers / clusters |
-| Sub-millisecond latency (43 us) | Yes | 50-100 ms (cloud) |
+| Sub-millisecond search latency | Yes | A network round trip per query (cloud) |
 | WASM / Mobile native | Yes | Server-only |
 | SQL-like query language (VelesQL) | Yes | JSON DSL / SDK-only |
 
@@ -116,4 +116,4 @@ This design ensures:
 | Enterprise | On-premise cluster with SLA | Commercial |
 
 ---
-Last updated: 2026-07-25 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-07-25 · Applies to: velesdb-core 7.0.0

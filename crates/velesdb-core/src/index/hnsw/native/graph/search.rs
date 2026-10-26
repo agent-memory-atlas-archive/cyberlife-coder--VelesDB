@@ -87,8 +87,8 @@ impl<D: DistanceEngine> NativeHnsw<D> {
 
     /// Executes the search on an already-prepared (normalized) query vector.
     ///
-    /// Factored out of [`search`] so the `Cow` borrow ends before
-    /// [`recycle_cow`] reclaims the buffer.
+    /// Factored out of [`Self::search`] so the `Cow` borrow ends before
+    /// [`Self::recycle_cow`] reclaims the buffer.
     #[inline]
     fn search_prepared(&self, query: &[f32], k: usize, ef_search: usize) -> Vec<(NodeId, f32)> {
         let ep = self.entry_point.load(Ordering::Acquire);
@@ -719,9 +719,10 @@ impl<D: DistanceEngine> NativeHnsw<D> {
         &self,
         query: &'a [f32],
     ) -> Cow<'a, [f32]> {
-        if self.distance.is_pre_normalized()
-            && self.distance.metric() == crate::DistanceMetric::Cosine
-        {
+        // The arena's own test: a query is prepared exactly as the arena
+        // stores a vector, so a stored vector is its own prepared query
+        // (`link_placed` connects with one).
+        if self.stores_unit_norm() {
             let mut buf = QUERY_BUF.with(|cell| {
                 let mut borrow = cell.borrow_mut();
                 if borrow.capacity() == 0 {

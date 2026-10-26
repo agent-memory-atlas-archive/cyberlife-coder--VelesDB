@@ -18,7 +18,7 @@ velesdb repl ./my_db    # explicit path
 ```
 
 ```
-VelesDB v6.0.0 - VelesQL REPL
+VelesDB v7.0.0 - VelesQL REPL
 Database: ./data
 Type .help for commands, .quit to exit
 
@@ -88,7 +88,7 @@ splits input on whitespace.
 | `.explain <query>` | Show the execution plan for a VelesQL query (tree format) |
 | `.explain-analyze <query>` | Execute the query and print the plan with actual row counts, per-node timings and cache-reuse counters |
 | `.analyze <name>` | Analyze collection: row count, deletion ratio, field stats, index stats |
-| `.bench <name> [n] [k]` | Benchmark N random queries with top-k (default: 100 queries, k=10). Also available as `\bench`. |
+| `.bench <name> [n] [k]` | Benchmark N random queries with top-k (default: 100 queries, k=10), at the session's search quality (its `ef_search` when set, else its `mode`, else the configured default), which it prints. A failed query stops it with the error. Also available as `\bench`. |
 
 `.explain-analyze` output:
 
@@ -194,7 +194,7 @@ Session settings control REPL search behaviour. Set with `\set`, view with
 
 | Setting | Range / values | Default | Description |
 |---------|---------------|---------|-------------|
-| `mode` | `fast`, `balanced`, `accurate`, `perfect`, `adaptive` | `balanced` | Search quality preset (sets `ef_search` automatically) |
+| `mode` | `fast`, `balanced`, `accurate`, `perfect`, `autotune` (or `auto`, `auto_tune`), `custom:<ef>`, `adaptive:<min>:<max>` | unset: the `[search]` default of the `--config`/`VELESDB_CONFIG` file, else of `./velesdb.toml` when it exists (#2400), else `balanced` | Search quality preset (sets `ef_search` automatically); a session that set neither `mode` nor `ef_search` adds no quality to a query, so the configured default applies wherever the engine honours it (see [Configuration](CONFIGURATION.md), #2430), and `\show` prints it marked `(configured default)` (#2303); `adaptive` needs `min` ≤ `max`, and `\set mode` refuses any mode a query would refuse (#2267) |
 | `ef_search` | 16–4096 (or `auto` from mode) | auto | HNSW graph exploration factor |
 | `timeout_ms` | >= 100 | 30000 | Query timeout in milliseconds. Also accepts the alias `timeout`. |
 | `rerank` | `true`/`false`, `on`/`off`, `1`/`0`, `yes`/`no` | `true` | Reranking after quantized search |
@@ -287,4 +287,4 @@ executed successfully.`, `Admin statement executed successfully.`, or
 
 ---
 
-Last updated: 2026-08-13 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-08-13 · Applies to: velesdb-core 7.0.0

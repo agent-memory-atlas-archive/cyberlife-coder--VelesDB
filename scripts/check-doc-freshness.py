@@ -143,6 +143,12 @@ HISTORICAL_VERSION_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Sentence and paragraph boundaries, used to scope the search above. A version
+# number is `1.2.3`, never `1. 2. 3`, so a sentence break cannot fall inside
+# one: the period must be followed by whitespace.
+SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s")
+PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n")
+
 
 VERSION_CLAIMS: "tuple[VersionClaim, ...]" = (
     VersionClaim(
@@ -158,6 +164,13 @@ VERSION_CLAIMS: "tuple[VersionClaim, ...]" = (
         re.compile(r"Applies to:\s*velesdb-memory\s+(\d+\.\d+\.\d+)"),
         exact=True,
         description="`Applies to: velesdb-memory X.Y.Z` doc stamp",
+    ),
+    VersionClaim(
+        "workspace-version-stamp",
+        "velesdb-core",
+        re.compile(r"workspace\s+(\d+\.\d+\.\d+)"),
+        exact=True,
+        description="`workspace X.Y.Z` doc stamp",
     ),
     VersionClaim(
         "cargo-pin-core",
@@ -307,7 +320,18 @@ def scanned_doc_files(root: Path) -> "list[Path]":
     """Every markdown file the version guard sweeps."""
     excluded_dirs = tuple((root / d).resolve() for d in VERSION_SCAN_EXCLUDED_DIRS)
     out: "list[Path]" = []
-    for path in sorted((root / DOCS_DIRNAME).rglob("*.md")):
+    # The repository root, then `docs/`. The root used to contribute README.md
+    # alone, so every other page a newcomer or an agent opens first --
+    # ARCHITECTURE.md, QUALITY_BAR.md, CONTRIBUTING.md, ROADMAP.md, AGENTS.md
+    # -- claimed versions nothing compared against the manifests. Measured on
+    # 6.0.0: ARCHITECTURE.md still stamped `workspace 4.3.0`, two majors
+    # behind, while every guard was green. Sweeping the root as a whole rather
+    # than naming pages keeps the next file added there inside the guard, and
+    # the exclusions below already handle what is historical by construction:
+    # CHANGELOG.md matches VERSION_SCAN_EXCLUDED_NAMES, which is the only one
+    # the widened sweep reports (13 entries, all of them past releases).
+    candidates = sorted(root.glob("*.md")) + sorted((root / DOCS_DIRNAME).rglob("*.md"))
+    for path in candidates:
         relative = path.relative_to(root).as_posix()
         if relative in VERSION_SCAN_EXCLUDED_FILES:
             continue
@@ -317,9 +341,6 @@ def scanned_doc_files(root: Path) -> "list[Path]":
         if VERSION_SCAN_EXCLUDED_NAMES.match(path.name):
             continue
         out.append(path)
-    root_readme = root / "README.md"
-    if root_readme.is_file():
-        out.append(root_readme)
     # A crate's own README is the page a user lands on from crates.io, npm or
     # PyPI — its version claim is the FIRST one anybody reads, and it was
     # outside every sweep. Measured on 4.2.0: seven of the nine stamped READMEs
@@ -381,13 +402,33 @@ def line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
+def historical_context_window(text: str, match: "re.Match[str]") -> str:
+    """The prose a historical qualifier is allowed to live in, for one match.
+
+    Scoped to the sentence around the match, not to the physical line. Prose
+    wraps: `supported since velesdb-memory` can end one line and `0.14.1` open
+    the next, and a line-scoped window reads that second line alone, finds no
+    qualifier, and calls a correctly-framed reference stale. Bounded by the
+    enclosing paragraph so a qualifier in a neighbouring one never leaks in.
+    """
+    para_start = 0
+    for brk in PARAGRAPH_BREAK_RE.finditer(text, 0, match.start()):
+        para_start = brk.end()
+    para_break = PARAGRAPH_BREAK_RE.search(text, match.end())
+    para_end = para_break.start() if para_break else len(text)
+
+    start = para_start
+    for boundary in SENTENCE_BREAK_RE.finditer(text, para_start, match.start()):
+        start = boundary.end()
+    boundary = SENTENCE_BREAK_RE.search(text, match.end(), para_end)
+    end = boundary.start() if boundary else para_end
+    return text[start:end]
+
+
 def is_historical_version_reference(text: str, match: "re.Match[str]") -> bool:
     """Whether nearby prose explicitly frames a version as historical."""
-    line_start = text.rfind("\n", 0, match.start()) + 1
-    line_end = text.find("\n", match.end())
-    if line_end == -1:
-        line_end = len(text)
-    return HISTORICAL_VERSION_CONTEXT_RE.search(text[line_start:line_end]) is not None
+    window = historical_context_window(text, match)
+    return HISTORICAL_VERSION_CONTEXT_RE.search(window) is not None
 
 
 # --------------------------------------------------------------------------

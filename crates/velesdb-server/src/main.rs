@@ -35,7 +35,7 @@ use velesdb_server::{
 struct Args {
     /// Path to velesdb.toml configuration file. Configures both the
     /// server transport ([server]/[auth]/[tls]/[cors]) and the core engine
-    /// ([search]/[hnsw]/[storage]/[limits]/[quantization]/[wal_batch]) —
+    /// ([search]/[hnsw]/[storage]/[limits]/[quantization]) —
     /// only these engine sections are read into the core config, so a
     /// same-named [server]/[logging] table stays exclusively the
     /// server's own. VELESDB_* env vars still override values from the
@@ -476,3 +476,7 @@ async fn main() -> anyhow::Result<()> {
         serve(&cfg.host, cfg.port, app, state, cfg.shutdown_timeout_secs).await
     }
 }
+
+#[cfg(all(test, feature = "swagger-ui"))]
+#[path = "swagger_ui_tests.rs"]
+mod swagger_ui_tests;

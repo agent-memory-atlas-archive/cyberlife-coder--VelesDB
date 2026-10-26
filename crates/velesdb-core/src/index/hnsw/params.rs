@@ -198,11 +198,11 @@ impl HnswParams {
 
     /// Creates turbo parameters for maximum insert throughput.
     ///
-    /// **Target**: 5k+ vec/s (vs ~2k/s with `auto` params)
+    /// **Goal**: faster inserts than `auto` params (measured in `docs/BENCHMARKS.md`)
     ///
     /// # Trade-offs
     ///
-    /// - **Recall**: ~85% (vs ≥95% with standard params)
+    /// - **Recall**: lower than with standard params (not measured)
     /// - **Best for**: Bulk loading, development, benchmarking
     /// - **Not recommended for**: Production search workloads
     ///
@@ -293,7 +293,7 @@ impl HnswParams {
     ///
     /// # Memory Savings
     ///
-    /// | Dimension | Full (f32) | SQ8 (u8) | Reduction |
+    /// | Dimension | Full (f32) | SQ8 (u8) | Memory reduction |
     /// |-----------|------------|----------|----------|
     /// | 768 | 3 KB | 776 B | 4x |
     /// | 1536 | 6 KB | 1.5 KB | 4x |
@@ -360,36 +360,78 @@ impl HnswParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum SearchQuality {
-    /// Fast search with `ef_search=96`. ~95% recall, lowest latency.
+    /// Fast search with `ef_search=96`: 97.4% recall@10 in `recall_benchmark`
+    /// (10K random 128-D points), lowest latency.
     Fast,
-    /// Balanced search with `ef_search=160`. ~99.5% recall, production default.
+    /// Balanced search with `ef_search=160`: 99.8% recall@10 in
+    /// `recall_benchmark`, production default.
     #[default]
     Balanced,
-    /// Accurate search with `ef_search=512`. ~100% recall.
+    /// Accurate search with `ef_search=512`: 100% recall@10 in
+    /// `recall_benchmark`, 0.98 on SIFT1M's 1M (`docs/BENCHMARKS.md`).
     Accurate,
-    /// Highest-recall mode: `ef_search=4096` base with a large candidate pool
-    /// and exact SIMD re-ranking. Reaches exactly 1.0 on the ≤100K contract
-    /// tests; on a real 1M corpus (SIFT1M) it measures ~0.9994 — re-ranking can
-    /// only reorder candidates the graph surfaced, so the rare true neighbour
-    /// outside the ef=8192 pool at 1M is not recovered. See docs/BENCHMARKS.md §11.
+    /// Exhaustive unless the index's exact-distance features are off: every
+    /// stored vector is scored, so it returns the exact top-k under the index's
+    /// own distance, ties aside. This variant leaves the graph —
+    /// `try_search_special_quality` routes it straight to `search_brute_force`
+    /// before `ef_search` is ever consulted, so [`Self::ef_search`]'s
+    /// `4096.max(k * 100)` is not the number this mode runs at. The scan is
+    /// O(n / cores). An index built with those features off (`new_fast_insert`,
+    /// `with_params_full(.., false)`) still keeps its vectors in the graph, but
+    /// there `search_brute_force` falls back to a graph search at `Accurate`'s
+    /// scaled ef.
     ///
-    /// This tunes the **HNSW graph's effort** and is not exhaustive. For a hard
-    /// 100% guarantee use the separate `SearchMode::Perfect`
-    /// (`crate::config::SearchMode`), which switches the *engine* to a bruteforce
-    /// full scan (O(n)) rather than staying on the graph. Same name, different
-    /// axis: `SearchQuality` = graph effort, `SearchMode` = engine choice.
+    /// **Guarded, and the guard is the reason to read this.** A collection
+    /// larger than `limits.max_perfect_mode_vectors` (default 500 000) makes
+    /// the search fail with [`crate::error::Error::GuardRail`] rather than run
+    /// a linear scan over it. Verified in
+    /// `perfect_quality_is_refused_above_the_configured_cap`.
+    ///
+    /// This paragraph said the opposite until #2238 — "tunes the HNSW graph's
+    /// effort and is not exhaustive". Its ~0.9994 figure at 1M was measured
+    /// through this very scan, on `HnswIndex` directly, which has no cap
+    /// (#1225); a collection that size is refused. The paragraph was read off
+    /// `ef_search()` without checking which arm runs.
     Perfect,
     /// Custom `ef_search` value.
     Custom(usize),
-    /// Adaptive `ef_search` that starts low and doubles if the query is "hard".
+    /// Adaptive `ef_search` that starts low and doubles once if the query is
+    /// "hard".
     ///
     /// Uses a two-phase approach:
-    /// 1. Search with `min_ef`
-    /// 2. If result spread (`max_dist / min_dist`) exceeds a threshold, re-search
-    ///    with doubled ef (up to `max_ef`)
+    /// 1. Search at `max(min_ef, k)`
+    /// 2. If the result spread (the first-to-last score gap over the lower
+    ///    score's distance from the metric's floor, or over the smaller
+    ///    absolute score on an unbounded metric) reaches 2.0, search once more
+    ///    at twice its ef, capped at `max_ef`, when that exceeds the first ef
     ///
-    /// For easy queries (dense cluster hits), this is 2-4x faster than fixed ef.
-    /// For hard queries, it gracefully degrades to `max_ef` with no recall loss.
+    /// Easy queries (dense cluster hits) stop after phase 1. No recorded run
+    /// measures its latency or recall against a fixed ef yet (#2266).
+    ///
+    /// # Phase 2 is out of reach on Cosine
+    ///
+    /// The spread is divided by the lower score's distance from the metric's
+    /// floor, and Cosine's floor is `-1`. So `spread = (first - last) /
+    /// (last + 1)`, and reaching 2.0 with a perfect top hit needs
+    /// `last <= -1/3`: the **k-th** result must be anti-correlated with the
+    /// query. Ordinary data does not do that — in 256 dimensions the best of
+    /// 3,000 random vectors sits near `+0.17`, not below `-0.33`.
+    ///
+    /// Measured on one 3,000 x 256 corpus built to be hard (clusters smaller
+    /// than `k`, so every top-`k` tail falls into the far background),
+    /// phase 1 at `min_ef = 32`, `k = 10`:
+    ///
+    /// | metric | first | last | spread | queries over 2.0 |
+    /// | --- | --- | --- | --- | --- |
+    /// | Cosine | 0.9988 | 0.16 to 0.18 | 0.70 to 0.72 | 0 / 40 |
+    /// | Euclidean | 0.049 | 1.28 to 1.29 | 24.9 to 25.1 | 40 / 40 |
+    ///
+    /// On a Cosine collection this variant is therefore a single pass at
+    /// `min_ef`, whatever `max_ef` says, and so is [`Self::AutoTune`], which
+    /// delegates to the same algorithm. Whether the threshold or the Cosine
+    /// baseline should change is a behaviour question, open on #2266: moving
+    /// either one trades latency for recall on every Cosine query, and no run
+    /// measures that trade yet.
     Adaptive {
         /// Minimum `ef_search` (starting point). Default: 32.
         min_ef: usize,
@@ -398,17 +440,20 @@ pub enum SearchQuality {
     },
     /// Auto-tuned adaptive search based on collection statistics.
     ///
-    /// Computes optimal `min_ef` / `max_ef` from the collection's current size
-    /// and vector dimension, then delegates to the same two-phase adaptive
-    /// algorithm used by [`SearchQuality::Adaptive`].
+    /// Computes `min_ef` / `max_ef` from the collection's current size and
+    /// vector dimension, then delegates to the same two-phase adaptive
+    /// algorithm used by [`SearchQuality::Adaptive`]. `min_ef` grows by tiers:
     ///
-    /// This is the recommended quality setting for applications that want
-    /// good recall without manual ef tuning:
+    /// - up to 1K vectors: `k * 2`
+    /// - 1K–10K: `k * 4`
+    /// - 10K–100K: `k * 8`
+    /// - more than 100K: `k * 12`
+    /// - above 512 dimensions: times 1.5
     ///
-    /// - Small collections (≤1K): conservative ef (fast)
-    /// - Medium collections (1K–100K): moderate ef (balanced)
-    /// - Large collections (100K+): aggressive ef (high recall)
-    /// - High dimensions (>512): additional exploration factor
+    /// `min_ef` is at least `k`, and `max_ef` is `4 * min_ef`. Some search paths
+    /// run one pass, scan exactly or ignore the mode instead: the Search Modes
+    /// guide names the main ones ("When the two phases run"), and #2268
+    /// tracks the rest. No recorded run measures its latency or recall (#2266).
     ///
     /// # Example
     ///
@@ -424,9 +469,11 @@ impl SearchQuality {
     ///
     /// # Large-scale optimization (v0.9+)
     ///
-    /// - **Accurate**: 512 base (was 256), scales with k×16 for ≥95% recall at 100K+
-    /// - **Perfect**: 4096 base (was 2048), scales with k×100 for ~100% recall
-    ///   (exactly 1.0 on the ≤100K contract tests; ~0.9994 on 1M SIFT1M)
+    /// - **Accurate**: 512 base (was 256), scales with k×16 to hold recall at 100K+
+    /// - **Perfect**: 4096 base, scaled with k×100 — the ef a graph traversal
+    ///   would use. With its exact-distance features on, `HnswIndex` does not
+    ///   traverse for `Perfect`: it scans exhaustively (#2238), so this is not
+    ///   what `Perfect` costs there.
     /// - **Adaptive**: returns `min_ef` (first phase); caller handles second phase
     #[must_use]
     pub fn ef_search(&self, k: usize) -> usize {
@@ -437,7 +484,9 @@ impl SearchQuality {
             Self::Balanced | Self::AutoTune => 160.max(k * 5),
             // Increased from 256 to 512 for better recall at 100K+ scale
             Self::Accurate => 512.max(k * 16),
-            // Increased from 2048 to 4096 for ~100% recall (1.0 ≤100K; ~0.9994 at 1M)
+            // The traversal ef for Perfect-class recall, for a caller that walks the
+            // graph; `HnswIndex` scans exhaustively instead (#2238) unless its
+            // exact-distance features are off.
             Self::Perfect => 4096.max(k * 100),
             Self::Custom(ef) => (*ef).max(k),
             // Adaptive: start with min_ef (first phase)

@@ -22,7 +22,70 @@ use super::{
 #[cfg(not(target_arch = "wasm32"))]
 use super::AutographWorkerHandle;
 
+/// The three wiring stages of one autograph enrichment, in the order they
+/// run. Named for the failure log: which stage a partial enrichment stopped
+/// at is the one fact a reader needs to judge what is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutographStage {
+    /// Fact → topic hubs (`about`/`mentions` pairs).
+    Entities,
+    /// Hub → hub typed edges.
+    Relations,
+    /// Hub attribute writes.
+    Attributes,
+}
+
+impl std::fmt::Display for AutographStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Entities => "entities",
+            Self::Relations => "relations",
+            Self::Attributes => "attributes",
+        })
+    }
+}
+
 impl<E: Embedder, S: FactStore> MemoryService<E, S> {
+    // Autograph observability lives with autograph (this module), not in the
+    // service assembler: `service.rs` is over the file budget and only ever
+    // shrinks (scripts/check-file-budgets.py), so the counters' accessors
+    // moved here beside the worker that feeds them.
+
+    /// How many autograph enrichments a FULL queue refused since this
+    /// service was built (#1846). The facts themselves were stored; only
+    /// their graph wiring was skipped, and re-remembering a fact rebuilds it.
+    #[must_use]
+    pub fn autograph_dropped(&self) -> u64 {
+        self.autograph_queue
+            .dropped
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many autograph enrichments RAN and failed part-way through
+    /// wiring since this service was built — once per enrichment, however
+    /// many of its stages failed. Distinct from
+    /// [`Self::autograph_dropped`], which counts the ones a full queue never
+    /// ran. A failure here leaves the fact stored and its graph structure
+    /// PARTIAL — the entities wired before the failing write are in, the
+    /// rest are not — and re-remembering the fact completes it. Until this
+    /// counter existed such failures were discarded with `let _`: not
+    /// counted, not logged, invisible to `memory_status`, while the doc
+    /// promised "never silent" — a promise that covered only the queue.
+    #[must_use]
+    pub fn autograph_failed(&self) -> u64 {
+        self.autograph_queue
+            .failed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the background autograph queue is OPEN — a worker is spawned
+    /// and `remember` enqueues instead of running the enrichment inline.
+    /// Turns false the moment a worker handle's drop closes the queue.
+    #[must_use]
+    pub fn autograph_queue_open(&self) -> bool {
+        self.autograph_queue.tx.lock().is_some()
+    }
+
     /// Remember a `fact`, optionally tagging it with structured `metadata`
     /// (`ColumnStore` facet) and linking it to existing memories (graph facet).
     /// Returns the stable id of the fact (idempotent on identical content).
@@ -83,7 +146,7 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
     /// The stored metadata is **auto-stamped with today's date** under
     /// [`crate::storage::AUTO_DATE_FIELD`] (`_veles_date`, a `YYYYMMDD`
     /// integer read from the system clock at write time — see
-    /// [`crate::clock::today_ymd`]) whenever `metadata` doesn't already carry
+    /// `clock::today_ymd`) whenever `metadata` doesn't already carry
     /// that key; an explicit value in `metadata` (e.g. to date a fact
     /// retroactively) is never overwritten. No clock is available on
     /// `wasm32-unknown-unknown`, so that target stamps nothing and `metadata`
@@ -95,7 +158,7 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
     ///
     /// Because [`Self::remember_extracted`] stores each extracted fact via
     /// [`Self::remember`] (which delegates here), it gets the same auto-stamp
-    /// for free — entity hubs it also creates go through [`Self::store_fact`]
+    /// for free — entity hubs it also creates go through `store_fact`
     /// directly and are never stamped, since they are internal graph
     /// scaffolding, not caller facts.
     ///
@@ -272,6 +335,7 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
             return;
         }
         crate::extract::orient_kinship(fact, &mut extraction.relations);
+        let mut failed = false;
         let mut entity_ids: HashMap<String, u64> = HashMap::new();
         let mut edges: HashSet<(u64, u64, String)> = HashSet::new();
         // The caller's fact is the node the topics attach to — the extracted
@@ -279,7 +343,12 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
         // separates autograph from `remember_extracted`: one `remember` call
         // must still produce exactly one caller-visible memory.
         for extracted in &extraction.facts {
-            let _ = self.wire_entities(fact_id, &extracted.entities, &mut entity_ids, &mut edges);
+            if let Err(err) =
+                self.wire_entities(fact_id, &extracted.entities, &mut entity_ids, &mut edges)
+            {
+                Self::note_autograph_failure(fact_id, AutographStage::Entities, &err);
+                failed = true;
+            }
         }
         // A concurrent `forget` can still race the wiring writes above between
         // the first check and here. Re-check once more before the hub↔hub and
@@ -288,10 +357,53 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
         // residual window of a single already-committed generation, not the
         // whole job.
         if !self.fact_exists(fact_id) {
+            self.count_failed_enrichment(failed);
             return;
         }
-        let _ = self.wire_relations(&extraction.relations, &mut entity_ids, &mut edges);
-        let _ = self.wire_attributes(&extraction.attributes, &mut entity_ids);
+        if let Err(err) = self.wire_relations(&extraction.relations, &mut entity_ids, &mut edges) {
+            Self::note_autograph_failure(fact_id, AutographStage::Relations, &err);
+            failed = true;
+        }
+        if let Err(err) = self.wire_attributes(&extraction.attributes, &mut entity_ids) {
+            Self::note_autograph_failure(fact_id, AutographStage::Attributes, &err);
+            failed = true;
+        }
+        self.count_failed_enrichment(failed);
+    }
+
+    /// Counts one enrichment that failed part-way — once, however many of its
+    /// stages failed. [`Self::autograph_failed`] counts enrichments, and one
+    /// extraction can fail in several places: once per extracted fact at the
+    /// entity stage alone.
+    fn count_failed_enrichment(&self, failed: bool) {
+        if failed {
+            self.autograph_queue
+                .failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// One stage of an enrichment failed part-way: say so. The wiring helpers
+    /// propagate with `?`, so the first failing write ends its stage; the fact
+    /// is stored and its graph structure is partial until it is re-remembered.
+    /// Discarding the error here — as `let _` did — left that invisible
+    /// everywhere: no counter, no log, and a `memory_status` that reported a
+    /// healthy worker. One line per failed stage, not per edge (#1834's rule):
+    /// the concurrent-`forget` race the comments above describe is the common
+    /// cause, and it fails the whole stage at once. It does not count: the
+    /// enrichment is counted once, by [`Self::count_failed_enrichment`],
+    /// however many of its stages fail.
+    fn note_autograph_failure(fact_id: u64, stage: AutographStage, err: &MemoryError) {
+        #[cfg(feature = "mcp")]
+        tracing::warn!(
+            fact_id,
+            stage = %stage,
+            error = %err,
+            "autograph enrichment failed part-way: the fact is stored, its graph \
+             structure is partial; re-remembering it completes the wiring"
+        );
+        #[cfg(not(feature = "mcp"))]
+        let _ = (fact_id, stage, err);
     }
 
     /// Create each outgoing link from `fact_id`.
@@ -600,7 +712,7 @@ impl<E: Embedder, S: FactStore> MemoryService<E, S> {
     /// Create the edge `from -> to` labelled `label`, unless `edges` already
     /// records that triple for this call (in-call dedup only). `relate`
     /// derives the edge id from `(from, relation, to)`
-    /// ([`crate::wire::hash_edge_id`] upstream in core) and is itself an O(1)
+    /// ([`velesdb_core::wire::hash_edge_id`] upstream in core) and is itself an O(1)
     /// idempotent no-op against an already-persisted edge, so there is
     /// nothing left to preload from the store — a prior preload here made
     /// every write to a hub with `k` existing edges cost O(k), turning `n`

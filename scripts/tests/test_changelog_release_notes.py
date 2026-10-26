@@ -1,0 +1,269 @@
+"""Behavioral contract for the CHANGELOG release-notes extractor.
+
+The velesdb-memory train shipped every release with a one-line placeholder:
+`release-memory.yml` and `release-mcpb.yml` each create the GitHub Release for
+the tag with their own blurb, and neither ever wrote the CHANGELOG section.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "changelog-release-notes.py"
+WORKFLOW = ROOT / ".github" / "workflows" / "release-memory.yml"
+MEMORY_CHANGELOG = ROOT / "crates" / "velesdb-memory" / "CHANGELOG.md"
+
+CHANGELOG = """# Changelog
+
+## [Unreleased]
+
+### Added
+
+- something not yet released
+
+## [0.14.2] - 2026-09-03
+
+### Fixed
+
+- the working-context index
+
+## [0.14.1] - 2026-08-19
+
+### Fixed
+
+- the last line of the last section
+"""
+
+
+class ExtractorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.changelog = self.directory / "CHANGELOG.md"
+        self.changelog.write_text(CHANGELOG, encoding="utf-8")
+
+    def invoke(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--changelog", str(self.changelog), *arguments],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_extracts_the_section_body_without_its_own_heading(self) -> None:
+        result = self.invoke("--version", "0.14.2")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("### Fixed", result.stdout)
+        self.assertIn("the working-context index", result.stdout)
+        self.assertNotIn("## [0.14.2]", result.stdout)
+
+    def test_stops_at_the_next_version_and_never_leaks_unreleased(self) -> None:
+        result = self.invoke("--version", "0.14.2")
+
+        self.assertNotIn("0.14.1", result.stdout)
+        self.assertNotIn("the last line of the last section", result.stdout)
+        self.assertNotIn("something not yet released", result.stdout)
+
+    def test_keeps_the_final_line_of_a_section_with_no_successor(self) -> None:
+        """`release.yml`'s `sed ... | head -n -1` eats this line."""
+        result = self.invoke("--version", "0.14.1")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("the last line of the last section", result.stdout)
+
+    def test_refuses_a_version_the_changelog_does_not_document(self) -> None:
+        result = self.invoke("--version", "9.9.9")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("no '## [9.9.9]' section", result.stderr)
+        self.assertEqual("", result.stdout.strip())
+
+    def test_matches_the_version_exactly_and_not_as_a_prefix(self) -> None:
+        """`0.14` must not resolve to `## [0.14.2]` and ship the wrong notes."""
+        result = self.invoke("--version", "0.14")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("no '## [0.14]' section", result.stderr)
+
+    def test_refuses_a_section_that_documents_nothing(self) -> None:
+        self.changelog.write_text("# Changelog\n\n## [1.0.0]\n\n## [0.9.0]\n\n- real\n", encoding="utf-8")
+
+        result = self.invoke("--version", "1.0.0")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("is empty", result.stderr)
+
+    def test_writes_the_notes_to_the_requested_file(self) -> None:
+        destination = self.directory / "NOTES.md"
+
+        result = self.invoke("--version", "0.14.2", "--output", str(destination))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("the working-context index", destination.read_text(encoding="utf-8"))
+
+    def test_extracts_the_real_memory_changelog(self) -> None:
+        """A positive control against the file the workflow actually reads."""
+        result = subprocess.run(
+            [
+                "python3",
+                str(SCRIPT),
+                "--changelog",
+                str(MEMORY_CHANGELOG),
+                "--version",
+                "0.14.2",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("### Fixed", result.stdout)
+
+
+def unreleased_block(text: str) -> str:
+    """The text between `## [Unreleased]` and the next `## [` heading.
+
+    Stops at the next `## ` so a released section's own text never leaks in.
+    """
+    start = text.index("## [Unreleased]") + len("## [Unreleased]")
+    end = text.index("\n## [", start)
+    return text[start:end]
+
+
+def unreleased_headings(text: str) -> "list[str]":
+    """The `### …` headings inside `## [Unreleased]`, in order."""
+    return re.findall(r"^### (.+)$", unreleased_block(text), re.M)
+
+
+class UnreleasedSectionTests(unittest.TestCase):
+    """`[Unreleased]` carries at most one heading per type.
+
+    Entries land section by section as work merges, and nothing stopped two
+    `### Added` blocks from accumulating under one version. It is not cosmetic:
+    the release notes are generated from this block, so a duplicated heading
+    ships a table of contents reading as if two unrelated things happened under
+    the same name.
+
+    A one-off tidy-up cannot hold this. The tidy-up that motivated this test was
+    itself made stale by the very next merge, which appended a third `### Added`
+    while the cleanup PR was still in review. Hence a guard rather than a sweep.
+    """
+
+    #: Each changelog a release workflow publishes a section of, and the workflow
+    #: that does it. The first version guarded only the root file; the one
+    #: `release-memory.yml` publishes was guarded by nothing (#2246, P2-d).
+    PUBLISHED = {
+        ROOT / "CHANGELOG.md": "release.yml",
+        MEMORY_CHANGELOG: "release-memory.yml",
+    }
+
+    def setUp(self) -> None:
+        self.text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    def test_no_type_appears_twice(self) -> None:
+        for path, workflow in self.PUBLISHED.items():
+            rel = path.relative_to(ROOT)
+            with self.subTest(changelog=str(rel)):
+                headings = unreleased_headings(path.read_text(encoding="utf-8"))
+                duplicated = sorted({h for h in headings if headings.count(h) > 1})
+                self.assertEqual(
+                    duplicated,
+                    [],
+                    f"`## [Unreleased]` of {rel} repeats {duplicated}; at release this "
+                    f"block becomes the version section {workflow} turns into release "
+                    "notes. Merge each type into one section.",
+                )
+
+    def test_the_block_has_headings_at_all(self) -> None:
+        """Otherwise an empty parse would satisfy the test above forever.
+
+        A block with nothing in it is the state right after a release is cut,
+        not a parse failure: only text without a single heading is suspect.
+        """
+        if not unreleased_block(self.text).strip():
+            return
+        self.assertTrue(
+            unreleased_headings(self.text),
+            "no `### …` heading found under `[Unreleased]` — the parser or the "
+            "file changed shape, and the duplicate check is now vacuous",
+        )
+
+    def test_a_freshly_cut_release_leaves_an_empty_block_the_parser_reads_as_empty(self) -> None:
+        cut = "# Changelog\n\n## [Unreleased]\n\n## [7.0.0] - 2026-10-25\n\n### Added\n- a\n"
+        self.assertEqual(unreleased_block(cut).strip(), "")
+        self.assertEqual(unreleased_headings(cut), [])
+
+    def test_the_parser_sees_a_duplicate_when_there_is_one(self) -> None:
+        synthetic = (
+            "# Changelog\n\n## [Unreleased]\n\n### Added\n- a\n\n"
+            "### Fixed\n- b\n\n### Added\n- c\n\n## [6.0.0] - 2026-09-02\n\n### Added\n- d\n"
+        )
+        self.assertEqual(unreleased_headings(synthetic), ["Added", "Fixed", "Added"])
+
+    def test_the_parser_stops_at_the_released_section(self) -> None:
+        synthetic = (
+            "# Changelog\n\n## [Unreleased]\n\n### Added\n- a\n\n"
+            "## [6.0.0] - 2026-09-02\n\n### Fixed\n- b\n"
+        )
+        self.assertEqual(unreleased_headings(synthetic), ["Added"])
+
+
+class WorkflowContractTests(unittest.TestCase):
+    """Pin the wiring: extracting notes nobody publishes is worthless."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_release_memory_publishes_the_changelog_notes(self) -> None:
+        self.assertIn("scripts/changelog-release-notes.py", self.workflow)
+        self.assertIn("crates/velesdb-memory/CHANGELOG.md", self.workflow)
+        self.assertIn("gh release edit", self.workflow)
+        self.assertIn("--notes-file", self.workflow)
+
+    def test_the_notes_job_creates_the_release_when_it_wins_the_race(self) -> None:
+        """`gh release edit` fails on a release neither workflow has created yet."""
+        job = self.workflow.index("publish-release-notes:")
+        section = self.workflow[job : job + 3000]
+        create = section.find("gh release create")
+        edit = section.find("gh release edit")
+        self.assertNotEqual(-1, create, "the notes job never creates the release")
+        self.assertNotEqual(-1, edit, "the notes job never sets the notes")
+        self.assertLess(create, edit, "the notes job edits before it ensures a release")
+        self.assertIn("--latest=false", section)
+
+    def test_a_real_release_without_a_changelog_section_fails_the_run(self) -> None:
+        """The whole point: a release cannot ship notes nobody wrote."""
+        job = self.workflow.index("publish-release-notes:")
+        section = self.workflow[job : job + 3000]
+        self.assertIn("has no CHANGELOG section", section)
+        self.assertIn("exit 1", section)
+
+    def test_a_prerelease_falls_back_instead_of_failing(self) -> None:
+        """An rc is cut from [Unreleased] and has no section of its own."""
+        job = self.workflow.index("publish-release-notes:")
+        section = self.workflow[job : job + 3000]
+        fallback = section.find('IS_PRERELEASE" = "true"')
+        failure = section.find("::error::")
+        self.assertNotEqual(-1, fallback, "no prerelease fallback: every rc run would go red")
+        self.assertNotEqual(-1, failure, "no hard failure for a real release")
+        self.assertLess(fallback, failure, "the hard failure shadows the prerelease fallback")
+
+    def test_the_notes_job_does_not_depend_on_the_optional_archive_build(self) -> None:
+        """Notes must land even when the daemon archives are skipped."""
+        job = self.workflow.index("publish-release-notes:")
+        section = self.workflow[job : job + 600]
+        self.assertIn("needs: [validate]", section)
+
+
+if __name__ == "__main__":
+    unittest.main()

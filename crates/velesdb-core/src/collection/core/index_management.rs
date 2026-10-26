@@ -331,7 +331,7 @@ impl Collection {
         ids
     }
 
-    /// Builds a pre-filter bitmap from a [`Filter`] using secondary indexes.
+    /// Builds a pre-filter bitmap from a [`Filter`](crate::filter::Filter) using secondary indexes.
     ///
     /// Supports `Eq`, `Neq` (universe subtraction), `Gt`/`Gte`/`Lt`/`Lte`
     /// (range scan), `And` (intersection), and `Or` (union, only when all
@@ -702,10 +702,32 @@ impl Collection {
     /// locality benefit; re-call after the next compaction if latency regresses.
     /// No-op for collections with fewer than 1 000 vectors.
     ///
+    /// # Durability
+    ///
+    /// The permutation is persisted before this returns, and that is not
+    /// optional. Since `.vectors` became the graph's arena, the permutation
+    /// lands in the **durable** store the moment it runs, while the adjacency
+    /// it must stay consistent with lives in `.graph`. Leaving the save to a
+    /// later `flush_full` opened a window in which a crash left every node id
+    /// resolving to the wrong vector -- silently, since both files parse.
+    /// Measured before the fix: `.vectors` modified, `.graph` untouched.
+    ///
+    /// Before the arena adoption the permutation touched a disposable
+    /// `hnsw-{token}.arena`, so no such window existed and no save was needed
+    /// here.
+    ///
     /// # Errors
     ///
-    /// Returns an error if vector storage reordering fails.
+    /// Returns an error if vector storage reordering fails, or if the
+    /// reordered index cannot be persisted.
     pub fn reorder_for_locality(&self) -> Result<()> {
-        self.storage.index.reorder_for_locality()
+        // The save below would otherwise persist mappings the async builder
+        // registered for ids not yet in the graph (see
+        // `compact_vector_storage`); draining first also lets the renumbering
+        // cover them.
+        self.drain_async_index_builder()?;
+        self.storage.index.reorder_for_locality()?;
+        self.storage.index.save(&self.storage.path)?;
+        Ok(())
     }
 }

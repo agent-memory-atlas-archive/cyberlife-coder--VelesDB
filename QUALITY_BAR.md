@@ -4,7 +4,7 @@ This document specifies the **explicit, enforceable thresholds** below which Vel
 
 These gates are not aspirational. They are enforced via CI workflows, scripts, and explicit pre-merge protocols. Each gate listed here links to its enforcement mechanism so that the gate can be inspected, contested, or extended publicly.
 
-> **Last updated:** 2026-08-08 — applies to v4.x (workspace 4.3.0).
+> **Last updated:** 2026-09-10 — applies to v7.x (workspace 7.0.0).
 
 ---
 
@@ -22,7 +22,7 @@ These gates are not aspirational. They are enforced via CI workflows, scripts, a
 
 A pull request that breaks any of these gates **cannot be merged**. There are no waivers without a documented exception added to this file.
 
-**How "cannot be merged" is enforced:** both `develop` and `main` carry GitHub branch protection requiring the **`CI Success`** status check; force pushes are disabled on both branches. `CI Success` is a summary job, and the authoritative list of what it gates is its own `needs:` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — read it there rather than trusting a copy. It currently stands at **21 jobs**: the build-and-test layer (lint, tests, security/cargo-deny, WASM, OpenAPI drift, VelesQL conformance, perf-smoke, the Python SDK and integrations, both Node binding suites) *and* the governance layer that polices this contract itself (`gate-contracts`, `doc-contract`, `promise-contract`, `mcp-doc-contract`, `production-gates`, `propagation-guard`, `binary-size`, `pr-governance`). This sentence used to enumerate eight of them, which read as the whole set and was not: the thirteen it omitted were, almost exactly, the guards. Gates 5–6 are enforced by Codacy Cloud; the official register of per-file complexity exceptions (each with a written rationale) is [`.codacy.yml`](.codacy.yml) — the bar is ≤ 8 / ≤ 50 everywhere outside that explicit whitelist. Gate 7 runs in `scripts/local-ci.ps1` and Codacy rather than as a GitHub Actions job.
+**How "cannot be merged" is enforced:** both `develop` and `main` carry GitHub branch protection requiring the **`CI Success`** status check; force pushes are disabled on both branches. `CI Success` is a summary job, and the authoritative list of what it gates is its own `needs:` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — read it there rather than trusting a copy. It currently stands at **27 entries, of which 26 are blocking** — `sonarcloud` is listed in `needs:` but deliberately not read by the chain, so it reports without gating: the build-and-test layer (lint, tests, security/cargo-deny, WASM, OpenAPI drift, VelesQL conformance, perf-smoke, the Python SDK and integrations, both Node binding suites) *and* the governance layer that polices this contract itself (`gate-contracts`, `doc-contract`, `promise-contract`, `mcp-doc-contract`, `production-gates`, `propagation-guard`, `binary-size`, `pr-governance`). This sentence used to enumerate eight of them, which read as the whole set and was not: the thirteen it omitted were, almost exactly, the guards. Gates 5–6 are enforced by Codacy Cloud; the official register of per-file complexity exceptions (each with a written rationale) is [`.codacy.yml`](.codacy.yml) — the bar is ≤ 8 / ≤ 50 everywhere outside that explicit whitelist. Gate 7 runs in `scripts/local-ci.ps1` and Codacy rather than as a GitHub Actions job.
 
 ---
 
@@ -53,14 +53,14 @@ A pull request that breaks any of these gates **cannot be merged**. There are no
 
   | Mode | ef_search (base, current code) | Recall@10 (measured) |
   |------|-------------------------------|---------------------|
-  | Fast | 96 (`max(96, k×3)`) | 92.2%* |
-  | Balanced (default) | 160 (`max(160, k×5)`) | 98.8%* |
+  | Fast | 96 (`max(96, k×3)`) | 97.4% |
+  | Balanced (default) | 160 (`max(160, k×5)`) | 99.8% |
   | Accurate | 512 (`max(512, k×16)`) | 100.0% |
 
-  Source: `benchmarks/results/2026-02-20-phase-e-report.md`; base values from
-  `SearchQuality::ef_search` (`crates/velesdb-core/src/index/hnsw/params.rs`).
-  \* measured at the former Fast=64 / Balanced=128 settings — the current
-  higher bases can only match or improve those figures.
+  Source: `recall_benchmark`'s recall report (10K random 128-D vectors, an
+  index built with `HnswParams::max_recall`), re-measured 2026-09-10 on 6.0.0
+  at the current bases, which come from `SearchQuality::ef_search`
+  (`crates/velesdb-core/src/index/hnsw/params.rs`).
 
 **When this triggers:** any change to `index/hnsw/`, `simd_native/`, `quantization/`, `fusion/`, or result-conversion code in Python bindings.
 
@@ -165,7 +165,6 @@ These are **not the same number** as the canonical 450 µs. The README explicitl
 | File | NLOC | Plan |
 |------|------|------|
 | `simd_native/x86_avx512.rs` | 1468 | Hard to split (intrinsics block); accepted exception |
-| `simd_native/neon.rs` | 902 | Same as above |
 | `velesdb-server/src/config.rs` | 837 | Refactor pending |
 | `velesdb-migrate/src/pipeline.rs` | 806 | Refactor pending |
 
@@ -198,10 +197,14 @@ These signals are tracked but do not block release individually:
 | BDD scenario coverage | All VelesQL syntax features | `crates/velesdb-core/tests/bdd/` |
 | Doctest compilation | All `pub fn` doctests compile | `cargo test --doc` in CI |
 | Promise contract sync | All numeric claims in README backed by benchmark commands | `scripts/check-promise-contract.py` in CI |
-| Binary size | `velesdb-server` ≤ 12 MiB, `velesdb` (CLI) ≤ 10 MiB, `velesdb-migrate` ≤ 9 MiB (stripped release) | `scripts/check_binary_size.py` in CI (Binary Size Gate job) |
+| Binary size | `velesdb-server` ≤ 12 MiB, `velesdb` (CLI) ≤ 10 MiB, `velesdb-migrate` ≤ 9.9 MiB (stripped release) | `scripts/check_binary_size.py` in CI (Binary Size Gate job) |
 | TODO governance | Every TODO/FIXME/HACK carries an issue tag: `[EPIC-XXX/US-YYY]`, `(PREFIX-NNN)` (e.g. `(EPIC-001)`, `(US-GRAPH-01)`), `#123`, or `#issue` | `scripts/check-todo-annotations.py` |
 | RUSTSEC | All advisories tracked or justified in `deny.toml` | `cargo deny check` in CI (Security Audit job) |
 | Untrusted-input hardening | Corrupt/oversized persisted artifacts (HNSW graph, PQ codebook, sparse, BM25, WAL) are rejected at load, not used to size allocations; WAL `Fsync` is durable before ack; config limits validated in loaders + on open | Regression suites: `storage/storage_reliability_tests.rs`, `index/hnsw/persistence_atomicity_tests.rs`, `quantization/pq_tests.rs`, `quantization/rabitq_tests.rs`, `index/sparse/persistence_tests.rs`, `index/bm25_tests.rs`, `config_tests.rs`, `velesql/parser/robustness_tests.rs` (gated by `cargo test`) |
+| Minimal dependency versions | `velesdb-core` and `velesdb-memory` each pass `cargo check --all-features`, resolved alone, with every direct dependency at the lowest version the resolve accepts, on the MSRV toolchain, on Linux and macOS (not Windows) | `minimal-versions` job in `quality-deep.yml` (weekly, and on PRs that change the workspace manifest or a member's) |
+| Public API diff | Every addition, change or removal in `velesdb-core`'s public API that an all-features build on x86_64 Linux exposes is printed for review — an item compiled only for another target (`simd_neon_prefetch`, wasm32) is in no report, here or in `semver-checks`; a *breaking* change is blocked separately, by `semver-checks` in `CI Success` | `public-api` job in `core-review.yml` (PRs that change `crates/velesdb-core/`) |
+| Mutation testing | **Not a gate, and no longer a CI job (#2339).** It ran on every `velesdb-core` pull request and never returned a verdict on a real diff: both runs that met one were cut at the 45-minute limit — 2 of 22 mutants tested, then 0 of 59 after 105 s of build and 981 s of unmutated baseline. What it does earn is a reviewer pointing it at one area by hand, which is how it produced findings on #2282 (25 mutations, 23 killed, both survivors real). Nothing in this repository may claim mutation coverage | Reviewer-run: `cargo mutants -p velesdb-core --features internal-bench --file '<file>' -- --lib -- --test-threads=1`. The feature is required: cargo-mutants ignores `cfg`, so gated code it mutates but does not compile is reported MISSED with no test able to kill it (#2348) |
+| Static analysis | CodeQL findings on Rust, Python, JavaScript/TypeScript and the GitHub Actions workflows, in the Security tab | `codeql.yml` (push, PR, weekly) |
 
 ---
 

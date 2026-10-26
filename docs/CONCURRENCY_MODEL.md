@@ -13,7 +13,7 @@
 VelesDB utilise un modèle de concurrence basé sur:
 - **Sharding**: Partitionnement des données pour réduire la contention
 - **RwLock**: Lecture parallèle, écriture exclusive (parking_lot)
-- **Lock-free atomics**: For compteurs, métriques, HNSW entry-point promotion, and CSR snapshot swap
+- **Lock-free atomics**: For compteurs, métriques, HNSW entry-point reads, and CSR snapshot swap
 - **ArcSwap**: Lock-free CSR snapshot reads for graph traversal (zero contention on reads)
 - **Lock ordering**: Ordre déterministe pour prévenir les deadlocks
 
@@ -81,13 +81,13 @@ breaks the exclusion for *future* openers; nothing in-tree does this.
 | HNSW layers | `parking_lot::RwLock` | Medium | Global, read-heavy |
 | HNSW neighbors | `parking_lot::RwLock` | Medium | Per-node |
 | PropertyIndex | `parking_lot::RwLock` | Low | Per-property |
-| HNSW entry point | `AtomicUsize` | None | Lock-free CAS promotion |
-| HNSW max layer | `AtomicUsize` | None | Lock-free CAS promotion |
+| HNSW entry point | `AtomicUsize` + promotion `Mutex` | None on reads | Lock-free reads; the first claim and each promotion write under the promotion lock |
+| HNSW max layer | `AtomicUsize` + promotion `Mutex` | None on reads | Moves with the entry point, under the same lock |
 | Metrics counters | `AtomicU64` | None | Lock-free |
 | Edge ID registry | `RwLock<HashMap>` | Low | Global, for existence checks |
 | CsrSnapshot | `ArcSwap<Arc<CsrSnapshot>>` | None | Lock-free reads via atomic swap; lazy rebuild on dirty flag |
 | Quantizer (RaBitQ/SQ8) | `parking_lot::RwLock` | None (after training) | Write-once then read-only |
-| Code store (RaBitQ/SQ8) | `parking_lot::RwLock` | Low | Write per insert (~10ns hold) |
+| Code store (RaBitQ/SQ8) | `parking_lot::RwLock` | Low | Write per insert (held for one append) |
 | Training buffer (RaBitQ/SQ8) | `parking_lot::Mutex` | Low | Pre-training only |
 | MmapStorage (compaction) | `parking_lot::RwLock` | High (during compaction) | Exclusive write lock for full compaction duration |
 
@@ -164,10 +164,10 @@ Enforcement in practice, by build and by tier:
   `crates/velesdb-core/src/index/hnsw/native/graph/locking.rs` is
   `#[cfg(debug_assertions)]`; on an out-of-order acquisition it increments an
   atomic violation counter and emits a `tracing::warn!` — it **never panics**.
-  It is also partial: only the `GpuVectorsSnapshot`, `Vectors`, and `Layers`
-  ranks are ever recorded. `Neighbors` is `#[allow(dead_code)]` with no
-  `record_lock_acquire` call site, so 1 of the 4 core ranks is untracked even
-  in debug.
+  It is also partial: only the `GpuVectorsSnapshot`, `EntryPointPromotion`,
+  `Vectors` and `Layers` ranks are ever recorded. `Neighbors` is
+  `#[allow(dead_code)]` with no `record_lock_acquire` call site, so 1 of the 5
+  core ranks is untracked even in debug.
 - **The collection tier** — `Collection`'s own field order (`config`,
   `vector_storage`, `payload_storage`, ...; the `=== LOCK ORDERING ===` block
   in `crates/velesdb-core/src/collection/types.rs`, and the "Collection-level
@@ -186,11 +186,12 @@ records. Their lock-step is not a promise: the private enum's discriminants
 are defined *from* the registry's constants, so any divergence is a compile
 error.
 
-For HNSW index operations that touch the GPU snapshot cache, vector storage,
-graph layers, and neighbor lists, the global lock acquisition order is:
+For HNSW index operations that touch the GPU snapshot cache, the entry-point
+promotion lock, vector storage, graph layers, and neighbor lists, the global
+lock acquisition order is:
 
 ```
-gpu_vectors_snapshot (rank 5) → vectors (rank 10)
+gpu_vectors_snapshot (rank 5) → promotion (rank 8) → vectors (rank 10)
     → layers (rank 20) → neighbors (rank 30)
 ```
 
@@ -200,9 +201,17 @@ machinery — the ordinal is retired, not reassigned.)
 | Lock | Rank | Registry constant (= `HnswLockRank` discriminant) | Component | Notes |
 |------|------|---------------------|-----------|-------|
 | `gpu_vectors_snapshot` | 5 | `LockRank::GPU_VECTORS_SNAPSHOT` | GPU flat-vector snapshot cache (`Mutex`) | Acquired before `vectors` in the GPU path (`gpu` feature); writers release `vectors` before reacquiring it to invalidate |
+| `promotion` | 8 | `LockRank::ENTRY_POINT_PROMOTION` | HNSW entry-point moves (`Mutex<()>`) | Taken by the first claim, each promotion and `reorder_for_locality`'s renumbering; the anchor reparenting it guards then takes `vectors`, `layers` and list locks, one at a time |
 | `vectors` | 10 | `LockRank::VECTORS` | `ContiguousVectors` (single vector store since PERF1) | Acquired first among the core HNSW locks in upsert and search paths |
 | `layers` | 20 | `LockRank::LAYERS` | HNSW layer structure (`RwLock`) | Global graph topology |
 | `neighbors` | 30 | `LockRank::NEIGHBORS` | Per-node neighbor lists (`RwLock`) | Fine-grained, acquired last |
+
+The base layer's per-node reachability anchors (`AtomicU32`, #2259) are no
+lock of their own: an anchor is written under the list lock of the node it
+names (rank 30), with the layers write lock held (`reorder_for_locality`), or,
+when a loaded graph rebuilds them, under the layers read lock and each
+parent's list read lock while nothing else runs. Clearing a promoted entry
+point's anchor, under the promotion lock, only unprotects an edge.
 
 **Rule**: Never acquire a lower-rank lock while holding a higher-rank lock.
 For example, acquiring `vectors` while holding `neighbors` is forbidden. The
@@ -210,7 +219,58 @@ typed `assert_lock_order(previously_held, about_to_acquire)` helper *expresses*
 this rule but is **not wired into any acquisition path** (see the enforcement
 note above). In debug builds the HNSW tier's `record_lock_acquire` will *warn*
 (never panic) on a violation — and only among the tracked ranks
-(`GpuVectorsSnapshot` / `Vectors` / `Layers`).
+(`GpuVectorsSnapshot` / `EntryPointPromotion` / `Vectors` / `Layers`).
+
+### The HNSW Index Guard and rayon: a liveness rule, not an ordering one
+
+Lock *order* is not enough for `HnswIndex::inner`. Ordering rules keep two
+threads from taking the same pair of locks in opposite directions; this one
+keeps a single lock from deadlocking against itself through a thread pool:
+
+> **A thread holding `HnswIndex::inner` never waits on the global rayon pool.**
+
+`parking_lot`'s `RwLock` is deliberately not read-re-entrant under a waiting
+writer: a pending `write()` blocks every *new* `read()`, so that a stream of
+readers cannot starve a writer. That fairness is what closes the cycle of
+\#2343 when the rule above is broken:
+
+1. a `vacuum` asks for `inner.write()` and waits for the current readers;
+2. a batch operation holds `inner.read()` and waits for its rayon jobs;
+3. those jobs run on the **global** pool, where the per-query search and
+   `rerank_candidates_simd` take `inner.read()` — new readers, so the pending
+   writer parks them;
+4. the parked workers are the ones step 2 is waiting for.
+
+Nobody advances, and no ordering discipline would have prevented it: only one
+lock is involved.
+
+Both operations that hold the guard and join on rayon therefore submit to a
+dedicated pool, `graph_pool` in `index/hnsw/index/batch.rs`:
+`HnswIndex::insert_batch_parallel`'s place phase and `HnswIndex::link_placed`'s
+connect phase. Their jobs reach the graph's arena, layers and entry point and
+never `HnswIndex` itself, so no job on that pool can take `inner`; rayon does
+not steal work across pools, so the isolation is structural rather than a
+timing assumption.
+
+Two checks hold the rule, because neither is sufficient alone:
+
+- `crates/velesdb-core/src/index/hnsw/index/global_pool_tests.rs` parks every
+  global rayon worker, then requires each guard holder to finish anyway. It is
+  deterministic: an operation that joins on the global pool cannot finish,
+  whatever the machine's timing. Before the fix it timed out at 60 s; after it,
+  both holders finish in 0.05 s.
+- `scripts/check_hnsw_rayon_pool.py` (CI job `lint`) refuses a *new* rayon
+  submission in any non-test file under `index/hnsw/` that is neither inside an
+  `.install(` closure — on any dedicated pool, not only `graph_pool` — nor
+  listed with the reason it cannot close the cycle. It cannot decide by
+  itself whether a submission runs under a held guard — the one that deadlocked
+  reached `par_iter` three calls down, in another file — so it requires the
+  reason to be written rather than inferred.
+
+A wall-clock bound on a racing test would not do instead: under heavy load a
+batch that is merely slow and one that is deadlocked print the same thing.
+Telling them apart needs the stack, not the clock — which is why the rule is
+held by a structural test and a guard, not by a timeout.
 
 ### Reserved Premium Rank Range [40, 59]
 
@@ -227,7 +287,7 @@ always acquired after the core locks whose data they wrap.
 
 | Range | Owner | Ordinals |
 |-------|-------|----------|
-| Core | `velesdb-core` | 5, 10, 15, 20, 30 |
+| Core | `velesdb-core` | 5, 8, 10, 20, 30 (15 retired) |
 | Premium (reserved) | `velesdb-premium` | 40–59 inclusive |
 
 ### Cross-Shard Operations
@@ -403,47 +463,59 @@ vectors already encoded.
 
 | Pattern | Impact | Acceptable? |
 |---------|--------|-------------|
-| `rabitq_store.write()` serializes post-training inserts | ~10ns per push (single encoded vector append) | Yes: store push is a trivial `Vec::push` operation |
-| Training blocks all inserts for ~60ms | One-time event per index lifetime | Yes: training runs once when the buffer threshold is reached |
+| `rabitq_store.write()` serializes post-training inserts | One short hold per push (a single encoded-vector append) | Yes: store push is a trivial `Vec::push` operation |
+| Training blocks all inserts while it runs | One-time event per index lifetime | Yes: training runs once when the buffer threshold is reached |
 | `reorder_for_locality()` is offline-only | Takes `&self` but must not run during concurrent search | Yes: only called during explicit maintenance, not on the hot path |
 
 ### Mitigation
 
 - Post-training inserts hold `rabitq_store.write()` for the minimum
-  duration needed to push a single encoded vector (~10ns).
+  duration needed to push a single encoded vector (one `Vec::push`).
 - Training is amortized: it runs once when the training buffer reaches its
   threshold, then never again for the lifetime of the index.
 - `reorder_for_locality()` is documented as offline-only and is not exposed
   through any concurrent API path.
 
-## HNSW Entry-Point CAS Promotion
+## HNSW Entry-Point Promotion
 
-### Lock-Free Entry-Point Updates
+### Entry-Point Updates
 
-HNSW entry-point promotion (selecting which node is the graph entry) uses
-lock-free atomic CAS (compare-and-swap) instead of a mutex. The entry point
-and max layer are stored as `AtomicUsize` fields in `NativeHnsw`:
+Readers load the entry point and the max layer, `AtomicUsize` fields of
+`NativeHnsw`, without a lock:
 
 ```rust
 entry_point: AtomicUsize,  // NO_ENTRY_POINT (usize::MAX) when empty
 max_layer: AtomicUsize,    // Current maximum layer
 ```
 
-`promote_entry_point()` handles two cases with CAS:
+Writers take the promotion lock (`promotion: Mutex<()>`, rank 8): the two
+cases below, and the renumbering `reorder_for_locality` applies.
 
-1. **Empty index**: CAS on `entry_point` from `NO_ENTRY_POINT` to the new
-   node ID. Only one thread wins the first-insert race.
-2. **Layer promotion**: CAS on `max_layer` from `current_max` to `node_layer`.
-   Only the CAS winner updates `entry_point`, ensuring consistency.
+1. **Empty index**: `claim_first_entry_point` CASes `entry_point` from
+   `NO_ENTRY_POINT` to the new node ID and sets `max_layer`, under the lock;
+   only one thread wins. A graph that already has an entry point returns
+   before taking the lock. A single insert that saw an empty graph but loses
+   the claim connects through the winner, and a batch consumes its first node
+   only when that node won (#2259).
+2. **Layer promotion**: `promote_entry_point` returns before taking the lock
+   when the node's layer does not exceed `max_layer`, the common case. Under
+   the lock it checks again, stores the new `max_layer`, swaps in the new
+   entry point (`swap`, `AcqRel`) and calls `reparent_entry_point`, which,
+   under the vectors and layers read locks, clears the new root's anchor and
+   links the previous entry point into the tree below it: into its list, or
+   one below it when that list is full of protected entries. Two promotions
+   that overlapped without the lock could reparent in the wrong order, the
+   later one's clearing the anchor the earlier one had just given its node,
+   and strand the tree below it (#2259).
 
-**Transient inconsistency window**: Between the `max_layer` CAS success and
-the subsequent `entry_point` store, a concurrent reader may see the new
-`max_layer` with the old `entry_point`. This is safe: `search_layer_single`
-returns `None` (via `with_neighbors`) for layers where the old EP has no
-edges, causing a no-op greedy descent.
+**Transient inconsistency window**: Between the `max_layer` store and the
+swap, a concurrent reader may see the new `max_layer` with the old
+`entry_point`. This is safe: `search_layer_single`
+finds no neighbour of the old EP at a layer where it has no edges, and
+returns it unchanged: a no-op greedy descent.
 
-Entry-point promotion is extremely rare (O(log_M(N)) times per index
-lifetime), so the CAS loop almost never retries.
+Entry-point promotion is rare (O(log_M(N)) times per index lifetime), so
+the lock is almost never contended.
 
 ## CsrSnapshot Invalidation Pattern
 
@@ -556,9 +628,46 @@ for neighbor in neighbors {
    - BFS/DFS with many nodes may hold locks longer
    - Mitigation: Read-Copy-Drop pattern releases locks quickly
 
-3. **HNSW rebuild is single-threaded**:
-   - Index rebuild blocks all writes
-   - Mitigation: Incremental updates preferred over full rebuild
+3. **An HNSW vacuum holds the index write lock for its swap** (#2262):
+   - The rebuild runs beside searches and writes, which carry on against the
+     old graph. The writes made meanwhile are then copied into the new graph
+     without the write lock, in at most four rounds, each taking the writes
+     made during the one before, until 64 or fewer are left or four have run
+   - Under the write lock, searches and writes wait while the swap copies,
+     one insert at a time, every id mapped but not yet carried when the lock
+     is granted, rebuilds the mapping of every live id and drops the old
+     graph. The rounds and their threshold say when the catch-up stops
+     trying, not how much is left: a write in flight — a whole batch —
+     maps its ids after the last round looked and before the lock is
+     granted, so what the swap copies has no upper bound. #2335 tracks
+     bounding it
+   - Nothing runs on rayon under that write lock: rayon workers running batch
+     searches park on the index lock, so a parallel insert waiting for them
+     there never finishes. The swap once did, and the vacuum hung with every
+     search
+   - `reorder_for_locality` and a running vacuum wait for each other: one
+     maintenance lock, which writers and saves never take, serializes the two.
+     A save made during the rebuild saves the old graph; the swap waits for its
+     dump like for any read guard
+   - Saves of one index wait for each other on a lock of their own, never on
+     the maintenance lock: two saves into one directory rewrote the same
+     files under one generation
+   - The swap holds the index write lock for the mapping rebuild only, never
+     for a copy: a **publishing** lock, taken shared by every mapping
+     publication and exclusively by the vacuum for its last catch-up, freezes
+     the remainder so it is settled outside the graph guard. Taken before the
+     index lock, always, so the orders cannot cross; searches never take it.
+     Unsealed, a write landing between the last catch-up round and the grant
+     of the write guard was copied under that guard with no upper bound —
+     measured at a whole 8 000-id working set in one swap (#2335)
+   - The rebuild uses the index's own M, `ef_construction` and alpha, read
+     from its graph, not the defaults for its dimension
+   - A save holds the graph's vector read lock across its vectors file and its
+     graph file, so an insert waits for both to be written: released between
+     the two, a node pushed in between and linked into saved nodes left a
+     save the next load refused
+   - Mitigation: vacuum while writes are light; incremental updates remain
+     preferred over a full rebuild
 
 4. **No transactional semantics**:
    - Operations are atomic per-operation, not per-batch
@@ -566,7 +675,7 @@ for neighbor in neighbors {
 
 5. **Enlarged crash recovery window during batch upsert**:
    - The 3-phase upsert pipeline (`batch_store_all` -> `per_point_updates` -> `bulk_index_or_defer`) writes vectors and payloads to storage before inserting into the HNSW graph. A crash between Phase 1 and Phase 3 leaves vectors in storage but missing from the HNSW index.
-   - Mitigation: On `Collection::open()`, gap detection compares `storage.ids()` against `index.mappings` and re-indexes any missing vectors. See [HNSW Crash Recovery](#hnsw-crash-recovery) for the full recovery architecture and [SOUNDNESS.md](SOUNDNESS.md#hnsw-batch-insertion-ordering) for batch insertion ordering invariants.
+   - Mitigation: On `Collection::open()`, gap detection compares `storage.ids()` against `index.mappings` and re-indexes any missing vectors. See [HNSW Crash Recovery](#hnsw-crash-recovery) for the full recovery architecture and [SOUNDNESS.md](SOUNDNESS.md#hnsw-slot-allocation) for the slot allocation invariants.
 
 ## Best Practices
 
@@ -642,26 +751,39 @@ ensure no data is lost.
 ### Recovery Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────────────────────┐
 │                        Collection::open()                              │
+│                                                                        │
+│  0. load_config() — config.json                                        │
 │                                                                        │
 │  1. MmapStorage::new()                                                 │
 │     ├─ Load vectors.idx (ID → offset mapping)                          │
 │     ├─ Replay vectors.wal → restore writes since last flush_index()    │
-│     ├─ Record WAL-touched ids (drained by step 4, pass 3)              │
+│     ├─ Record WAL-touched ids (drained by step 7, pass 3)              │
 │     └─ Truncate WAL after successful replay                            │
 │                                                                        │
-│  2. load_or_create_hnsw()                                              │
+│  2. LogPayloadStorage::new()                                           │
+│     └─ Load payloads.snapshot, replay payloads.log past it             │
+│                                                                        │
+│  3. load_or_create_hnsw()                                              │
+│     ├─ sweep_stale_arenas(): drop orphan arena files, before any load  │
 │     ├─ Gate: native_meta.bin present? (commit point, written LAST)     │
-│     ├─ Load native_hnsw.graph/.vectors/.gen + native_mappings.bin —   │
+│     ├─ Load native_hnsw.graph/.vectors/.gen + native_mappings.bin —    │
 │     │  all generation-stamped (#617); a legacy native_vectors.bin      │
 │     │  is generation-checked then discarded (PERF1)                    │
 │     └─ Load failure or config mismatch → empty index (rebuild below)   │
 │                                                                        │
-│  3. reconcile_point_count()                                            │
+│  4. load_bm25_index()                                                  │
+│     └─ bm25.snapshot + bm25.wal replay; payload rebuild if no snapshot │
+│                                                                        │
+│  5. Property index, label index (rebuilt from payloads), range index,  │
+│     edge_store.bin, named sparse indexes                               │
+│     └─ each sparse snapshot, then its WAL replayed over it             │
+│                                                                        │
+│  6. reconcile_point_count()                                            │
 │     └─ Set config.point_count = storage.len() (authoritative source)   │
 │                                                                        │
-│  4. recover_index_state() — 3-pass reconciliation                      │
+│  7. recover_index_state() — reconciliation passes                      │
 │     ├─ Pass 1 (gap): recover_hnsw_gap                                  │
 │     │  ├─ Early exit: if storage.len() == hnsw.len() → no gap          │
 │     │  ├─ find_gap_ids: storage.ids() \ index.mappings                 │
@@ -670,9 +792,19 @@ ensure no data is lost.
 │     ├─ Pass 2 (orphans): ids in index.mappings \ storage → remove      │
 │     ├─ Pass 3 (stale): WAL-touched ids on both sides — re-upsert when  │
 │     │  the indexed vector ≠ storage (storage is the source of truth)   │
-│     └─ Any pass mutated the index → index.save() before open returns  │
+│     ├─ Pass 4 (unlinked): mapped ids whose node has no layer-0 link    │
+│     │  (entry point exempt) — re-upsert onto a fresh, linked node      │
+│     └─ Any pass mutated the index → index.save() before open returns   │
 │        (the WAL was truncated; the delta has no other witness)         │
-└─────────────────────────────────────────────────────────────────────────┘
+│                                                                        │
+│  8. restore_auto_reindex_from_config(),                                │
+│     restore_secondary_indexes_from_config()                            │
+│                                                                        │
+│  9. run_post_open_hooks()                                              │
+│     ├─ reindex edge properties from edge_store.bin                     │
+│     ├─ replay edges.wal over edge_store.bin                            │
+│     └─ restore_persisted_quantizers(): trained quantizer artifacts     │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Layer 1: Vector Storage WAL Replay
@@ -705,14 +837,14 @@ This layer recovers vectors that were written to the WAL but not yet
 persisted to `vectors.idx` (the index file is only written by
 `flush_index()` or `flush_full()`, not by the fast `flush()` path).
 
-### Layer 2: HNSW 3-Pass Reconciliation
+### Layer 2: HNSW Reconciliation Passes
 
 **Module**: `crates/velesdb-core/src/collection/core/recovery.rs`
 
 After storage is fully reconstructed (Layer 1) and the persisted HNSW
 index is loaded (or an empty one built when the load fails),
-`Collection::open()` calls `run_crash_recovery()`, which runs three
-passes against the storage state:
+`Collection::open()` calls `run_crash_recovery()`, which runs the passes
+below against the storage state, in order:
 
 **Pass 1 — gap** (`recover_hnsw_gap`):
 
@@ -748,6 +880,15 @@ be compared — when WAL-touched ids overlap its mappings it is replaced
 by an empty index and fully rebuilt by pass 1
 (`rebuild_if_unverifiable`).
 
+**Pass 4 — unlinked** (`relink_unlinked_ids`): a mapping is not proof of
+graph membership. `upsert_bulk`'s V2 path places each vector, maps its id
+to the slot it got, and leaves linking that slot to the `AsyncIndexBuilder`, so
+a save that races it persists mappings for nodes nothing links to (#2246).
+Every mapped id whose node has an empty layer-0 list — the entry point
+excepted, since a graph's first node has nothing to link to — is
+re-upserted onto a fresh, linked node, and its old slot is left behind as
+a tombstone.
+
 When any pass mutated the index, `Collection::open()` re-saves it
 before returning: the vector WAL was truncated during replay, so
 without a fresh save the reconciled delta would be undetectable after
@@ -780,15 +921,16 @@ small (within a single `delete()` call).
 
 ### Startup Latency Impact
 
-Recovery latency depends on the number of gap vectors:
+Recovery latency grows with the number of gap vectors. No run measures it;
+what dominates at each size:
 
-| Gap Size | Expected Recovery Time | Dominant Cost |
-|----------|----------------------|---------------|
-| 0 (no gap) | < 1 ms | O(1) early exit heuristic |
-| 1–100 vectors | < 10 ms | Storage retrieval + HNSW insert |
-| 100–1 000 vectors | 10–100 ms | Parallel HNSW batch insert |
-| 1 000–10 000 vectors | 100 ms–1 s | Parallel HNSW batch insert (rayon) |
-| > 10 000 vectors | > 1 s | Proportional to gap size; mitigated by `HNSW_SAVE_THRESHOLD` |
+| Gap Size | Dominant Cost |
+|----------|---------------|
+| 0 (no gap) | O(1) early exit heuristic |
+| 1–100 vectors | Storage retrieval + HNSW insert |
+| 100–1 000 vectors | Parallel HNSW batch insert |
+| 1 000–10 000 vectors | Parallel HNSW batch insert (rayon) |
+| > 10 000 vectors | Proportional to gap size; mitigated by `HNSW_SAVE_THRESHOLD` |
 
 The `HNSW_SAVE_THRESHOLD` (10 000) bounds the maximum gap size in practice:
 `flush()` forces an HNSW save after 10 000 inserts, so the worst-case
@@ -853,7 +995,7 @@ never read or wrote it.
 **Why it was not wired, and was removed instead of activated:**
 
 - **Dead-in-core infrastructure.** Core recovery correctness is already
-  fully provided by the 3-pass reconciliation
+  fully provided by the reconciliation passes
   (`collection/core/recovery.rs`) against **storage as the single source of
   truth**. The delta WAL added nothing to correctness; the persisted graph
   load plus reconciliation is sufficient.
@@ -964,15 +1106,15 @@ flag alone activates them — `RUSTFLAGS="--cfg loom"` is **not** required local
 `cargo test --features loom` (without the bridge) would compile loom but run
 zero tests, which is the trap the build.rs removes.
 
+These are the commands CI runs (`quality-deep.yml`), with the preemption bound
+it uses; the `RUSTFLAGS` is redundant locally and harmless.
+
 ```bash
 # Integration models (tests/loom_tests.rs)
-cargo test -p velesdb-core --features loom,persistence --test loom_tests
+LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS="--cfg loom" cargo test -p velesdb-core --features loom,persistence --test loom_tests -- --test-threads=1
 
 # Storage models (src/storage/loom_tests.rs, a unit-test target)
-cargo test -p velesdb-core --features loom,persistence --lib storage::loom
-
-# With limited preemptions (faster)
-LOOM_MAX_PREEMPTIONS=2 cargo test -p velesdb-core --features loom,persistence --test loom_tests
+LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS="--cfg loom" cargo test -p velesdb-core --features loom,persistence storage::loom -- --test-threads=1
 ```
 
 ### Stress Testing
@@ -982,10 +1124,11 @@ LOOM_MAX_PREEMPTIONS=2 cargo test -p velesdb-core --features loom,persistence --
 cargo test --test stress_concurrency_tests -- --test-threads=1
 ```
 
-### HNSW Batch Insertion Ordering
+### HNSW Slot Allocation
 
-For soundness analysis of the batch insertion pipeline and its ordering
-invariants, see [SOUNDNESS.md: HNSW Batch Insertion Ordering](SOUNDNESS.md#hnsw-batch-insertion-ordering).
+For how an insert gets its slot — one allocator, the arena, with the mapping
+following it under the index read guard — see
+[SOUNDNESS.md: HNSW Slot Allocation](SOUNDNESS.md#hnsw-slot-allocation).
 
 ## References
 
@@ -996,4 +1139,4 @@ invariants, see [SOUNDNESS.md: HNSW Batch Insertion Ordering](SOUNDNESS.md#hnsw-
 
 ---
 
-*Last updated: 2026-08-09 · Applies to: velesdb-core 6.0.0 (this revision: corrected the lock-order enforcement section — `assert_lock_order` is unwired in production, the HNSW tracker is debug-only, warn-only and partial, the collection tier is convention-only — and the CSR snapshot thread-safety section to describe the lock-free `ArcSwap` + dirty-flag protocol; previous revision noted: HNSW persisted-graph reload at open; storage compaction concurrency)*
+*Last updated: 2026-08-09 · Applies to: velesdb-core 7.0.0 (this revision: corrected the lock-order enforcement section — `assert_lock_order` is unwired in production, the HNSW tracker is debug-only, warn-only and partial, the collection tier is convention-only — and the CSR snapshot thread-safety section to describe the lock-free `ArcSwap` + dirty-flag protocol; previous revision noted: HNSW persisted-graph reload at open; storage compaction concurrency)*

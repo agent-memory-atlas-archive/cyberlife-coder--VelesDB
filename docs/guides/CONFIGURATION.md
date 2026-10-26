@@ -1,6 +1,6 @@
 # ⚙️ VelesDB Configuration
 
-*Version 6.0.0 — Last updated: 2026-08-08*
+*Version 7.0.0 — Last updated: 2026-09-07*
 
 Complete guide for configuring VelesDB via configuration file, environment variables, and runtime parameters.
 
@@ -36,30 +36,51 @@ VelesDB supports 3 levels of configuration:
 at `./velesdb.toml` in the current working directory. There is **no**
 `~/.config/velesdb/`, `%APPDATA%\velesdb\`, or `/etc/velesdb/` search — if
 you previously read that here, it described a search path that was never
-implemented. If no `./velesdb.toml` is found, core defaults are used.
+implemented. If no `./velesdb.toml` is found, core defaults are used. This
+holds for `velesdb-server` and for the `velesdb` CLI alike: without
+`--config`/`VELESDB_CONFIG`, the CLI reads `./velesdb.toml` too, for the REPL
+and for every one-shot command that opens a database.
 
 To point at a file anywhere else, pass it explicitly:
 
-| Binary | Flag | Env var |
-|--------|------|---------|
-| `velesdb-server` | `--config <path>` | `VELESDB_CONFIG` |
-| `velesdb` (CLI) | `--config <path>` (global — REPL and every one-shot command) | `VELESDB_CONFIG` |
+| Binary | Flag | Env var | Without either |
+|--------|------|---------|----------------|
+| `velesdb-server` | `--config <path>` | `VELESDB_CONFIG` | `./velesdb.toml` if present, else core defaults |
+| `velesdb` (CLI) | `--config <path>` (global — REPL and every one-shot command) | `VELESDB_CONFIG` | `./velesdb.toml` if present, else core defaults (a present but invalid file fails the command; the error says it was read implicitly and to pass `--config <file>` to use another) |
 
 > **What the engine actually applies.** `[limits]` is enforced at the
-> collection and ingest boundaries, and `[hnsw]`'s `m` / `ef_construction`
+> collection and ingest boundaries, `[hnsw]`'s `m` / `ef_construction`
 > are applied when a collection's index is created (see the precedence chain
-> under [Section \[hnsw\]](#section-hnsw)). Everything else below is parsed
-> and validated but **not** wired: `[search]`, `[storage]`, `[quantization]`
-> and `hnsw.max_layers` (issue #2087), and `[wal_batch]` is parsed and
-> ignored (issue #2078) — its group-commit front was deleted as unwired, and
-> the batch write APIs already pay one durability barrier per call. Setting
-> any unwired key away from its default logs a warning at load, naming
-> exactly what is inert. Query-time overrides (`WITH (ef_search = N)`) are a
-> separate, working mechanism, as are per-collection creation options.
+> under [Section \[hnsw\]](#section-hnsw)), and `[search]`'s `default_mode` /
+> `ef_search` set the quality of a plain `search()`, of the VelesQL query
+> `SELECT * FROM c WHERE vector NEAR $v LIMIT n` (with no `WITH` clause, or
+> with a `WITH` clause that sets only `rerank`), and of the core functions
+> `search_batch_parallel`, `search_batch_with_filters`, `multi_query_search`
+> and `multi_query_search_ids`, of the hybrid (vector + BM25) functions
+> `hybrid_search` and `hybrid_search_with_filter` and the `NEAR` + `MATCH`
+> queries that reach them, `USING FUSION` ones included, of
+> `GraphCollection::search_by_embedding`, and of the bitmap branch of a
+> graph-anchored `NEAR` (a `NEAR` + `MATCH` query with more than 10 000
+> anchors) (issues #2087, #2399, #2430 —
+> `default_mode = "perfect"` is applied as `accurate`, with a warning: an
+> exhaustive scan cannot be a global default). No other query shape or search
+> entry point is guaranteed to follow it yet; #2430 tracks the audit. Everything else
+> below is parsed and validated but **not** wired: `search.max_results`,
+> `search.query_timeout_ms`, `[quantization]`, `hnsw.max_layers` and
+> `storage.storage_mode` — each still pending its own decision. Setting any of
+> these away from its default logs a warning at load, naming exactly what is
+> inert. Query-time overrides (`WITH (ef_search = N)`) are a separate,
+> working mechanism, as are per-collection creation options.
+>
+> **Removed in 7.0.0.** One table and three `[storage]` fields that 6.x
+> parsed and never applied are gone (issues #2174 and #2087; the CHANGELOG's
+> 7.0.0 `Removed` entry names each one and its migration). A file or a
+> `VELESDB_*` variable that still sets one keeps loading: the key is ignored,
+> whatever its value, and the loader names it in a single warning.
 
 Both binaries can load the **same** file, but only the *engine* sections —
-`[search]`, `[hnsw]`, `[storage]`, `[limits]`, `[quantization]`,
-`[wal_batch]` — reach `VelesConfig` and, via
+`[search]`, `[hnsw]`, `[storage]`, `[limits]`, `[quantization]` — reach
+`VelesConfig` and, via
 [`Database::open_with_config`](../../crates/velesdb-core/src/database/mod.rs),
 the running engine. Reaching `VelesConfig` is not the same as changing
 behaviour: see the note above for which of them the engine actually acts
@@ -86,9 +107,10 @@ value from the file, and `velesdb-server`'s own `VELESDB_PORT`/
 **Semantics are fail-fast**: an explicit `--config`/`VELESDB_CONFIG` path
 that is missing, malformed, or fails validation aborts startup (server) or
 the command (CLI) with the typed `ConfigError` — it never silently falls
-back to defaults. Omitting the flag entirely is unaffected: both binaries
-behave exactly as before this option was wired (core defaults, or
-`./velesdb.toml` if present).
+back to defaults. Omitting the flag entirely falls back to `./velesdb.toml`
+if present, else core defaults, in both binaries; a `./velesdb.toml` that is
+present but invalid fails the same way (for the CLI, every command that opens
+a database) until it is fixed or `--config` points elsewhere.
 
 ```bash
 # Server: engine + transport settings from one file
@@ -116,9 +138,6 @@ velesdb collection create ./my_database docs --dimension 768 --config ./velesdb.
 # velesdb.toml - Configuration minimale
 [search]
 default_mode = "balanced"
-
-[storage]
-data_dir = "./data"
 ```
 
 ### Full Example
@@ -126,7 +145,7 @@ data_dir = "./data"
 ```toml
 # =============================================================================
 # VelesDB Configuration File
-# Version: 6.0.0
+# Version: 7.0.0
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -136,6 +155,8 @@ data_dir = "./data"
 [search]
 # Mode de recherche par défaut
 # Valeurs: "fast" | "balanced" | "accurate" | "perfect"
+# Note: "perfect" as a GLOBAL default is applied as "accurate", with a
+# warning at load -- request Perfect per query, where the cap applies.
 # Default: "balanced"
 default_mode = "balanced"
 
@@ -180,26 +201,13 @@ max_layers = 0
 # Gestion du stockage des données
 # -----------------------------------------------------------------------------
 [storage]
-# Répertoire de données principal
-# Default: "./velesdb_data"
-data_dir = "./velesdb_data"
-
 # Mode de stockage des vecteurs
 # Valeurs: "mmap" | "memory"
 # - mmap: Fichiers mappés en mémoire (recommandé pour grands datasets)
 # - memory: Tout en RAM (plus rapide, limité par RAM disponible)
 # Default: "mmap"
+# Reserved (#2087) — parsed but not yet applied by the engine.
 storage_mode = "mmap"
-
-# Taille maximale du cache mmap en mégaoctets
-# Range: 64 - 65536 (64 GB max)
-# Default: 1024 (1 GB)
-mmap_cache_mb = 1024
-
-# Alignement mémoire pour les vecteurs (octets)
-# Valeurs: 32 | 64 | 128
-# Default: 64 (optimal pour la plupart des CPUs)
-vector_alignment = 64
 
 # -----------------------------------------------------------------------------
 # LIMITS CONFIGURATION
@@ -396,13 +404,11 @@ name kept as they are:
 | `VELESDB_HNSW_EF_CONSTRUCTION` | `hnsw.ef_construction` | `600` |
 | `VELESDB_LIMITS_MAX_COLLECTIONS` | `limits.max_collections` | `50` |
 | `VELESDB_LIMITS_MAX_DIMENSIONS` | `limits.max_dimensions` | `4096` |
-| `VELESDB_STORAGE_DATA_DIR` | `storage.data_dir` | `/var/lib/velesdb` |
 | `VELESDB_STORAGE_STORAGE_MODE` | `storage.storage_mode` | `mmap` |
-| `VELESDB_WAL_BATCH_ENABLED` | `wal_batch.enabled` | `false` |
 | `VELESDB_LOGGING_LEVEL` | `logging.level` | `debug` |
 
-Setting one of these is exactly equivalent to setting its TOML key — so a
-**reserved** key stays reserved when set this way. `VELESDB_SEARCH_MAX_RESULTS`
+Setting one of these is exactly equivalent to setting its TOML key. Most are
+**reserved** and stay reserved when set this way: `VELESDB_SEARCH_MAX_RESULTS`
 is parsed, validated and applied by nothing, just like `[search] max_results`;
 see the note at the top of this guide for what the engine acts on.
 
@@ -504,6 +510,13 @@ SELECT * FROM docs WHERE vector NEAR $v WITH (ef_search = 512);
 
 **Result**: The query uses `ef_search = 512` (runtime override wins).
 
+Within one query, an explicit `ef_search` wins over `mode` (or its alias
+`quality`) on every surface: VelesQL's `WITH`, a REST search body, and the
+REPL, which adds its session setting only to a query that names neither —
+its `\set ef_search` when set, else its `\set mode` (#2274). A session that
+set neither adds no quality, so `[search]` applies wherever the engine honours
+it (see the note under "What the engine actually applies", #2303).
+
 > Any `WITH (ef_search = N)` value is passed through as the requested budget —
 > `N` is sent to HNSW (clamped to at least `k`, and still subject to the
 > standard dataset-size scaling), not snapped to a coarse named profile.
@@ -561,12 +574,15 @@ section — it sizes the candidate pool of one query; nothing here does.
 
 ### Section [storage]
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `data_dir` | string | `"./velesdb_data"` | Data directory |
-| `storage_mode` | string | `"mmap"` | Mode: mmap or memory |
-| `mmap_cache_mb` | int | `1024` | mmap cache in MB |
-| `vector_alignment` | int | `64` | Memory alignment |
+| Key | Type | Default | Description | Applied |
+|-----|------|---------|-------------|---------|
+| `storage_mode` | string | `"mmap"` | Mode: mmap or memory | **no** — reserved (#2087) |
+
+`storage_mode` is a still-open decision (distinct from
+`quantization::StorageMode`) and stays reserved. The section's other three
+fields were removed in 7.0.0 (#2087): none of them had an engine
+counterpart. The data directory is the path passed to `Database::open`, or
+`velesdb-server`'s own `[server] data_dir`.
 
 ### Section [limits]
 
@@ -666,8 +682,7 @@ unaffected.
 default_mode = "fast"  # Latence minimale pour dev
 
 [storage]
-data_dir = "./dev_data"
-storage_mode = "memory"  # Tout en RAM
+storage_mode = "memory"  # Tout en RAM — reserved (#2087), not yet applied
 
 [logging]
 level = "debug"
@@ -685,10 +700,7 @@ m = 48
 ef_construction = 600
 
 [storage]
-data_dir = "/var/lib/velesdb"
-storage_mode = "mmap"
-mmap_cache_mb = 4096
-vector_alignment = 64
+storage_mode = "mmap"  # reserved (#2087), not yet applied
 
 [server]
 host = "0.0.0.0"
@@ -732,7 +744,6 @@ ef_construction = 200
 
 [storage]
 storage_mode = "mmap"
-mmap_cache_mb = 128
 
 [quantization]
 default_type = "binary"  # 32x compression
@@ -748,8 +759,6 @@ max_dimensions = 768
 [server]
 host = "0.0.0.0"  # Écouter sur toutes les interfaces
 port = 8080
-
-[storage]
 data_dir = "/data"  # Volume monté
 
 [logging]
@@ -769,7 +778,7 @@ VelesDB validates the configuration at startup and displays errors clearly:
 ERROR: Configuration validation failed:
   - search.default_mode: invalid value "ultra_fast", expected one of: fast, balanced, accurate, perfect
   - hnsw.m: value 256 exceeds maximum 128
-  - storage.data_dir: directory "/nonexistent" does not exist and cannot be created
+  - limits.max_collections: value 0 is out of range [1, 1000000]
 ```
 
 ### Warnings
@@ -834,7 +843,7 @@ A background thread prunes stale IP entries from the rate limiter map every 60 s
 ### Examples
 
 ```toml
-# Production: 200 req/s per IP
+# Production: a 200 req/s limit per IP
 [server]
 rate_limit = 200
 
@@ -947,4 +956,4 @@ impl VelesConfig {
 
 ---
 
-*VelesDB Documentation — Last updated: 2026-08-08 · Applies to: velesdb-core 6.0.0*
+*VelesDB Documentation — Last updated: 2026-08-08 · Applies to: velesdb-core 7.0.0*

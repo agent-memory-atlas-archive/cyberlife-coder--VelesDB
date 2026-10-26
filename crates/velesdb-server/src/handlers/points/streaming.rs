@@ -118,7 +118,10 @@ async fn flush_point_batch_with_delta(
 
 /// Stream upsert points using NDJSON.
 ///
-/// Accepts a `application/x-ndjson` body. Each line is a JSON-encoded [`Point`].
+/// Accepts a `application/x-ndjson` body. Each line is one JSON-encoded point,
+/// whose `id` is an unsigned 64-bit integer: a line that is not blank and does
+/// not parse as one, a string `id` included, is counted in the response's
+/// `malformed` field.
 /// Points are accumulated into micro-batches and flushed via `upsert_bulk`.
 ///
 /// The response body includes a `network_errors` field: a non-zero value means
@@ -252,7 +255,8 @@ fn should_flush(batch: &[Point], last_flush: Instant) -> bool {
         (status = 429, description = "Streaming buffer full — retry after 1 second", body = ErrorResponse),
         (status = 503, description = "Streaming drain task has exited — collection must be reconfigured", body = ErrorResponse),
         (status = 404, description = "Collection not found", body = ErrorResponse),
-        (status = 409, description = "Streaming not configured", body = ErrorResponse)
+        (status = 409, description = "Streaming not configured", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn stream_insert(
@@ -346,7 +350,8 @@ fn stream_insert_result_to_response(
     request_body = EnableStreamingRequest,
     responses(
         (status = 200, description = "Streaming enabled", body = Object),
-        (status = 404, description = "Collection not found", body = ErrorResponse)
+        (status = 404, description = "Collection not found", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn enable_streaming(

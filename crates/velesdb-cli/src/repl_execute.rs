@@ -36,8 +36,8 @@ pub fn execute_query(
         return Err(param_vector_unsupported_error());
     }
 
-    // Apply REPL session settings (mode/ef_search into the AST WITH-options,
-    // max_results as a LIMIT cap). Inline overrides always win.
+    // Apply REPL session settings (the session's search quality into the AST
+    // WITH-options, max_results as a LIMIT cap). Inline overrides always win.
     if let Some(session) = session {
         apply_session_settings(&mut parsed, session);
     }
@@ -54,9 +54,10 @@ pub fn execute_query(
 
 /// Applies REPL session settings to a parsed query before execution.
 ///
-/// `mode` and an explicit `ef_search` are injected into the SELECT `WITH`
-/// options (only when not already present — an inline `WITH(...)` always wins),
-/// and `max_results` caps the effective `LIMIT`. Match/aggregate queries are not
+/// The session's search quality (its `ef_search` when set, else its `mode`
+/// when set) goes into the SELECT `WITH` options of a query that names none of its own
+/// (an inline `mode`, `quality` or `ef_search` always wins), and
+/// `max_results` caps the effective `LIMIT`. Match/aggregate queries are not
 /// touched (those clauses only steer the vector-search pipeline).
 pub fn apply_session_settings(
     parsed: &mut velesdb_core::velesql::Query,
@@ -69,29 +70,47 @@ pub fn apply_session_settings(
     cap_limit_to_max_results(&mut parsed.select, session.max_results());
 }
 
-/// Injects the session `mode`/`ef_search` into the SELECT `WITH` options,
-/// preserving any inline override (inline wins).
+/// Injects the session's search quality into the SELECT `WITH` options of a
+/// query that names none of its own. An inline `mode`, `quality` or
+/// `ef_search` of any value is the query's own, so the session adds nothing
+/// next to it, and one the validator refuses still fails the query instead
+/// of running at the session's (#2267, #2274). Otherwise the session adds
+/// the one setting it holds: its `ef_search` when set (`\set mode` resets
+/// it), else its `mode` when set. No query the REPL rewrites carries both, so
+/// none depends on which of the two wins. A session that set neither adds no
+/// quality, so the configured default applies wherever the engine honours it
+/// (the `[search]` of the `--config`/`VELESDB_CONFIG` file, else of
+/// `./velesdb.toml` when it exists, #2400; see #2430), as the configuration
+/// priority order says (#2303).
 fn inject_session_with_options(
     select: &mut velesdb_core::velesql::SelectStatement,
     session: &SessionSettings,
 ) {
-    use velesdb_core::velesql::{WithClause, WithValue};
+    use velesdb_core::velesql::{WithClause, WithOption, WithValue};
 
-    let with = select.with_clause.get_or_insert_with(WithClause::new);
-    if with.get_mode().is_none() {
-        with.options.push(velesdb_core::velesql::WithOption {
-            key: "mode".to_string(),
-            value: WithValue::String(session.mode_str()),
+    let names_its_own = select
+        .with_clause
+        .as_ref()
+        .is_some_and(|with| with.mode_value().is_some() || with.ef_search_value().is_some());
+    if names_its_own {
+        return;
+    }
+    let (key, value) = match (session.ef_search(), session.mode_str()) {
+        (Some(ef), _) => (
+            "ef_search",
+            WithValue::Integer(i64::try_from(ef).unwrap_or(i64::MAX)),
+        ),
+        (None, Some(mode)) => ("mode", WithValue::String(mode)),
+        (None, None) => return,
+    };
+    select
+        .with_clause
+        .get_or_insert_with(WithClause::new)
+        .options
+        .push(WithOption {
+            key: key.to_string(),
+            value,
         });
-    }
-    if let Some(ef) = session.ef_search() {
-        if with.get_ef_search().is_none() {
-            with.options.push(velesdb_core::velesql::WithOption {
-                key: "ef_search".to_string(),
-                value: WithValue::Integer(i64::try_from(ef).unwrap_or(i64::MAX)),
-            });
-        }
-    }
 }
 
 /// Caps the effective `LIMIT` at the session `max_results`: a missing `LIMIT`

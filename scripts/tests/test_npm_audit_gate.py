@@ -1,0 +1,523 @@
+"""Behavioral contract for the npm advisories gate.
+
+The gate exists because `npm audit` exits 1 for two unrelated events — an
+advisory in the lockfile, and an advisory endpoint that never answered. During
+the npmjs.org outage of 2026-09-03 the `npm advisories` job went red three
+times on `develop` with the second event while reporting the first.
+
+Every test here fails on the claim it names, not on an exception raised on the
+way to it.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "npm-audit-gate.py"
+WORKFLOW = ROOT / ".github" / "workflows" / "gate-contracts.yml"
+
+EXIT_CLEAN = 0
+EXIT_ADVISORY = 1
+EXIT_UNREACHABLE = 75
+EXIT_USAGE = 2  # argparse's own usage-error exit
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("npm_audit_gate", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+gate = _load_module()
+
+
+def _npm_audit_job() -> str:
+    """The `npm-audit:` block of gate-contracts.yml, up to the next sibling job.
+
+    Sliced on a line starting with exactly two spaces then a non-space — a
+    plain `"\\n  "` search also matches the job's own deeper-indented keys and
+    would return an empty block that trivially satisfies every assertion here.
+    """
+    workflow = WORKFLOW.read_text()
+    job = workflow[workflow.index("  npm-audit:") :]
+    following = re.search(r"\n  (?=\S)", job[1:])
+    return job[: following.start() + 1] if following else job
+
+
+def _report(**counts: int) -> str:
+    """A completed audit report carrying the given per-severity counts."""
+    severities = {name: 0 for name in gate.SEVERITIES}
+    severities.update(counts)
+    severities["total"] = sum(severities.values())
+    return json.dumps({"auditReportVersion": 2, "vulnerabilities": {}, "metadata": {"vulnerabilities": severities}})
+
+
+# npm's real payload when the advisory endpoint refuses the connection,
+# captured verbatim from `npm audit --json` against an unreachable registry.
+UNREACHABLE_PAYLOAD = json.dumps(
+    {
+        "message": (
+            "request to http://127.0.0.1:9/-/npm/v1/security/audits/quick failed, "
+            "reason: connect ECONNREFUSED 127.0.0.1:9"
+        ),
+        "error": {"summary": "", "detail": ""},
+    }
+)
+
+
+def _fake_npm(directory: Path, *, stdout: str, exit_code: int = 1, stderr: str = "") -> Path:
+    """An npm double that prints a fixed payload. Exits 1 like the real one does
+    for BOTH events, so nothing here can pass by reading the exit code."""
+    path = directory / "fake-npm"
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import sys
+            sys.stdout.write({stdout!r})
+            sys.stderr.write({stderr!r})
+            raise SystemExit({exit_code})
+            """
+        )
+    )
+    path.chmod(0o755)
+    return path
+
+
+def _run(npm: Path, root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--root",
+            str(root),
+            "--npm",
+            str(npm),
+            "--backoff-seconds",
+            "0",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _matrix_paths() -> "list[str]":
+    """The `path:` entries of the npm-audit matrix, in declaration order."""
+    job = _npm_audit_job()
+    marker = "\n        path:\n"
+    matrix = job[job.index(marker) + len(marker) :]
+    paths = []
+    for line in matrix.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            break
+        paths.append(stripped[2:].strip())
+    return paths
+
+
+def _tracked_lockfile_roots() -> "set[str]":
+    """Directories holding a git-TRACKED package-lock.json, matrix-style.
+
+    Tracked rather than on-disk: an untracked lockfile under `node_modules/`
+    or left by a local install is not something CI can audit, and sweeping the
+    working tree would make this test depend on whoever ran `npm install`
+    last. The repository root is spelled `.`, as the matrix spells it.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "package-lock.json", "*/package-lock.json", "**/package-lock.json"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    return {str(Path(p).parent) for p in out}
+
+
+class ClassifyTests(unittest.TestCase):
+    def test_a_completed_report_yields_its_counts(self) -> None:
+        counts = gate.classify(_report(high=2, low=1))
+        self.assertEqual(2, counts["high"])
+        self.assertEqual(1, counts["low"])
+        self.assertEqual(0, counts["critical"])
+
+    def test_npms_transport_payload_is_not_a_verdict(self) -> None:
+        """The regression itself: this payload must never read as "0 vulnerabilities"
+        NOR as "vulnerabilities found" — it is not a verdict at all."""
+        with self.assertRaises(gate.Unreachable):
+            gate.classify(UNREACHABLE_PAYLOAD)
+
+    def test_unparseable_output_is_not_a_verdict(self) -> None:
+        with self.assertRaises(gate.Unreachable):
+            gate.classify("npm error code E503\n")
+
+    def test_empty_output_is_not_a_verdict(self) -> None:
+        with self.assertRaises(gate.Unreachable):
+            gate.classify("")
+
+    def test_a_report_without_metadata_is_not_a_verdict(self) -> None:
+        with self.assertRaises(gate.Unreachable):
+            gate.classify(json.dumps({"auditReportVersion": 2, "vulnerabilities": {}}))
+
+
+    def test_a_non_numeric_count_is_not_a_verdict(self) -> None:
+        """A count npm did not write as a number makes a report nobody can read.
+        It takes the `Unreachable` path; before, `int()` raised ValueError or
+        TypeError out of `classify`, and `main` reported the one as an advisory
+        and died on the other with a traceback."""
+        for count in ("many", [1], {"n": 1}):
+            with self.subTest(count=count), self.assertRaises(gate.Unreachable):
+                gate.classify(json.dumps({"metadata": {"vulnerabilities": {"high": count}}}))
+
+    def test_an_infinite_count_is_not_a_verdict(self) -> None:
+        """`1e999` and `Infinity` parse to a float `int()` cannot hold: the
+        OverflowError escaped `classify` as a traceback, exit 1."""
+        for count in ("1e999", "Infinity"):
+            report = '{"metadata": {"vulnerabilities": {"high": %s}}}' % count
+            with self.subTest(count=count), self.assertRaises(gate.Unreachable):
+                gate.classify(report)
+
+
+class SeverityLadderTests(unittest.TestCase):
+    def test_high_covers_high_and_critical_only(self) -> None:
+        self.assertEqual(["high", "critical"], gate.severities_at_or_above("high"))
+
+    def test_the_ladder_is_ordered_weakest_first(self) -> None:
+        self.assertEqual(
+            ["info", "low", "moderate", "high", "critical"], gate.SEVERITIES
+        )
+
+    def test_an_unknown_level_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            gate.severities_at_or_above("severe")
+
+
+class RetryTests(unittest.TestCase):
+    def test_a_verdict_is_not_retried(self) -> None:
+        """An advisory is a stable fact about the lockfile. Retrying it would
+        burn the backoff on every real finding."""
+        calls: list[int] = []
+
+        def run(npm, root, timeout):  # noqa: ANN001 - test double
+            calls.append(1)
+            return _report(high=1)
+
+        original = gate.run_audit
+        gate.run_audit = run
+        try:
+            counts = gate.audit_with_retries("npm", Path("."), 4, 0, sleep=lambda _: None)
+        finally:
+            gate.run_audit = original
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, counts["high"])
+
+    def test_a_transport_failure_is_retried_up_to_the_attempt_budget(self) -> None:
+        calls: list[int] = []
+
+        def run(npm, root, timeout):  # noqa: ANN001 - test double
+            calls.append(1)
+            return UNREACHABLE_PAYLOAD
+
+        original = gate.run_audit
+        gate.run_audit = run
+        try:
+            with self.assertRaises(gate.Unreachable):
+                gate.audit_with_retries("npm", Path("."), 4, 0, sleep=lambda _: None)
+        finally:
+            gate.run_audit = original
+        self.assertEqual(4, len(calls))
+
+    def test_a_recovered_endpoint_yields_its_verdict(self) -> None:
+        """The outage case that retrying is FOR: the first attempt 503s, the
+        second answers. The job must go green, not red."""
+        payloads = [UNREACHABLE_PAYLOAD, _report()]
+
+        def run(npm, root, timeout):  # noqa: ANN001 - test double
+            return payloads.pop(0)
+
+        original = gate.run_audit
+        gate.run_audit = run
+        try:
+            counts = gate.audit_with_retries("npm", Path("."), 4, 0, sleep=lambda _: None)
+        finally:
+            gate.run_audit = original
+        self.assertEqual(0, counts["high"])
+        self.assertEqual([], payloads)
+
+    def test_the_backoff_doubles_between_attempts(self) -> None:
+        delays: list[float] = []
+
+        original = gate.run_audit
+        gate.run_audit = lambda npm, root, timeout: UNREACHABLE_PAYLOAD
+        try:
+            with self.assertRaises(gate.Unreachable):
+                gate.audit_with_retries("npm", Path("."), 4, 5, sleep=delays.append)
+        finally:
+            gate.run_audit = original
+        self.assertEqual([5, 10, 20], delays)
+
+    def test_the_backoff_never_sleeps_past_the_duration_cap(self) -> None:
+        """The cap `--backoff-seconds` enforces bounds every sleep, not only
+        the first: doubling a legal backoff must stay a legal duration."""
+        delays: list[float] = []
+        half = gate.MAX_SECONDS / 2
+
+        original = gate.run_audit
+        gate.run_audit = lambda npm, root, timeout: UNREACHABLE_PAYLOAD
+        try:
+            with self.assertRaises(gate.Unreachable):
+                gate.audit_with_retries("npm", Path("."), 4, half, sleep=delays.append)
+        finally:
+            gate.run_audit = original
+        self.assertEqual([half, gate.MAX_SECONDS, gate.MAX_SECONDS], delays)
+
+    def test_a_backoff_above_the_cap_sleeps_the_cap(self) -> None:
+        """The CLI refuses such a backoff, but a direct caller can pass one;
+        its first sleep is bounded like every later one."""
+        delays: list[float] = []
+
+        original = gate.run_audit
+        gate.run_audit = lambda npm, root, timeout: UNREACHABLE_PAYLOAD
+        try:
+            with self.assertRaises(gate.Unreachable):
+                gate.audit_with_retries(
+                    "npm", Path("."), 3, gate.MAX_SECONDS * 5, sleep=delays.append
+                )
+        finally:
+            gate.run_audit = original
+        self.assertEqual([gate.MAX_SECONDS, gate.MAX_SECONDS], delays)
+
+    def test_a_non_finite_or_negative_backoff_is_refused_before_any_attempt(self) -> None:
+        """`min` keeps a NaN or a negative delay, and `time.sleep` raises
+        ValueError on either; `inf` would be capped to a day, not refused. The
+        function refuses all three the way the CLI does, before running npm."""
+        calls: list[str] = []
+        original = gate.run_audit
+        gate.run_audit = lambda npm, root, timeout: calls.append(npm) or UNREACHABLE_PAYLOAD
+        try:
+            for bad in (float("nan"), float("inf"), -1.0):
+                with self.assertRaises(ValueError):
+                    gate.audit_with_retries("npm", Path("."), 3, bad, sleep=lambda _: None)
+        finally:
+            gate.run_audit = original
+        self.assertEqual([], calls)
+
+
+class ExitCodeTests(unittest.TestCase):
+    def test_a_clean_lockfile_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(), exit_code=0)
+            result = _run(npm, root)
+        self.assertEqual(EXIT_CLEAN, result.returncode, result.stderr)
+
+    def test_a_high_advisory_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(high=1))
+            result = _run(npm, root)
+        self.assertEqual(EXIT_ADVISORY, result.returncode, result.stderr)
+        self.assertIn("1 high", result.stderr)
+
+    def test_a_moderate_advisory_passes_at_the_high_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(moderate=3))
+            result = _run(npm, root)
+        self.assertEqual(EXIT_CLEAN, result.returncode, result.stderr)
+
+    def test_a_moderate_advisory_refuses_at_the_moderate_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(moderate=3))
+            result = _run(npm, root, "--audit-level", "moderate")
+        self.assertEqual(EXIT_ADVISORY, result.returncode, result.stderr)
+
+    def test_a_malformed_count_is_infrastructure_not_an_advisory(self) -> None:
+        """The exit-code half of the test above: an unreadable report is the
+        infrastructure exit, never the one that means "vulnerable"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = json.dumps({"metadata": {"vulnerabilities": {"high": "many"}}})
+            npm = _fake_npm(root, stdout=report)
+            result = _run(npm, root, "--attempts", "1")
+        self.assertEqual(EXIT_UNREACHABLE, result.returncode, result.stderr)
+
+    def test_a_zero_attempt_budget_is_a_usage_error_not_an_advisory(self) -> None:
+        """`--attempts 0` audits nothing. That is the caller's mistake, and
+        argparse's usage exit says so; the advisory exit claimed a vulnerability."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(), exit_code=0)
+            result = _run(npm, root, "--attempts", "0")
+        self.assertEqual(EXIT_USAGE, result.returncode, result.stderr)
+
+    def test_a_negative_backoff_is_a_usage_error_not_an_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(), exit_code=0)
+            result = _run(npm, root, "--backoff-seconds", "-1")
+        self.assertEqual(EXIT_USAGE, result.returncode, result.stderr)
+
+    def test_a_duration_the_clock_cannot_hold_is_a_usage_error_not_an_advisory(self) -> None:
+        """`nan`, `inf` and `1e10` passed the range check and could reach
+        `time.sleep` or `subprocess.run`, which raise on them: a traceback,
+        exit 1. argparse refuses them now, before any npm run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=_report(), exit_code=0)
+            for flag in ("--backoff-seconds", "--attempt-timeout"):
+                for value in ("nan", "inf", "1e10"):
+                    with self.subTest(flag=flag, value=value):
+                        result = _run(npm, root, flag, value)
+                        self.assertEqual(EXIT_USAGE, result.returncode, result.stderr)
+
+    def test_an_npm_that_will_not_run_is_infrastructure_not_an_advisory(self) -> None:
+        """A missing binary raised FileNotFoundError out of `main`: exit 1,
+        the code that means "vulnerable"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = _run(root / "no-such-npm", root, "--attempts", "1")
+        self.assertEqual(EXIT_UNREACHABLE, result.returncode, result.stderr)
+
+    def test_an_unreachable_registry_is_not_reported_as_an_advisory(self) -> None:
+        """The whole point. Same npm exit code as an advisory, different verdict,
+        different exit code, and a message that says which one happened."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=UNREACHABLE_PAYLOAD)
+            result = _run(npm, root, "--attempts", "2")
+        self.assertEqual(EXIT_UNREACHABLE, result.returncode, result.stderr)
+        self.assertNotEqual(EXIT_ADVISORY, result.returncode)
+        self.assertIn("NOT a vulnerability finding", result.stderr)
+
+    def test_an_unreachable_registry_never_passes_silently(self) -> None:
+        """Failing closed is the other half of the contract: an unaudited
+        lockfile is not an audited one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = _fake_npm(root, stdout=UNREACHABLE_PAYLOAD)
+            result = _run(npm, root, "--attempts", "1")
+        self.assertNotEqual(EXIT_CLEAN, result.returncode, result.stdout)
+
+
+class AttemptTimeoutTests(unittest.TestCase):
+    """A hung attempt must be indistinguishable from a refused one.
+
+    The outage's dominant failure was not a fast 503: the endpoint accepted the
+    connection and hung for five minutes per call. Without a per-attempt bound
+    the retry budget multiplies that instead of containing it.
+    """
+
+    HANG_SECONDS = 30
+    PATIENCE_SECONDS = 10  # generously above the 1s timeout, far below the hang
+
+    def _hanging_npm(self, directory: Path) -> Path:
+        npm = directory / "hanging-npm"
+        npm.write_text(
+            f"#!/usr/bin/env python3\nimport time\ntime.sleep({self.HANG_SECONDS})\n"
+        )
+        npm.chmod(0o755)
+        return npm
+
+    def test_a_hung_npm_is_cut_off_and_treated_as_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = self._hanging_npm(root)
+            started = time.monotonic()
+            with self.assertRaises(gate.Unreachable):
+                gate.run_audit(str(npm), root, timeout=1.0)
+            elapsed = time.monotonic() - started
+        # Without the bound the call waits out the full hang: the elapsed
+        # assertion is what makes a dropped `timeout=` fail rather than pass slowly.
+        self.assertLess(elapsed, self.PATIENCE_SECONDS)
+
+    def test_the_gate_exits_unreachable_rather_than_hanging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npm = self._hanging_npm(root)
+            started = time.monotonic()
+            result = _run(npm, root, "--attempts", "2", "--attempt-timeout", "1")
+            elapsed = time.monotonic() - started
+        self.assertEqual(EXIT_UNREACHABLE, result.returncode, result.stderr)
+        self.assertLess(elapsed, self.PATIENCE_SECONDS)
+
+    def test_the_attempt_timeout_reaches_the_subprocess(self) -> None:
+        """`attempt_timeout` sits before `sleep` in the signature, so a
+        positional double would silently swallow it."""
+        seen: list[float] = []
+
+        def run(npm, root, timeout):  # noqa: ANN001 - test double
+            seen.append(timeout)
+            return _report()
+
+        original = gate.run_audit
+        gate.run_audit = run
+        try:
+            gate.audit_with_retries("npm", Path("."), 4, 0, 42.0, sleep=lambda _: None)
+        finally:
+            gate.run_audit = original
+        self.assertEqual([42.0], seen)
+
+
+class WiringTests(unittest.TestCase):
+    def test_the_workflow_calls_the_gate_rather_than_npm_audit_directly(self) -> None:
+        """A bare `npm audit` in the job is the defect this gate replaces; if one
+        comes back, the classification is bypassed and nothing here would notice."""
+        job = _npm_audit_job()
+        self.assertIn("scripts/npm-audit-gate.py", job)
+        self.assertNotIn("run: npm audit", job)
+
+    def test_every_audited_path_in_the_matrix_exists(self) -> None:
+        paths = _matrix_paths()
+        self.assertTrue(paths, "the audit matrix is empty -- the gate audits nothing")
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(
+                    (ROOT / path / "package-lock.json").is_file(),
+                    f"{path} is audited by the matrix but has no package-lock.json",
+                )
+
+    def test_every_tracked_lockfile_is_audited(self) -> None:
+        """The other direction, which is the one that was missing.
+
+        `test_every_audited_path_in_the_matrix_exists` proved each matrix entry
+        was real; nothing proved the matrix was complete. It held four of the
+        eight tracked lockfiles, and the four it omitted were audited by
+        nothing. That is not hypothetical: GHSA-2883-xcg3-v3hh (js-yaml, high)
+        was published against `crates/velesdb-node` on 2026-09-09 and reached
+        the default branch, found by Dependabot rather than by this gate.
+
+        A count is deliberately not asserted -- a hard-coded 8 would pass the
+        day someone adds a ninth lockfile and forgets the matrix. The set is
+        compared to what git tracks.
+        """
+        tracked = _tracked_lockfile_roots()
+        self.assertTrue(
+            tracked,
+            "git tracks no package-lock.json at all: the pathspec stopped matching, "
+            "and an empty set would make the difference below empty and this test "
+            "green while nothing is audited (#2246, P2-c)",
+        )
+        unaudited = sorted(tracked - set(_matrix_paths()))
+        self.assertEqual(
+            unaudited,
+            [],
+            "package-lock.json tracked but absent from the npm-audit matrix in "
+            f"gate-contracts.yml, so no job audits it: {unaudited}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

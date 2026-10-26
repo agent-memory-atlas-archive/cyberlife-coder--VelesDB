@@ -405,7 +405,8 @@ pub async fn get_guardrails(State(state): State<Arc<AppState>>) -> impl IntoResp
     tag = "guardrails",
     request_body = GuardRailsConfigRequest,
     responses(
-        (status = 200, description = "Updated guard-rails config", body = GuardRailsConfigResponse)
+        (status = 200, description = "Updated guard-rails config", body = GuardRailsConfigResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn update_guardrails(

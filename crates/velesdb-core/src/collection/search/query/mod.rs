@@ -272,7 +272,7 @@ impl Collection {
     ) -> Result<Vec<SearchResult>> {
         let stmt = &query.select;
         let (limit, fetch_limit) = Self::compute_fetch_limit(stmt);
-        let extracted = self.extract_query_components(stmt, params)?;
+        let extracted = Self::extract_query_components(stmt, params)?;
 
         // EPIC-081 phase 2: serve a plain `ORDER BY <indexed_field> LIMIT k` from
         // the field's ordered secondary index instead of the exhaustive
@@ -317,7 +317,7 @@ impl Collection {
     /// Runs the main dispatch, optional vector GROUP BY, and finalization
     /// (DISTINCT / window / ORDER BY / OFFSET / LIMIT / LET injection).
     ///
-    /// Split out of [`execute_select_pipeline`] so each stays within the
+    /// Split out of [`Self::execute_select_pipeline`] so each stays within the
     /// cyclomatic-complexity budget.
     fn dispatch_and_finalize(
         &self,

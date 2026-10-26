@@ -4,7 +4,6 @@ use super::resolve;
 use crate::collection::types::Collection;
 use crate::distance::DistanceMetric;
 use crate::error::{Error, Result};
-use crate::index::VectorIndex;
 use crate::point::SearchResult;
 use crate::quantization::{
     distance_pq_l2, pq_adc_batch_rescore, PQVector, ProductQuantizer, StorageMode,
@@ -38,7 +37,12 @@ pub(super) fn tag_vector_component_scores(results: &mut [SearchResult]) {
 }
 
 impl Collection {
-    fn search_ids_with_adc_if_pq(&self, query: &[f32], k: usize) -> Vec<ScoredResult> {
+    fn search_ids_with_adc_if_pq(
+        &self,
+        query: &[f32],
+        k: usize,
+        quality: crate::SearchQuality,
+    ) -> Result<Vec<ScoredResult>> {
         let config = self.storage.config.read();
         let is_pq = matches!(config.storage_mode, StorageMode::ProductQuantization);
         let higher_is_better = config.metric.higher_is_better();
@@ -48,16 +52,24 @@ impl Collection {
         let oversampling = config.pq_rescore_oversampling.unwrap_or(0) as usize;
         drop(config);
 
+        // `search_with_quality` rather than `search`: the latter hard-codes
+        // `SearchQuality::Balanced`, which is exactly the built-in default this
+        // path now takes from the config instead. Its errors are returned: an
+        // error read as an empty answer is the one failure a caller cannot tell
+        // from a correct result, and every caller here returns a `Result`.
         if !is_pq || oversampling == 0 {
-            let results = self.storage.index.search(query, k);
-            return self.merge_delta(results, query, k, metric);
+            let results = self.storage.index.search_with_quality(query, k, quality)?;
+            return Ok(self.merge_delta(results, query, k, metric));
         }
 
         let candidates_k = k.saturating_mul(oversampling).max(k + 32);
-        let index_results = self.storage.index.search(query, candidates_k);
+        let index_results = self
+            .storage
+            .index
+            .search_with_quality(query, candidates_k, quality)?;
         let rescored =
             self.rescore_pq_candidates(query, k, metric, higher_is_better, index_results);
-        self.merge_delta(rescored, query, k, metric)
+        Ok(self.merge_delta(rescored, query, k, metric))
     }
 
     /// Rescores PQ candidates using the product quantizer cache.
@@ -327,7 +339,8 @@ impl Collection {
         crate::validation::validate_vector_is_finite(query)?;
 
         // Use HNSW index for fast ANN search
-        let index_results = self.search_ids_with_adc_if_pq(query, k);
+        let index_results =
+            self.search_ids_with_adc_if_pq(query, k, self.runtime_search_quality())?;
 
         let vector_storage = self.storage.vector_storage.read();
         let payload_storage = self.storage.payload_storage.read();
@@ -396,12 +409,15 @@ impl Collection {
 
     /// Performs vector similarity search with a specific [`SearchQuality`] profile.
     ///
-    /// Use this instead of [`search_with_ef`] for named quality modes like
+    /// Use this instead of [`Self::search_with_ef`] for named quality modes like
     /// [`SearchQuality::AutoTune`] that compute ef dynamically.
     ///
     /// # Errors
     ///
     /// Returns an error if the query vector dimension doesn't match the collection.
+    ///
+    /// [`SearchQuality`]: crate::SearchQuality
+    /// [`SearchQuality::AutoTune`]: crate::SearchQuality::AutoTune
     pub fn search_with_quality(
         &self,
         query: &[f32],
@@ -417,7 +433,9 @@ impl Collection {
 
     /// Routes vector search through `QuerySearchOptions` from a WITH clause.
     ///
-    /// Priority: `quality` (from `mode`) > `ef_search` > default `search()`.
+    /// Priority: an explicit `ef_search` > `quality` (from `mode`) > default
+    /// `search()`, through `QuerySearchOptions::resolved_quality`, whose
+    /// fallback is the collection's runtime quality.
     /// When `force_rerank` is `Some(true)`, applies explicit SIMD reranking
     /// regardless of quality mode. When `Some(false)`, suppresses automatic
     /// reranking even if the quality mode would enable it.
@@ -436,13 +454,7 @@ impl Collection {
             return self.search(query, k);
         }
 
-        // Resolve the search quality: explicit mode > exact ef_search > default.
-        let quality = opts.quality.unwrap_or_else(|| {
-            opts.ef_search.map_or(
-                crate::SearchQuality::Balanced,
-                super::vector_filter::ef_to_quality,
-            )
-        });
+        let quality = opts.resolved_quality(self.runtime_search_quality());
 
         // Parity item E: gate Perfect-mode over-cap once here, covering the
         // forced-rerank / no-rerank branches that bypass `search_with_quality`.
@@ -496,7 +508,7 @@ impl Collection {
 
     /// Performs fast vector similarity search returning only IDs and scores.
     ///
-    /// Perf: This is ~3-5x faster than `search()` because it skips vector/payload retrieval.
+    /// Perf: faster than `search()` because it skips vector/payload retrieval.
     /// Use this when you only need IDs and scores, not full point data.
     ///
     /// # Arguments
@@ -519,8 +531,7 @@ impl Collection {
         let _metric = self.validate_query_and_read_metric(query)?;
 
         // Perf: Direct HNSW search without vector/payload retrieval
-        let results = self.search_ids_with_adc_if_pq(query, k);
-        Ok(results)
+        self.search_ids_with_adc_if_pq(query, k, self.runtime_search_quality())
     }
 
     /// Searches for the k nearest neighbors with metadata filtering.
@@ -576,7 +587,7 @@ impl Collection {
 
         // Attempt bitmap pre-filter from secondary indexes.
         let index_results =
-            self.search_with_optional_bitmap(query, k, candidates_k, filter, metric, opts);
+            self.search_with_optional_bitmap(query, k, candidates_k, filter, metric, opts)?;
 
         Ok(self.filter_and_hydrate(index_results, filter, k, higher_is_better))
     }
@@ -590,7 +601,7 @@ impl Collection {
         filter: &crate::filter::Filter,
         metric: DistanceMetric,
         opts: Option<&crate::collection::search::query::QuerySearchOptions>,
-    ) -> Vec<ScoredResult> {
+    ) -> Result<Vec<ScoredResult>> {
         if let Some(bitmap) = self.build_prefilter_bitmap(filter) {
             if let Some(opts) = opts {
                 opts.record_executed_strategy(crate::velesql::FilterStrategy::PreFilter);
@@ -602,12 +613,17 @@ impl Collection {
                 ef_search,
                 &bitmap,
             );
-            return self.merge_delta(results, query, candidates_k, metric);
+            return Ok(self.merge_delta(results, query, candidates_k, metric));
         }
         if let Some(opts) = opts {
             opts.record_executed_strategy(crate::velesql::FilterStrategy::PostFilter);
         }
-        self.search_ids_with_adc_if_pq(query, candidates_k)
+        // The configured default, not `opts.quality`: this fallback has never
+        // honoured a per-query quality -- the pre-filter branch above computes
+        // its own `ef` in the same way -- and this change does not start. With
+        // a default config it resolves to `Balanced`, exactly what the previous
+        // `index.search` hard-coded.
+        self.search_ids_with_adc_if_pq(query, candidates_k, self.runtime_search_quality())
     }
 }
 

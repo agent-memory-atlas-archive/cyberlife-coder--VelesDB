@@ -36,9 +36,6 @@ const MAX_PERFECT_MODE_VECTORS_CAP: usize = 100_000_000;
 const QUERY_TIMEOUT_MS_CAP: u64 = 86_400_000;
 /// Hard ceiling for `hnsw.max_layers`. `0` means "auto".
 const MAX_LAYERS_CAP: usize = 64;
-/// Hard ceiling for `storage.mmap_cache_mb` (1 TiB). `0` is rejected: a
-/// zero-byte mmap cache is never a meaningful configuration.
-const MMAP_CACHE_MB_CAP: usize = 1_048_576;
 /// Hard ceiling for `server.workers`. `0` means "auto" (derive from CPU
 /// count), so it is allowed; any positive value is capped to a sane ceiling.
 const WORKERS_CAP: usize = 4_096;
@@ -84,23 +81,28 @@ impl VelesConfig {
         self.validate_server()?;
         self.validate_storage()?;
         self.validate_logging()?;
-        self.warn_inert_wal_batch();
         self.warn_inert_engine_sections();
+        self.warn_perfect_global_default();
         Ok(())
     }
 
-    /// The `[search]`, `[storage]` and `[quantization]` sections are parsed
-    /// and validated but not yet applied (issue #2087). Warn — rather than
-    /// reject — when a config sets any of them away from its defaults, so
-    /// existing files keep loading while no deployment silently believes
-    /// those knobs work.
+    /// `storage.storage_mode` and `[search]`'s `max_results` /
+    /// `query_timeout_ms` are parsed and validated but not applied (issue
+    /// #2087); `[search]`'s `default_mode` and `ef_search` are applied since.
+    /// Warn — rather than reject — when a config sets an inert entry away from
+    /// its default, so existing files keep loading while no deployment
+    /// silently believes those knobs work.
     ///
     /// `[hnsw]` is no longer listed wholesale: `m` and `ef_construction` are
     /// applied at collection creation. Only `max_layers` remains inert — the
     /// layer count is drawn per node by the level generator and no engine
-    /// path caps it — so the warning narrows to that single field. Reporting
-    /// the field rather than the section is the point: a warning that fires
-    /// on knobs that now work would train readers to ignore it.
+    /// path caps it — so the warning narrows to that single field. `[storage]`
+    /// is narrowed the same way: `storage_mode` is its only field since
+    /// 7.0.0 removed the three that had no engine counterpart (#2087), and
+    /// it stays reported here pending its own decision. Reporting the field
+    /// rather than the section is the point: a warning that fires on knobs
+    /// that now work, or that are leaving rather than pending, would train
+    /// readers to ignore it.
     ///
     /// Serde-value comparison instead of `PartialEq` derives: the sections
     /// carry enums and nested types, and this runs once per config load.
@@ -116,6 +118,31 @@ impl VelesConfig {
                  applied by the engine; see issue #2087. [limits] and \
                  [hnsw]'s m / ef_construction are applied. Query-time \
                  WITH (...) overrides are unaffected."
+            );
+        }
+    }
+
+    /// `search.default_mode = "perfect"` is accepted, applied as `accurate` by
+    /// `SearchConfig::resolved_quality`, and said so here.
+    ///
+    /// It was refused outright until the seven-lens review (#2246): a file
+    /// v6.0.0 loaded then failed `Database::open` -- a breaking change in a
+    /// minor release, against this module's own rule that existing files keep
+    /// loading. The default still never resolves to `Perfect`: a filtered
+    /// search's bitmap pre-filter never reads the configured quality — it
+    /// traverses the graph at its own ef — so a `perfect` default would be an
+    /// exhaustive scan on some queries and a graph search on others, with
+    /// nothing saying which. (It used to be argued that one path could not
+    /// refuse; since #2246 every path returns its error, and this is what
+    /// remains.) Per query, `search_with_quality(Perfect)` stays available and
+    /// capped.
+    fn warn_perfect_global_default(&self) {
+        if matches!(self.search.default_mode, crate::config::SearchMode::Perfect) {
+            tracing::warn!(
+                "search.default_mode = \"perfect\" is applied as \"accurate\": a \
+                 filtered search's pre-filter never reads the configured quality, \
+                 so a global exhaustive scan would apply to some queries and not \
+                 others. Request Perfect per query, where it is exact and capped."
             );
         }
     }
@@ -137,17 +164,22 @@ impl VelesConfig {
         }
 
         let mut inert: Vec<&'static str> = Vec::new();
-        if deviates(&self.search, &crate::config::SearchConfig::default()) {
-            inert.push("[search]");
+        // Field by field since #2087 wired `default_mode` and `ef_search`:
+        // reporting the whole section would fire on knobs that now work, which
+        // is how a warning trains its readers to ignore it.
+        let search_default = crate::config::SearchConfig::default();
+        if self.search.max_results != search_default.max_results {
+            inert.push("search.max_results");
+        }
+        if self.search.query_timeout_ms != search_default.query_timeout_ms {
+            inert.push("search.query_timeout_ms");
         }
         if self.hnsw.max_layers != crate::config::HnswConfig::default().max_layers {
             inert.push("hnsw.max_layers");
         }
-        if deviates(
-            &self.storage,
-            &crate::config::server::StorageConfig::default(),
-        ) {
-            inert.push("[storage]");
+        if self.storage.storage_mode != crate::config::server::StorageConfig::default().storage_mode
+        {
+            inert.push("storage.storage_mode");
         }
         if deviates(
             &self.quantization,
@@ -158,27 +190,16 @@ impl VelesConfig {
         inert
     }
 
-    /// `[wal_batch]` is parsed but not wired (issue #2078): warn — rather
-    /// than reject — when a config enables it, so existing files keep
-    /// loading while no deployment silently believes it has group commit.
-    fn warn_inert_wal_batch(&self) {
-        if self.wal_batch.enabled {
-            tracing::warn!(
-                "[wal_batch] enabled = true is parsed but not yet wired: no group \
-                 commit occurs and every write keeps its own durability barrier \
-                 (see issue #2078)"
-            );
-        }
-    }
-
     fn validate_search(&self) -> Result<(), ConfigError> {
         if let Some(ef) = self.search.ef_search {
-            if !(16..=4096).contains(&ef) {
-                return Err(ConfigError::InvalidValue {
+            // Same range the CLI's `\set ef_search` and every query-time
+            // `WITH (ef_search = ...)` enforce (#2274) — one definition.
+            crate::api_types::validate_ef_search(ef).map_err(|message| {
+                ConfigError::InvalidValue {
                     key: "search.ef_search".to_string(),
-                    message: format!("value {ef} is out of range [16, 4096]"),
-                });
-            }
+                    message,
+                }
+            })?;
         }
 
         if self.search.max_results == 0 || self.search.max_results > 10000 {
@@ -273,14 +294,6 @@ impl VelesConfig {
                 ),
             });
         }
-
-        // A zero-byte mmap cache is meaningless; cap the upper bound so an
-        // out-of-range value cannot drive an absurd reservation.
-        range_check_capacity(
-            "storage.mmap_cache_mb",
-            self.storage.mmap_cache_mb,
-            MMAP_CACHE_MB_CAP,
-        )?;
         Ok(())
     }
 

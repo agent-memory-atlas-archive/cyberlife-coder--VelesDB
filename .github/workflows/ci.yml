@@ -91,24 +91,44 @@ on:
 # two spellings of "this run is a no-op" is how the two drift apart and the
 # hole reopens. Pinned by scripts/tests/test_ci_gate_reachability.py.
 #
-# A no-op run does not cancel; it queues behind the real run and finishes in
-# seconds. A real run still cancels whatever is stale, no-op or not.
+# `cancel-in-progress` was necessary and not sufficient: it stops a no-op run
+# from cancelling a run already in flight, but says nothing about a run still
+# PENDING. GitHub keeps at most one pending run per concurrency group, and a
+# third arrival evicts the queued one whatever `cancel-in-progress` says. Hit
+# in production on #2316 after `@dependabot rebase`, which pushes the rebased
+# commit and edits the body in the same second: run 35197905615
+# (`synchronize`, the real CI) was created 08:06:20Z and `cancelled` at
+# 08:06:21Z having run 0 jobs, while run 35197906019 (`edited`) skipped every
+# gate. The mirror step in `ci-success` then refused correctly -- nothing
+# merges on a false green -- but the pull request was left with no CI at all,
+# and only a new commit gets it back (#2327).
+#
+# So the group itself carries the predicate: a run that does real work joins
+# the shared group and may cancel a stale sibling; a no-op edit gets a group
+# of its own, keyed by its run id, where it can neither displace a real run
+# nor be displaced by the next body edit. The predicate stays spelled exactly
+# as every job guard spells it -- two spellings of "this run is a no-op" is
+# how the two drift apart and the hole reopens. Pinned by
+# scripts/tests/test_ci_gate_reachability.py.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event.action != 'edited' || github.event.changes.base != null) && 'work' || github.run_id }}
   cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 permissions:
   contents: read
 
 env:
+  # rustup never installs a toolchain on its own: a Rust call reached before the
+  # job's install step fails here instead of installing mid-build.
+  RUSTUP_AUTO_INSTALL: "0"
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
-  # 1.90 is the workspace MSRV: roaring 0.11.4 declares rust-version = 1.90.0,
-  # so a 1.89 toolchain only builds when the dep is already in cache.
-  RUST_VERSION: "1.90"
+  # No toolchain version in this file: each job installs the one
+  # rust-toolchain.toml names, from that file, before its first cargo call
+  # (scripts/tests/test_ci_toolchain_pin.py).
   # Skip Python detection for pyo3 - avoids environment contamination issues
   PYO3_NO_PYTHON: "1"
 
@@ -130,10 +150,8 @@ jobs:
           # every pull request and passed vacuously.
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: rustfmt, clippy
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -199,6 +217,37 @@ jobs:
             cargo check -p velesdb-memory --no-default-features --features "$feat" --all-targets
             echo "::endgroup::"
           done
+
+      # velesdb-memory is published to crates.io, so its rustdoc IS what docs.rs
+      # serves: a broken intra-doc link is a dead link on a public page. Nothing
+      # in CI built the docs, so 49 of them had accumulated unnoticed — every
+      # `super::` path in a module's `//!` header breaks once the `mod`
+      # declaration also carries `///` docs, because the merged doc resolves in
+      # the parent's scope. Fixed in this change; this step is what keeps them
+      # fixed. `--document-private-items` makes it resolve the links private
+      # items carry too: without it nothing did, and 15 more had broken.
+      - name: Rustdoc intra-doc links (velesdb-memory)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p velesdb-memory --no-deps --all-features --document-private-items
+
+      # Same gate, same reason, for the other published crate: velesdb-core is
+      # the API every downstream binding documents against, and it had carried
+      # 30 broken links (6 unresolved, 24 pointing at `pub(crate)` items) that
+      # nothing in CI looked at. `--all-features` rather than the default
+      # `persistence` set is deliberate: docs.rs serves default features only,
+      # but a gate that skips the `gpu`, `openapi` and `loom` modules cannot
+      # fail on them — the same reasoning as the isolated-feature step above
+      # (#1765). It costs the wgpu dependency build in this job.
+      # `--document-private-items` for the same reason once more: without it
+      # the docs of private items are never rendered, so their links are never
+      # resolved, and 75 rustdoc errors had rotted there unseen. It does not
+      # weaken the public-docs check: `private_intra_doc_links` still fires
+      # when a public doc links a private item; only its note changes.
+      - name: Rustdoc intra-doc links (velesdb-core)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p velesdb-core --no-deps --all-features --document-private-items
 
       # The extraction backend's unit tests are pure parsing and prompt
       # building: none opens a socket. Run them under the canonical role name
@@ -277,9 +326,46 @@ jobs:
           echo "::error::velesdb-memory ne se publierait pas. Une API core utilisee ici doit d'abord exister sur crates.io (cf. l'echec de la 0.11.3)."
           exit 1
 
+      # `openapi` and `test-fault-injection` ride here for the same reason
+      # `internal-bench` rides on the pass below: clippy only lints what it
+      # compiles, and no pedantic pass named them. `openapi` alone gates 128
+      # `cfg` sites. `scripts/check_feature_lint_coverage.py` is what keeps
+      # this list and the crate's features in step (#2348).
       - name: Run Clippy (strict)
         run: |
-          cargo clippy --workspace --all-targets --features persistence,gpu,update-check \
+          cargo clippy --workspace --all-targets \
+            --features persistence,gpu,update-check,openapi,test-fault-injection \
+            --exclude velesdb-python --exclude velesdb-node \
+            -- -D warnings -D clippy::pedantic
+
+      # The same sweep with `gpu` OFF. The step above is the ONLY workspace
+      # clippy in CI and it always enables `gpu`, so a lint that fires only in
+      # the gpu-less build was linted by nothing -- `cargo hack
+      # --feature-powerset` runs `check`, not `clippy`, and only on
+      # velesdb-memory. One such lint was sitting on `develop`:
+      # `try_gpu_route`'s receiver is read only inside `#[cfg(feature =
+      # "gpu")]`, so `clippy::unused_self` fired for anyone building without
+      # it, on a tree CI called clean.
+      #
+      # Cost was measured before adding it rather than assumed: with that one
+      # lint fixed, this configuration reports zero findings across the
+      # workspace, so the step goes green on arrival instead of importing a
+      # backlog.
+      # `internal-bench` rides on THIS pass rather than a third one, so the two
+      # clippy steps between them cover both states of the feature: the gpu
+      # pass above lints it OFF, this one lints it ON. Nothing was linting it
+      # ON before — both passes named `persistence[,gpu],update-check` — and
+      # the `internal-bench` jobs that exist are `cargo check`, which does not
+      # lint. Three `clippy::pedantic` violations reached #2347's review
+      # through that hole (#2348).
+      #
+      # Cost measured rather than assumed, as for the no-gpu pass itself: the
+      # feature adds 19 s of recompilation on a warm tree and no new job, since
+      # this step runs either way.
+      - name: Run Clippy (strict, no gpu)
+        run: |
+          cargo clippy --workspace --all-targets \
+            --features persistence,update-check,internal-bench \
             --exclude velesdb-python --exclude velesdb-node \
             -- -D warnings -D clippy::pedantic
 
@@ -459,6 +545,31 @@ jobs:
       - name: Check for .unwrap() in production code
         run: python3 scripts/check_prod_unwraps.py
 
+      # #2343 was a closed deadlock cycle: an HNSW operation holding
+      # `inner.read()` joined on the GLOBAL rayon pool, a pending `vacuum`
+      # writer blocked every new reader, and the global workers that take
+      # `inner.read()` parked — the guard holder never got its worker. Every
+      # such submission now runs on the dedicated `graph_pool`; this refuses a
+      # new one that neither does nor says why it is safe.
+      - name: Check HNSW rayon submissions stay off the global pool
+        run: python3 scripts/check_hnsw_rayon_pool.py
+
+      # The guards' Python pins were written inline in three `pip install`
+      # lines across two workflows, each package pinned in at least two of
+      # them; both workflows said so in a comment and neither could enforce
+      # it. scripts/requirements-guards.txt is now the only place they live.
+      - name: Check the guards' Python pins have one source
+        run: python3 scripts/check_guard_python_pins.py
+
+      # `cargo clippy --features a,b` lints what those features switch on and
+      # nothing else. Seven of the crate's ten features gate code; the clippy
+      # invocations between them named three, so `internal-bench` (29 cfg
+      # sites), `openapi` (128), `test-fault-injection` and `bench-sift1m`
+      # were compiled by no pedantic pass at all. Three violations reached
+      # #2347's review that way. This keeps the two lists in step.
+      - name: Check every feature that gates code is linted
+        run: python3 scripts/check_feature_lint_coverage.py
+
       # REL-07 ran only at release time (release.yml), so a version drift in a
       # policed manifest was invisible until tagging. Running the same checker
       # at PR time surfaces the drift in the PR that introduces it (<5s, pure
@@ -466,11 +577,38 @@ jobs:
       - name: Verify version sync across policed manifests (REL-07, PR-time)
         run: python3 scripts/check-version-sync.py
 
+      # `WalBatchConfig` was promised "at the next major"; v6.0.0 shipped two
+      # days later without it, because the constraint lived in a doc comment and
+      # nothing reads a doc comment when a version is bumped. This runs beside
+      # the version guard on purpose: the release commit that raises the major
+      # is the one that must go red.
+      - name: Deferred removals are not overdue
+        run: python3 scripts/check-deferred-removals.py
+
+      - name: Test the deferred-removal guard
+        run: python3 -m unittest scripts.tests.test_check_deferred_removals
+
+      # `local-ci.sh` n'est pas lance ici — il REJOUE ce job, l'executer dedans
+      # serait circulaire. Sa suite, elle, doit tourner : elle epingle deux
+      # defauts qu'il a deja eus, dont un faux vert (zero etape traitee
+      # rapportee comme un succes).
+      - name: Test the local gate replayer
+        run: python3 -m unittest scripts.tests.test_local_ci
+
       - name: Test feature-claims audit script
         run: python3 -m unittest scripts.tests.test_check_feature_claims
 
       - name: Test prod-unwraps audit script
         run: python3 -m unittest scripts.tests.test_check_prod_unwraps
+
+      - name: Test HNSW rayon-pool audit script
+        run: python3 -m unittest scripts.tests.test_check_hnsw_rayon_pool
+
+      - name: Test guard-python-pins audit script
+        run: python3 -m unittest scripts.tests.test_check_guard_python_pins
+
+      - name: Test feature-lint-coverage audit script
+        run: python3 -m unittest scripts.tests.test_check_feature_lint_coverage
 
       - name: Test inline-tests audit script
         run: python3 -m unittest scripts.tests.test_check_inline_tests
@@ -486,6 +624,20 @@ jobs:
 
       - name: Audit performance claims consistency
         run: python3 scripts/check-perf-claims.py --no-criterion
+      # The figure guard reads Markdown with a real parser. Its pins live in
+      # scripts/requirements-guards.txt, which is the only place they are
+      # written: they used to be repeated here and in gate-contracts.yml, and
+      # nothing failed when one moved without the other. A venv, because the
+      # runner's system Python refuses a pip install into itself (PEP 668).
+      # Without these exact versions the guard exits 2, never 0.
+      - name: Install the figure guard's Markdown parser
+        run: |
+          python3 -m venv /tmp/figure-guard
+          /tmp/figure-guard/bin/pip install --quiet --disable-pip-version-check -r scripts/requirements-guards.txt
+      - name: Every performance figure names its measurement
+        run: /tmp/figure-guard/bin/python scripts/check-figure-sources.py
+      - name: Test figure-sources audit script
+        run: /tmp/figure-guard/bin/python -m unittest scripts.tests.test_check_figure_sources
 
       # Both crates pull their own README into the crate docs with
       # `#![doc = include_str!("../README.md")]`, so this step also type-checks
@@ -516,8 +668,8 @@ jobs:
       # PR #633 (two consecutive runs, warning: "Free space left: 80 MB").
       #
       # Flag rationale:
-      # * `tool-cache: false` — keeps rustup + the toolchain restored by
-      #   `Swatinem/rust-cache`.
+      # * `preinstalled-runtimes: false` (named `tool-cache` before v2) —
+      #   keeps rustup + the toolchain restored by `Swatinem/rust-cache`.
       # * `large-packages: false` — intentionally OFF. The action's
       #   `large-packages` flag runs `apt-get autoremove -y` which
       #   cascade-removes `libgl1-mesa-dri` and its reverse-dependencies,
@@ -526,9 +678,9 @@ jobs:
       #   `awalsh128/cache-apt-pkgs-action` below is unreliable once
       #   autoremove has touched them, so we simply keep them installed.
       - name: Free disk space on runner
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
-          tool-cache: false
+          preinstalled-runtimes: false
           android: true
           dotnet: true
           haskell: true
@@ -536,9 +688,8 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -621,15 +772,163 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        # Pinned, not floating: 0.19 and 0.20 disagree on where `--config`
+        # goes, each rejecting the other's spelling, so an unpinned install
+        # moves the argument grammar under a gate nobody touched (#2322).
+        run: cargo install cargo-deny@0.20.2 --locked
 
       - name: Run security audit (advisories, licenses, bans, sources)
         run: cargo deny check advisories licenses bans sources
+
+      # The step above reads the ROOT lockfile and nothing else, so the six
+      # other tracked `Cargo.lock` files escaped every advisory. Measured when
+      # #2321 bumped rustls for RUSTSEC-2026-0285: the gate failed on the root
+      # lock while the Tauri demo's lock pinned a vulnerable rustls and nothing
+      # said so. Six of the six carried `crossbeam-epoch 0.9.18`
+      # (RUSTSEC-2026-0204) at the time this was written (#2322).
+      #
+      # The list is DERIVED, never written down: a hard-coded one is what let
+      # six files escape in the first place, and a seventh would escape the
+      # fix. `scripts/tests/test_lockfile_advisories.py` refuses a literal
+      # list here.
+      #
+      # Advisories only. Licences, bans and sources stay the root's policy,
+      # audited where they already are: an example's dependency tree is not a
+      # shipping surface and its licence set is not ours to police.
+      #
+      # Every lockfile is audited before the step decides, so one failure does
+      # not hide the next, and an empty list fails: a loop over nothing exits 0
+      # and would read exactly like a clean audit.
+      - name: Audit every other tracked lockfile (advisories)
+        run: |
+          set -uo pipefail
+          locks=$(git ls-files '*Cargo.lock' | grep -v '^Cargo.lock$')
+          if [ -z "$locks" ]; then
+            echo "::error::git tracks no non-root lockfile -- this step would pass by auditing nothing"
+            exit 1
+          fi
+          failed=""
+          broken=""
+          while IFS= read -r lock; do
+            dir=$(dirname "$lock")
+            echo "::group::cargo deny check advisories -- $lock"
+            # `--config` is a TOP-LEVEL flag, not one `check` accepts, and the
+            # two spellings are not interchangeable across versions: 0.19
+            # wants it on the subcommand and 0.20 at the top level, each
+            # rejecting the other. The install above is pinned for that
+            # reason -- a gate whose argument grammar moves under it is a gate
+            # that breaks on a day nobody touched the repository.
+            # `|| rc=$?` and not a bare call: the step runs under `bash -e`,
+            # so an unguarded failure would abort before the first verdict is
+            # recorded and the remaining lockfiles would go unaudited.
+            rc=0
+            cargo deny --manifest-path "$dir/Cargo.toml" \
+              --config "$GITHUB_WORKSPACE/deny.toml" check advisories || rc=$?
+            case "$rc" in
+              0) echo "clean: $lock" ;;
+              # cargo-deny exits 1 when it REFUSES, and 2 (clap) when it could
+              # not run at all. Reporting a usage error as "advisories found"
+              # is how a broken guard reads like a failing one -- which is
+              # exactly what this step did on its own first run.
+              1) failed="$failed $lock" ;;
+              *) broken="$broken $lock(exit $rc)" ;;
+            esac
+            echo "::endgroup::"
+          done <<< "$locks"
+          if [ -n "$broken" ]; then
+            echo "::error::cargo deny could not run on:$broken -- this is a broken gate, not a finding"
+            exit 1
+          fi
+          if [ -n "$failed" ]; then
+            echo "::error::advisories found in:$failed"
+            exit 1
+          fi
+          echo "every tracked lockfile is clean"
+
+  # ===========================================================================
+  # Public API stability: cargo-semver-checks diffs each published library's
+  # current API against its last crates.io release and fails if a breaking
+  # change ships without the major version bump SemVer requires.
+  #
+  # Scoped to the two crates this repo treats as consumable Rust libraries:
+  # velesdb-core (the embeddable engine) and velesdb-memory (independent 0.x
+  # versioning, see AGENTS.md). velesdb-cli has no [lib] target; velesdb-server
+  # and velesdb-mobile are consumed through their own binding surfaces (REST,
+  # UniFFI), not as Rust dependencies, so their crate-level API is not the
+  # contract that matters.
+  #
+  # See the inline comments below for why the tool version and `--release-type`
+  # are what they are.
+  # ===========================================================================
+  semver-checks:
+    name: Semver Checks (velesdb-core, velesdb-memory)
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: "velesdb-semver-checks"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+
+      - name: Install cargo-semver-checks (prebuilt)
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          # 0.46.0 is the last release whose own `rust_version` is 1.90, this
+          # workspace's MSRV — 0.47.0 already requires 1.91. That matters for a
+          # `cargo install` from source, which this is not: `install-action`
+          # fetches a prebuilt binary, so the pin is really about keeping the
+          # rustdoc-JSON format the tool consumes in step with the toolchain
+          # that produces it. Pinned exactly, like every other tool here.
+          tool: cargo-semver-checks@0.46.0
+
+      # `--release-type minor` on core, and the asymmetry is deliberate.
+      #
+      # `develop` carries the published version between releases: the bump lives
+      # in a `chore(release)` commit. cargo-semver-checks reads equal versions as
+      # a PATCH update, which satisfies no required level at all — so all 207
+      # Deny lints arm, including the 21 that only require a MINOR bump:
+      # `function_must_use_added`, `*_marked_deprecated` and friends. This crate
+      # holds 1369 `#[must_use]` and deprecates public items as a first-class
+      # practice, so the next PR adding either would turn `CI Success` red with
+      # no remedy short of a version bump the process only performs at release.
+      # Declaring the release type keeps every breaking lint armed and drops the
+      # bump reminder that the release commit covers anyway.
+      #
+      # velesdb-memory needs no flag: a 0.x baseline is already read as a minor
+      # update, so its Minor lints are disarmed by the tool itself. Same
+      # enforcement, reached differently.
+      #
+      # The declaration holds only while `develop` carries the published
+      # version. The release commit raises it, and a flag hardcoded to `minor`
+      # then keeps asserting a minor bump over a real major one: 7.0.0 was
+      # refused for the removals its own migration guide lists. When the
+      # workspace version is ahead of the newest non-yanked crates.io release,
+      # the flag is dropped and cargo-semver-checks reads the two versions as
+      # they are; when the index cannot be read it stays, the safe default.
+      - name: Check public API against the last published release
+        run: |
+          workspace="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "velesdb-core") | .version')"
+          published="$(curl -fsS --retry 3 https://index.crates.io/ve/le/velesdb-core \
+            | jq -rs '.[] | select(.yanked | not) | .vers' | sort -V | tail -n 1)" || published=""
+          release_type="--release-type minor"
+          if [ -n "$published" ] && [ "$workspace" != "$published" ] \
+            && [ "$(printf '%s\n%s\n' "$published" "$workspace" | sort -V | tail -n 1)" = "$workspace" ]; then
+            release_type=""
+          fi
+          echo "velesdb-core: workspace ${workspace}, published ${published:-unknown}, release type '${release_type:-from the versions}'"
+          # shellcheck disable=SC2086 # empty or two words, deliberately unquoted
+          cargo semver-checks check-release -p velesdb-core $release_type
+          cargo semver-checks check-release -p velesdb-memory
 
   # ===========================================================================
   # Hygiene gate: spelling (typos), manifest formatting (taplo), unused
@@ -650,8 +949,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `cargo machete` below is a cargo call inside the repository.
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
+
       - name: Install hygiene tools (prebuilt)
-        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: typos@1.42.3,taplo-cli@0.10.0,cargo-machete@0.9.2
 
@@ -692,9 +995,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -739,9 +1041,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -771,10 +1072,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: clippy
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -805,18 +1104,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: wasm32-unknown-unknown
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install --no-self-update --profile minimal
+          rustup target add wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "velesdb-ci-wasm"
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
-
-      - name: Install wasm32 target (belt-and-suspenders)
-        run: rustup target add wasm32-unknown-unknown
 
       - name: Check WASM build (no default features)
         run: cargo check -p velesdb-wasm --no-default-features --target wasm32-unknown-unknown
@@ -838,7 +1134,7 @@ jobs:
       # to empty binaries under the native test job and are invisible to the
       # cargo check above — without this step they never run in CI at all.
       - name: Install wasm-pack
-        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: wasm-pack
 
@@ -858,9 +1154,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -936,6 +1231,16 @@ jobs:
       - name: Self-test the CI wiring
         run: python3 -m unittest scripts.tests.test_ci_gate_reachability
 
+      # rust-toolchain.toml is the only toolchain pin: every job that builds
+      # Rust installs its toolchain, from the file, before its first cargo
+      # call. The suite reads the workflows with PyYAML, whose pin lives in
+      # scripts/requirements-guards.txt; without it the suite fails to import.
+      - name: Install the guard scripts' Python dependencies
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements-guards.txt
+
+      - name: Self-test the toolchain pin
+        run: python3 -m unittest scripts.tests.test_ci_toolchain_pin
+
       # The bundled npm copies of the two skills, byte for byte. The blocking
       # comparison is crates/velesdb-node/__test__/skills-sync.spec.mjs under
       # node-binding-tests — this one costs milliseconds and no toolchain, so
@@ -988,6 +1293,105 @@ jobs:
   # push instead of surfacing the next time someone tries to run the bench.
   # No dataset download, no benchmark execution, no test execution.
   # ===========================================================================
+  # Compiling the fuzz targets is a PR gate because nothing else made it one.
+  # The three targets are built only by quality-deep.yml's Fuzzing job, which
+  # runs on a schedule or a manual dispatch, so a change in velesdb-core that
+  # stops a target from compiling passed every PR gate and surfaced later as a
+  # failed scheduled run. That is how #2298 stayed hidden (#2311).
+  #
+  # Measured on develop@0be2edd90, narrowing the fuzzing-only entry in
+  # storage/mod.rs from `#[cfg(any(fuzzing, test))]` to `#[cfg(test)]`:
+  # `cargo test -p velesdb-core --lib -- storage::snapshot_tests` still exits
+  # 0, and this job exits 101 with
+  # `error[E0425]: cannot find function 'parse_payload_snapshot'`.
+  # The public trait surface, recorded and diffed, because the semver gate
+  # cannot see this class of break. Measured with cargo-semver-checks 0.46.0
+  # -- the version the job above pins -- on the exact change #2293 shipped,
+  # `NativeHnswBackend::file_dump` from `io::Result<()>` to
+  # `io::Result<usize>`: `196 checks: 196 pass, 49 skip`, exit 0. The harness
+  # is sound, proved by the opposite change to `()`, which exits 1 on
+  # `trait_method_now_returns_unit`. Of 246 lints, the seven that mention
+  # return types are all about the unit / non-unit boundary, so a change
+  # between two non-unit types falls between them (#2329).
+  #
+  # Scoped to TRAIT methods on purpose. The whole public API is 54 718 items
+  # and 5.26 MB: that diff is not read, it is regenerated. The trait surface
+  # is 83 lines across 18 traits, and it is the surface that matters -- an
+  # unsealed public trait's signature change breaks every downstream
+  # IMPLEMENTOR, who has no recourse, while an inherent method breaks callers,
+  # whom the semver gate already covers far better.
+  public-trait-api:
+    name: Public Trait Surface
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
+
+      # Installed on a step of its own, so the stable toolchain
+      # rust-toolchain.toml pins stays the default for everything else here.
+      # nightly: cargo-public-api reads rustdoc JSON, which is nightly-only.
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # nightly
+        with:
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: "velesdb-public-trait-api"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+
+      # Pinned and `--locked`, both for the same reason: #2292, where an
+      # unpinned `cargo install cargo-fuzz` re-resolved to a crate needing a
+      # newer rustc and failed three scheduled runs before a single target
+      # ran. A tool whose version floats moves the gate under the repository.
+      - name: Install cargo-public-api
+        run: cargo install cargo-public-api@0.52.0 --locked
+
+      - name: The public trait surface matches what is recorded
+        run: python3 scripts/check-public-trait-api.py
+
+  fuzz-compile:
+    name: Fuzz Targets Compile Check
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          shared-key: "velesdb-fuzz-compile"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+
+      # No nightly and no `cargo install cargo-fuzz`: both are what the
+      # Fuzzing job needs to RUN the targets under a sanitizer, and neither is
+      # needed to compile them. Measured: this command succeeds on the stable
+      # toolchain rust-toolchain.toml pins. Keeping the tool out also keeps
+      # this job clear of #2292, where `cargo install cargo-fuzz` re-resolved
+      # to a crate requiring a newer rustc and failed three scheduled runs
+      # before a single target ran.
+      #
+      # `--cfg fuzzing` because the targets reach entry points gated on it,
+      # which is the whole point: without the flag this job would compile a
+      # different crate from the one being fuzzed.
+      #
+      # clippy rather than check: same build, stricter verdict. `-D warnings`
+      # and not pedantic -- `fuzz/` is a workspace of its own (cargo-fuzz
+      # requires it), so it does not inherit `[workspace.lints]`, and turning
+      # pedantic on here would apply a DIFFERENT policy from the rest of the
+      # repository rather than a stricter one.
+      - name: cargo clippy (all fuzz targets, under --cfg fuzzing)
+        env:
+          RUSTFLAGS: "--cfg fuzzing"
+        run: |
+          cargo clippy --locked --manifest-path fuzz/Cargo.toml --bins \
+            -- -D warnings
+
   bench-sift1m-compile:
     name: Bench SIFT1M Compile Check
     if: github.event.action != 'edited' || github.event.changes.base != null
@@ -995,9 +1399,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -1010,11 +1413,21 @@ jobs:
           shared-key: "velesdb-ci"
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
 
-      - name: cargo check (bench + feature)
-        run: cargo check -p velesdb-core --benches --features bench-sift1m
+      # clippy rather than check: same build, stricter verdict, and the only
+      # place `bench-sift1m` is compiled on a pull request (the nightly bench
+      # workflow also builds it, hours later and on a schedule). Its optional
+      # dependencies -- ureq and its TLS stack -- are why the feature stays
+      # out of the workspace clippy passes; linting it here costs nothing
+      # extra, since this job already builds them (#2348).
+      - name: cargo clippy (bench + feature)
+        run: |
+          cargo clippy -p velesdb-core --benches --features bench-sift1m \
+            -- -D warnings -D clippy::pedantic
 
-      - name: cargo check (sift1m loader unit tests)
-        run: cargo check --tests -p velesdb-core --features bench-sift1m --test sift1m_loader_unit_tests
+      - name: cargo clippy (sift1m loader unit tests)
+        run: |
+          cargo clippy --tests -p velesdb-core --features bench-sift1m \
+            --test sift1m_loader_unit_tests -- -D warnings -D clippy::pedantic
 
   # ===========================================================================
   # Python Integration Tests (uniquement si integrations/ modifié)
@@ -1051,15 +1464,19 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Before pip: its first `cargo` call used to make rustup install this
+      # toolchain mid-build, which intermittently died with "detected
+      # conflict: 'bin/cargo-clippy'" (runs 34509954412, 34656653039,
+      # 34760724019).
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       # Cargo registry cache only (NOT the velesdb-python/target directory;
       # half-compiled pyo3 build artefacts from previous CI hotfix attempts
       # were causing pyo3-build-config to misdetect the interpreter even when
       # PYO3_PYTHON was set correctly).
       - name: Cache Cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1095,9 +1512,37 @@ jobs:
           pip install -e "integrations/langchain[dev]"
           python -m pytest integrations/langchain/tests/ -v --tb=short
 
+      # llama-index-core's sentence splitter reads NLTK `stopwords` and
+      # `punkt_tab`, by default from the cache it ships inside site-packages
+      # (`llama_index/core/_static/nltk_cache`). nltk 3.10.4 (2026-10-21)
+      # refuses to read from, or download into, a data directory another
+      # account can write to, and on the runner that cache fails the check:
+      # test_quickstart_e2e then died on "Resource 'stopwords' not found ...
+      # Refused, writable by other accounts" on every PR, with no change in
+      # the repository. NLTK_DATA, which llama-index-core prefers over its
+      # bundled cache, points at a 0700 directory instead, and the data is
+      # downloaded into it here -- the remedy NLTK's own message gives --
+      # so a failure names NLTK instead of a test.
+      - name: Provision NLTK data in a private directory
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/nltk_data"
+          echo "NLTK_DATA=$RUNNER_TEMP/nltk_data" >> "$GITHUB_ENV"
+
       - name: Install & Test LlamaIndex integration
         run: |
           pip install -e "integrations/llamaindex[dev]"
+          python - <<'PY'
+          import os
+          import nltk
+
+          data_dir = os.environ["NLTK_DATA"]
+          for package, resource in (("stopwords", "corpora/stopwords"),
+                                    ("punkt_tab", "tokenizers/punkt_tab")):
+              if not nltk.download(package, download_dir=data_dir, quiet=True,
+                                   raise_on_error=True):
+                  raise SystemExit(f"nltk could not provision {package} into {data_dir}")
+              nltk.data.find(resource, paths=[data_dir])
+          PY
           python -m pytest integrations/llamaindex/tests/ -v --tb=short
 
       - name: Install & Test Haystack integration
@@ -1109,6 +1554,11 @@ jobs:
         run: |
           pip install -e "integrations/langgraph[dev]"
           python -m pytest integrations/langgraph/tests/ -v --tb=short
+
+      # velesdb-common's own suite. No job ran it before #2275, so its
+      # mirror of core's ef_search bounds could drift with CI green.
+      - name: Test velesdb-common (shared package)
+        run: python -m pytest integrations/common/tests/ -v --tb=short
 
   # ===========================================================================
   # Python SDK Tests — velesdb-python (PyO3) binding functional suite.
@@ -1134,11 +1584,11 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache Cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1168,7 +1618,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20'
 
@@ -1176,11 +1626,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache Cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1341,7 +1791,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.node-windows-changed.outputs.relevant == 'true'
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: needs.node-windows-changed.outputs.relevant == 'true'
         with:
           node-version: '20'
@@ -1351,11 +1801,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install stable Rust toolchain
+      - name: Install the toolchain rust-toolchain.toml pins
         if: needs.node-windows-changed.outputs.relevant == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: needs.node-windows-changed.outputs.relevant == 'true'
@@ -1389,10 +1837,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          components: llvm-tools-preview
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install --no-self-update --profile minimal
+          rustup component add llvm-tools-preview
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -1408,7 +1856,7 @@ jobs:
       # `cargo install` from source — faster and avoids the compile/network
       # flakes that lost the runner mid-job on earlier release runs.
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov
 
@@ -1461,11 +1909,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -1514,9 +1961,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -1560,9 +2006,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable # Intentionally unpinned - uses toolchain input
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -1607,13 +2052,13 @@ jobs:
         continue-on-error: true
 
       - name: Set up JDK 17
-        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: 'zulu'
           java-version: '17'
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v3.0.0
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
@@ -1750,10 +2195,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.perf-path-changed.outputs.relevant == 'true'
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+      - name: Install the toolchain rust-toolchain.toml pins
         if: needs.perf-path-changed.outputs.relevant == 'true'
-        with:
-          toolchain: "1.90"
+        run: rustup toolchain install --no-self-update --profile minimal
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: needs.perf-path-changed.outputs.relevant == 'true'
         with:
@@ -1908,13 +2352,82 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, test, security, hygiene, wasm-check, memory-feature-matrix, internal-bench-check, drop-tightening-check, openapi-drift, mcp-doc-contract, velesql-conformance, perf-smoke, bench-sift1m-compile, perf-gate-e2e, python-sdk-tests, python-integrations, node-binding-tests, node-binding-tests-windows, gate-contracts, doc-contract, promise-contract, production-gates, propagation-guard, binary-size, pr-governance, sonarcloud]
-    if: (always()) && (github.event.action != 'edited' || github.event.changes.base != null)
+    needs: [lint, test, security, semver-checks, hygiene, wasm-check, memory-feature-matrix, internal-bench-check, drop-tightening-check, openapi-drift, mcp-doc-contract, velesql-conformance, perf-smoke, fuzz-compile, public-trait-api, bench-sift1m-compile, perf-gate-e2e, python-sdk-tests, python-integrations, node-binding-tests, node-binding-tests-windows, gate-contracts, doc-contract, promise-contract, production-gates, propagation-guard, binary-size, pr-governance, sonarcloud]
+    # The ONE job that must not carry the title/body-edit guard, and #2232 is
+    # why. Guarded, it skipped on a body edit -- and branch protection accepts a
+    # `skipped` required check, so the PR read CLEAN with no gate having run on
+    # the head commit. Measured on #2231: `CI Success: skipping`,
+    # `mergeStateStatus: CLEAN`, mergeable.
+    #
+    # Unguarded and naive it would be worse: its needs skip on such a run, so
+    # the chain below would turn every description edit RED. Hence the mirror
+    # step -- on a no-op edit this job reports the verdict of the real run for
+    # the same commit, and reports nothing when there is none.
+    #
+    # The invariant, and the only one worth remembering: `CI Success` never
+    # reports a verdict no execution produced.
+    if: always()
+    permissions:
+      contents: read
+      # The mirror step reads sibling runs of this same workflow.
+      actions: read
     steps:
+      # A run triggered by a title or body edit skips all 27 gate jobs (each
+      # carries the guard this one dropped), so their results say nothing. Take
+      # the verdict from the run that did the work instead.
+      #
+      # If this `if` does not fire when expected, the chain below runs against
+      # skipped needs and fails: loud and closed, never green-on-nothing.
+      - name: Mirror the real verdict on a no-op edit
+        id: mirror
+        if: github.event.action == 'edited' && github.event.changes.base == null
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WF: ${{ github.workflow }}
+          RUNID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          deadline=$((SECONDS + 2400))
+          while :; do
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
+                     --jq '[.workflow_runs[] | select(.name == env.WF and (.id|tostring) != env.RUNID)]') || runs=""
+            if [ -z "$runs" ]; then
+              echo "::warning::could not list runs for $HEAD_SHA; retrying"
+            else
+              verdict=$(printf '%s' "$runs" | jq -r '[.[] | select(.status == "completed")] | sort_by(.updated_at) | last | .conclusion // ""')
+              active=$(printf '%s' "$runs" | jq -r '[.[] | select(.status != "completed")] | length')
+              if [ "$verdict" = "success" ]; then
+                echo "mirroring a completed successful run for $HEAD_SHA"
+                exit 0
+              fi
+              if [ "${active:-0}" -eq 0 ]; then
+                # "Re-run CI" was this message's advice and it does not work.
+                # Branch protection evaluates EVERY check-run carrying the
+                # required name on a commit, not the most recent one, so the
+                # failure this step is about to record keeps the pull request
+                # BLOCKED even after a green re-run lands beside it. Measured on
+                # #2243: two `CI Success` check-runs on one SHA, 23:18 failure
+                # and 23:54 success, `mergeStateStatus: BLOCKED` with no red
+                # check visible to `gh pr checks`. A new commit is the way out.
+                echo "::error::no successful CI run exists for $HEAD_SHA (last verdict: ${verdict:-none}). This run skipped every gate because it was triggered by a description edit, so it has nothing to report. Push a new commit -- re-running is not enough, because this failed check-run stays on $HEAD_SHA and branch protection reads all of them."
+                exit 1
+              fi
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::still waiting on the real CI run for $HEAD_SHA after 40 minutes; refusing to report a verdict this run did not establish. Push a new commit: this failed check-run stays on the commit and branch protection reads all of them, so a re-run alone will not unblock it."
+              exit 1
+            fi
+            sleep 30
+          done
+
       # sonarcloud is intentionally absent from the gate below: it is an
       # external service (skipped on forks / token-less runs) and must not
       # block merges. It stays in `needs` so its status is visible here.
+      #
+      # Skipped when the mirror above ran: that step is the verdict then.
       - name: Check results
+        if: steps.mirror.conclusion == 'skipped'
         run: |
           [[ "${{ needs.lint.result }}" == "success" ]] && \
           [[ "${{ needs.test.result }}" == "success" ]] && \
@@ -1926,6 +2439,8 @@ jobs:
           [[ "${{ needs.mcp-doc-contract.result }}" == "success" ]] && \
           [[ "${{ needs.velesql-conformance.result }}" == "success" ]] && \
           [[ "${{ needs.perf-smoke.result }}" == "success" ]] && \
+          [[ "${{ needs.fuzz-compile.result }}" == "success" ]] && \
+          [[ "${{ needs.public-trait-api.result }}" == "success" ]] && \
           [[ "${{ needs.bench-sift1m-compile.result }}" == "success" ]] && \
           [[ "${{ needs.perf-gate-e2e.result }}" == "success" ]] && \
           [[ "${{ needs.python-sdk-tests.result }}" == "success" ]] && \
@@ -1940,5 +2455,6 @@ jobs:
           [[ "${{ needs.binary-size.result }}" == "success" ]] && \
           [[ "${{ needs.pr-governance.result }}" == "success" ]] && \
           [[ "${{ needs.security.result }}" == "success" ]] && \
+          [[ "${{ needs.semver-checks.result }}" == "success" ]] && \
           [[ "${{ needs.hygiene.result }}" == "success" ]] && \
           echo "✅ CI passed" || { echo "❌ CI failed"; exit 1; }

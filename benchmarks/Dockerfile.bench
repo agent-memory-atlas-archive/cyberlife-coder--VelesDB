@@ -1,12 +1,12 @@
 # VelesDB Benchmark Dockerfile
-# Uses pre-compiled binary to avoid Rust nightly dependency issues
+# Runs a pre-compiled binary: this image builds no Rust
 #
 # Prerequisites: cargo build --release --bin velesdb-server
 
 FROM debian:bookworm-slim
 
 LABEL maintainer="VelesDB Team <contact@wiscale.fr>"
-LABEL version="6.0.0"
+LABEL version="7.0.0"
 
 WORKDIR /app
 

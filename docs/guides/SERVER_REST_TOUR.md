@@ -208,17 +208,24 @@ curl -X POST http://localhost:8080/v1/collections/demo/search \
 
 | Value | Description |
 |-------|-------------|
-| `fast` | Low latency (~92% recall) |
-| `balanced` | Default (~99% recall) |
-| `accurate` | High precision (~99.5% recall) |
-| `perfect` | Exhaustive (100% recall) |
+| `fast` | Low latency: 97.4% recall@10* |
+| `balanced` | Default: 99.8% recall@10* |
+| `accurate` | High precision: 100% recall@10*; 0.98 on SIFT1M's 1M |
+| `perfect` | Exhaustive scan — the exact top-k |
 | `autotune` (aliases `auto`, `auto_tune`) | ef computed from collection size |
-| `custom:<ef>` | Fixed `ef_search`, e.g. `custom:256` |
-| `adaptive:<min>:<max>` | Two-phase adaptive, e.g. `adaptive:32:512` |
+| `custom:<ef>` | Fixed `ef_search` in 16–4096, e.g. `custom:256` |
+| `adaptive:<min>:<max>` | Two-phase adaptive, both bounds in 16–4096, e.g. `adaptive:32:512` |
 
-Recall figures come from [SEARCH_MODES.md](SEARCH_MODES.md), which explains the
-latency/recall trade-off in detail. An unrecognized `mode` string is ignored
-(the collection default applies).
+\* Recall@10 in `recall_benchmark` (10K random 128-D vectors, an index built with `HnswParams::max_recall`, 100 queries), measured 2026-09-10 on 6.0.0; see [BENCHMARKS.md](../BENCHMARKS.md#hnsw-recall-profiles-10k128d).
+
+[SEARCH_MODES.md](SEARCH_MODES.md) explains the latency/recall trade-off in
+detail. A `mode` the server cannot parse (a typo, or `adaptive` with `min`
+above `max`) is a `400` naming the accepted forms on `/search` and
+`/search/ids`, whatever the request's shape (dense, sparse, or both), and on
+each `/search/batch` entry, even where the mode is not applied. The search
+endpoints with no `mode` field (`/search/hybrid`, `/search/text`,
+`/search/multi`, `/search/multi/ids`, `/graph/search`) ignore it, as they
+ignore any field they do not know.
 
 ### Full-text (BM25)
 
@@ -519,20 +526,20 @@ public when API keys are configured.
 `/v1/health` always answers `200` while the process is up:
 
 ```json
-{"status": "ok", "version": "6.0.0"}
+{"status": "ok", "version": "7.0.0"}
 ```
 
 `/v1/ready` answers `200` once every collection is loaded from disk:
 
 ```json
-{"status": "ready", "version": "6.0.0"}
+{"status": "ready", "version": "7.0.0"}
 ```
 
 …and `503` until then, which is what makes it usable as a Kubernetes
 readiness probe:
 
 ```json
-{"status": "not_ready", "version": "6.0.0"}
+{"status": "not_ready", "version": "7.0.0"}
 ```
 
 ---
@@ -559,13 +566,13 @@ Use `code` for programmatic handling (retry, user hint); the full list lives in
 ## 9. Performance reference
 
 Numbers match the canonical contract in
-[`docs/reference/promise-contract.json`](../reference/promise-contract.json)
-(i9-14900KF, AVX2, `--release`, `target-cpu=native`):
+[`docs/reference/promise-contract.json`](../reference/promise-contract.json),
+each on the machine named with it:
 
-- **Cosine similarity**: ~33 ns per operation (768D)
-- **Dot product**: ~21.7 ns per operation (768D), ~35 Gelem/s
-- **HNSW search (index only)**: ~55 µs (10K vectors, 768D, Balanced mode, k=10)
-- **End-to-end search p50**: ~450 µs (10K/384D, WAL on, recall ≥ 96%)
+- **Cosine similarity**: ~33 ns per operation (768D; i9-14900KF, AVX2, in a run of 2026-03-24)
+- **Dot product**: ~21.7 ns per operation (768D; same machine, in a run of 2026-03-27)
+- **HNSW search (index only)**: ~55 µs (10K vectors, 768D, Balanced mode, k=10), measured 2026-03-27 on the i9-14900KF; a quiet re-run on an Apple M5 Pro measured 53.2 µs (2026-07-20)
+- **End-to-end search p50**: ~450 µs (10K/384D, WAL on, recall ≥ 96%), measured 2026-03-27 on 1.7.2 (i9-14900KF, Balanced then at ef 128) by [`velesdb_benchmark.py`](../../benchmarks/velesdb_benchmark.py) — [report](../../benchmarks/report_1.7.2_2026-03-27.json)
 
 ---
 
@@ -579,4 +586,4 @@ Numbers match the canonical contract in
 
 ---
 
-Last updated: 2026-08-08 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-09-10 · Applies to: velesdb-core 7.0.0

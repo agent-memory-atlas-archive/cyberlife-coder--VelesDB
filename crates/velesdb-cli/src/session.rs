@@ -8,8 +8,11 @@ use velesdb_core::SearchQuality;
 /// Session settings for the REPL.
 #[derive(Debug, Clone)]
 pub struct SessionSettings {
-    /// Current search mode.
-    mode: SearchQuality,
+    /// The search mode `\set` this session, if any. A session that set neither
+    /// this nor `ef_search` adds no quality, so the configured default applies
+    /// wherever the engine honours one (the `[search]` of the `--config` file or
+    /// of `./velesdb.toml`, #2400; see #2430), and it must not override that default (#2303).
+    mode: Option<SearchQuality>,
     /// Override ef_search (None = use mode default).
     ef_search: Option<usize>,
     /// Query timeout in milliseconds.
@@ -27,7 +30,7 @@ pub struct SessionSettings {
 impl Default for SessionSettings {
     fn default() -> Self {
         Self {
-            mode: SearchQuality::Balanced,
+            mode: None,
             ef_search: None,
             timeout_ms: 30000,
             rerank: true,
@@ -45,38 +48,33 @@ impl SessionSettings {
         Self::default()
     }
 
-    /// Gets the current search mode.
+    /// The session's `mode` as the `WITH(mode=...)` string the core parser
+    /// understands (`fast`/`balanced`/`accurate`/`perfect`/`autotune`/
+    /// `custom:<ef>`/`adaptive:<min>:<max>`), or `None` when it was never
+    /// `\set`.
     #[must_use]
-    pub fn mode(&self) -> SearchQuality {
-        self.mode
-    }
-
-    /// Returns the current mode as the `WITH(mode=...)` string the core parser
-    /// understands (`fast`/`balanced`/`accurate`/`perfect`/`autotune`/`custom:<ef>`/
-    /// `adaptive:<min>:<max>`), so the session mode can be injected into a query.
-    #[must_use]
-    pub fn mode_str(&self) -> String {
-        format_quality(self.mode)
+    pub fn mode_str(&self) -> Option<String> {
+        self.mode.map(format_quality)
     }
 
     /// Gets the explicitly-set ef_search override, if any.
     ///
-    /// `None` means "use the mode default"; the session only injects an explicit
-    /// `ef_search` into a query's WITH clause, leaving the mode to drive the rest.
+    /// The REPL injects one quality setting into a query that names none:
+    /// this `ef_search` when set, else the `mode` when set, else nothing.
     #[must_use]
     pub fn ef_search(&self) -> Option<usize> {
         self.ef_search
     }
 
-    /// Gets the effective ef_search value.
-    ///
-    /// Uses a default `k=10` for the quality profile's ef calculation. The query
-    /// path injects the explicit [`Self::ef_search`] override and lets the `mode`
-    /// drive the rest, so this resolved value is used only in tests.
+    /// The quality this session sets for a search, or `None` when it sets
+    /// none and the configured default applies: its `ef_search` when set (as
+    /// `SearchQuality::Custom`, which is what core's `search_with_ef` runs),
+    /// else its `mode` when set. The rule the query path applies when it
+    /// injects the session into a `WITH` clause, for the commands that search
+    /// directly (`.bench`).
     #[must_use]
-    #[allow(dead_code)] // Reason: resolved ef preview for tests; query path injects the explicit override + mode
-    pub fn effective_ef_search(&self) -> usize {
-        self.ef_search.unwrap_or_else(|| self.mode.ef_search(10))
+    pub fn search_quality(&self) -> Option<SearchQuality> {
+        self.ef_search.map(SearchQuality::Custom).or(self.mode)
     }
 
     /// Gets the query timeout in milliseconds.
@@ -113,7 +111,7 @@ impl SessionSettings {
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key.to_lowercase().as_str() {
             "mode" => {
-                self.mode = parse_mode(value)?;
+                self.mode = Some(parse_mode(value)?);
                 self.ef_search = None; // Reset ef_search when mode changes
                 Ok(())
             }
@@ -121,9 +119,10 @@ impl SessionSettings {
                 let ef = value
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid integer: {value}"))?;
-                if !(16..=4096).contains(&ef) {
-                    return Err(format!("ef_search must be between 16 and 4096, got {ef}"));
-                }
+                // Same range the config file and every query-time `WITH
+                // (ef_search = ...)` enforce (#2274) — one definition,
+                // `velesdb_core::api_types::validate_ef_search`.
+                velesdb_core::api_types::validate_ef_search(ef)?;
                 self.ef_search = Some(ef);
                 Ok(())
             }
@@ -170,7 +169,7 @@ impl SessionSettings {
                 *self = Self::default();
             }
             Some(k) => match k.to_lowercase().as_str() {
-                "mode" => self.mode = SearchQuality::Balanced,
+                "mode" => self.mode = None,
                 "ef_search" => self.ef_search = None,
                 "timeout_ms" | "timeout" => self.timeout_ms = 30000,
                 "rerank" => self.rerank = true,
@@ -183,18 +182,14 @@ impl SessionSettings {
         }
     }
 
-    /// Returns all settings as displayable key-value pairs.
+    /// Returns all settings as displayable key-value pairs. `configured` is
+    /// the database's default search quality, shown for a `mode` this
+    /// session never set.
     #[must_use]
-    pub fn all_settings(&self) -> Vec<(String, String)> {
+    pub fn all_settings(&self, configured: SearchQuality) -> Vec<(String, String)> {
         let mut settings = vec![
-            ("mode".to_string(), format_quality(self.mode)),
-            (
-                "ef_search".to_string(),
-                self.ef_search.map_or_else(
-                    || format!("auto ({})", self.mode.ef_search(10)),
-                    |v| v.to_string(),
-                ),
-            ),
+            ("mode".to_string(), self.shown_mode(configured)),
+            ("ef_search".to_string(), self.shown_ef_search(configured)),
             ("timeout_ms".to_string(), self.timeout_ms.to_string()),
             ("rerank".to_string(), self.rerank.to_string()),
             ("max_results".to_string(), self.max_results.to_string()),
@@ -213,15 +208,12 @@ impl SessionSettings {
         settings
     }
 
-    /// Gets a single setting value.
+    /// Gets a single setting value, `configured` as in [`Self::all_settings`].
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str, configured: SearchQuality) -> Option<String> {
         match key.to_lowercase().as_str() {
-            "mode" => Some(format_quality(self.mode)),
-            "ef_search" => Some(self.ef_search.map_or_else(
-                || format!("auto ({})", self.mode.ef_search(10)),
-                |v| v.to_string(),
-            )),
+            "mode" => Some(self.shown_mode(configured)),
+            "ef_search" => Some(self.shown_ef_search(configured)),
             "timeout_ms" | "timeout" => Some(self.timeout_ms.to_string()),
             "rerank" => Some(self.rerank.to_string()),
             "max_results" => Some(self.max_results.to_string()),
@@ -236,7 +228,7 @@ impl SessionSettings {
 }
 
 /// Formats a `SearchQuality` for display in session settings.
-fn format_quality(q: SearchQuality) -> String {
+pub(crate) fn format_quality(q: SearchQuality) -> String {
     match q {
         SearchQuality::Fast => "fast".to_string(),
         SearchQuality::Balanced => "balanced".to_string(),
@@ -251,43 +243,29 @@ fn format_quality(q: SearchQuality) -> String {
     }
 }
 
-fn parse_mode(value: &str) -> Result<SearchQuality, String> {
-    let lower = value.to_lowercase();
-    match lower.as_str() {
-        "fast" => Ok(SearchQuality::Fast),
-        "balanced" => Ok(SearchQuality::Balanced),
-        "accurate" => Ok(SearchQuality::Accurate),
-        "perfect" => Ok(SearchQuality::Perfect),
-        "autotune" => Ok(SearchQuality::AutoTune),
-        _ => parse_parameterized_mode(&lower),
+impl SessionSettings {
+    /// The `mode` as `\show` prints it: the session's, or the configured
+    /// default it leaves in force, marked as such.
+    fn shown_mode(&self, configured: SearchQuality) -> String {
+        self.mode_str()
+            .unwrap_or_else(|| format!("{} (configured default)", format_quality(configured)))
+    }
+
+    /// The `ef_search` as `\show` prints it: the session's override, or the
+    /// value the mode in force resolves to at `k = 10`.
+    fn shown_ef_search(&self, configured: SearchQuality) -> String {
+        self.ef_search.map_or_else(
+            || format!("auto ({})", self.mode.unwrap_or(configured).ef_search(10)),
+            |v| v.to_string(),
+        )
     }
 }
 
-/// Parses `custom:<ef>` and `adaptive:<min>:<max>` mode strings.
-fn parse_parameterized_mode(value: &str) -> Result<SearchQuality, String> {
-    if let Some(ef_str) = value.strip_prefix("custom:") {
-        let ef = ef_str
-            .parse::<usize>()
-            .map_err(|_| format!("Invalid ef value in 'custom:{ef_str}'"))?;
-        return Ok(SearchQuality::Custom(ef));
-    }
-    if let Some(rest) = value.strip_prefix("adaptive:") {
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err("adaptive format: adaptive:<min_ef>:<max_ef>".to_string());
-        }
-        let min_ef = parts[0]
-            .parse::<usize>()
-            .map_err(|_| format!("Invalid min_ef in '{value}'"))?;
-        let max_ef = parts[1]
-            .parse::<usize>()
-            .map_err(|_| format!("Invalid max_ef in '{value}'"))?;
-        return Ok(SearchQuality::Adaptive { min_ef, max_ef });
-    }
-    Err(format!(
-        "Invalid mode '{value}'. Valid: fast, balanced, accurate, \
-         perfect, autotune, custom:<ef>, adaptive:<min>:<max>"
-    ))
+/// Parses a `\set mode` value with the parser the server and the query
+/// engine use, so the REPL refuses at `\set` time what every later query
+/// would refuse: a typo, or `adaptive` with `min_ef` above `max_ef` (#2267).
+fn parse_mode(value: &str) -> Result<SearchQuality, String> {
+    velesdb_core::api_types::parse_search_mode(value)
 }
 
 /// Returns `true` for settings that `\set` stores and displays but that have no

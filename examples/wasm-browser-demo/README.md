@@ -22,7 +22,7 @@ cd crates/velesdb-wasm
 wasm-pack build --target web --out-dir ../../examples/wasm-browser-demo/pkg
 
 # Then update index.html to use the local path instead of CDN:
-# Change: import init from 'https://unpkg.com/@wiscale/velesdb-wasm@6.0.0/velesdb_wasm.js'
+# Change: import init from 'https://unpkg.com/@wiscale/velesdb-wasm@7.0.0/velesdb_wasm.js'
 # To:     import init from './pkg/velesdb_wasm.js'
 ```
 
@@ -61,12 +61,9 @@ No console output or build step is needed -- everything runs visually in the pag
 
 ## Performance
 
-Typical results on modern hardware:
-
-| Operation | 10K vectors (128D) | 100K vectors (128D) |
-|-----------|-------------------|---------------------|
-| Insert    | ~50ms             | ~500ms              |
-| Search    | ~1ms              | ~10ms               |
+No recorded run backs typical timings for this demo, so none are given here.
+The core's measured figures, each with the run behind it, are in
+[docs/BENCHMARKS.md](../../docs/BENCHMARKS.md).
 
 ## Use Cases
 
@@ -80,7 +77,7 @@ Typical results on modern hardware:
 ```html
 <script type="module">
   // If published on npm:
-  // import init, { VectorStore } from 'https://unpkg.com/@wiscale/velesdb-wasm@6.0.0/velesdb_wasm.js';
+  // import init, { VectorStore } from 'https://unpkg.com/@wiscale/velesdb-wasm@7.0.0/velesdb_wasm.js';
   // If built locally with wasm-pack:
   import init, { VectorStore } from './pkg/velesdb_wasm.js';
 

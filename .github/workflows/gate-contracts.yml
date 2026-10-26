@@ -21,15 +21,38 @@ on:
 permissions:
   contents: read
 
+env:
+  # rustup never installs a toolchain on its own: a Rust call reached before the
+  # job's install step fails here instead of installing mid-build.
+  RUSTUP_AUTO_INSTALL: "0"
+
 jobs:
   script-gates:
     name: Repository guard contracts
     runs-on: ubuntu-latest
     steps:
+      # Full history, not the default depth of 1: the attribution guard pins
+      # the commit through which bot authorship is forgiven, and its suite
+      # asserts that commit is really there -- a boundary nothing resolves
+      # forgives nothing, silently, and the next back-merge would fail with
+      # no trace of why (#2336).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
+      # `scripts/local-ci.sh` reads the workflow with PyYAML, and setup-python
+      # ships a bare interpreter, so its suite died on ModuleNotFoundError --
+      # eight opaque failures for one absent wheel. Marking those tests skipped
+      # would have been the cheaper fix and the wrong one: a suite that skips
+      # in CI is a suite CI does not run.
+      - name: Install the guard suites' Python dependencies
+        # Every package and pin the guards need lives in
+        # scripts/requirements-guards.txt, including the Markdown parser
+        # scripts/check-figure-sources.py needs -- its suite and refusal
+        # vector run here too.
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements-guards.txt
       - name: Run the guard contract suites
         run: python -m unittest discover -s scripts/tests -p "test_*.py" -t . -v
 
@@ -44,19 +67,48 @@ jobs:
     # --omit=dev is NOT used: the advisory above was dev-only, and the point
     # is to see it. Lockfile-only, so no install and no network beyond the
     # registry metadata.
+    #
+    # Every `package-lock.json` the repository tracks is listed, and
+    # `test_npm_audit_gate.NpmAuditMatrixCoverageTests` fails if one is
+    # missing. The list used to hold four of eight, and the gap was not
+    # theoretical: GHSA-2883-xcg3-v3hh (js-yaml, high) landed in
+    # `crates/velesdb-node` on 2026-09-09 and Dependabot found it, not this
+    # gate. A hand-kept list of paths is a list that silently stops matching
+    # the tree, so the list stays hand-kept -- readable in the matrix -- and a
+    # test holds it to the tree.
     strategy:
       fail-fast: false
       matrix:
         path:
-          - sdks/typescript
+          - .
+          - crates/velesdb-node
+          - crates/velesdb-wasm/e2e
           - demos/tauri-rag-app
-          - examples/react-wasm-search
+          - examples/ecommerce_recommendation
           - examples/node-express-rag
+          - examples/react-wasm-search
+          - sdks/typescript
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      # Not `npm audit` directly: it exits 1 for an advisory AND for an
+      # advisory endpoint that never answered, so the two were
+      # indistinguishable. On 2026-09-03 the npmjs.org bulk endpoint 503'd
+      # then timed out for eight hours and this job went red three times on
+      # `develop` reporting a vulnerability that did not exist. The gate reads
+      # the report instead of the exit code, retries only the attempts that
+      # produced no report, and still fails closed when none ever does -- with
+      # exit 75 and a message that says it is infrastructure, not a finding.
       - name: Audit ${{ matrix.path }}
-        working-directory: ${{ matrix.path }}
-        run: npm audit --package-lock-only --audit-level=high
+        run: |
+          python3 scripts/npm-audit-gate.py \
+            --root "${{ matrix.path }}" \
+            --audit-level high \
+            --attempts 4 \
+            --backoff-seconds 5 \
+            --attempt-timeout 120

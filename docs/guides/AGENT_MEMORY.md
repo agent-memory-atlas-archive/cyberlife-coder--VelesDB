@@ -845,7 +845,7 @@ pre-seeded:
 
 | Metric | Recommended Limit | Beyond |
 |--------|------------------|--------|
-| Semantic facts | 1M | Search latency > 5ms |
+| Semantic facts | 1M | Search latency grows with the corpus; benchmark on your hardware |
 | Episodic events | 500K | Use TTL to purge old events |
 | Procedures | 10K | Rarely a bottleneck |
 | Embedding dimension | 384-1536 | > 1536: consider quantization |
@@ -1165,4 +1165,4 @@ Yes. The SDK is covered end-to-end by Rust and Python test suites, including sna
 
 ---
 
-Last updated: 2026-08-08 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-08-08 · Applies to: velesdb-core 7.0.0

@@ -8,8 +8,8 @@
 //! # Performance Targets
 //!
 //! - Bulk import: 50K+ vectors/sec at 768D
-//! - Search latency: < 1ms for 1M vectors
-//! - Memory efficiency: 50% reduction with FP16
+//! - Search latency: sub-millisecond at 1M vectors (see `docs/BENCHMARKS.md` §11.3)
+//! - Memory efficiency: FP16 stores 2 bytes per dimension instead of 4
 //!
 //! # Safety (EPIC-032/US-002)
 //!
@@ -128,6 +128,29 @@ impl fmt::Debug for ContiguousVectors {
 }
 
 impl ContiguousVectors {
+    /// Smallest capacity an arena is created with.
+    ///
+    /// A floor rather than an exact fit, so a fresh arena does not resize on
+    /// its first insert. Both the heap and the file-backed constructor apply
+    /// it, and it is `pub(crate)` because a caller adopting an *existing* file
+    /// has to know it too: below this many vectors, opening that file as an
+    /// arena would EXTEND it. A second copy of the number is exactly how such
+    /// a caller would silently stop matching this one.
+    pub(crate) const MIN_ARENA_CAPACITY: usize = 16;
+
+    /// Whether an arena opened for exactly `count` vectors keeps that capacity.
+    ///
+    /// The one question a caller that must not write — adopting a durable file
+    /// on open — has to ask, answered here beside the floor it depends on: below
+    /// [`Self::MIN_ARENA_CAPACITY`] an arena is sized up, and a file-backed one
+    /// extends its file with it. The floor stays a performance knob: whatever it
+    /// is set to, this answers for it, and `opening_a_collection_never_writes_to_its_vectors`
+    /// derives its fixture from the same constant.
+    #[cfg(feature = "persistence")]
+    pub(crate) const fn keeps_exact_capacity(count: usize) -> bool {
+        count >= Self::MIN_ARENA_CAPACITY
+    }
+
     /// Creates a new `ContiguousVectors` with the given dimension and initial capacity.
     ///
     /// # Arguments
@@ -151,7 +174,7 @@ impl ContiguousVectors {
         // could drive `dimension * capacity` products toward overflow.
         validate_dimension(dimension)?;
 
-        let capacity = capacity.max(16); // Minimum 16 vectors
+        let capacity = capacity.max(Self::MIN_ARENA_CAPACITY);
 
         // Reject pathological/attacker-sized allocations before touching the
         // allocator (#899). Legitimate large indexes stay well under the ceiling.
@@ -159,7 +182,8 @@ impl ContiguousVectors {
         let layout = Self::layout(dimension, capacity)?;
 
         // SAFETY: `alloc_zeroed` requires a valid non-zero layout.
-        // - Condition 1: `dimension > 0` and `capacity >= 16` guarantee non-zero size.
+        // - Condition 1: `dimension > 0` and `capacity >= MIN_ARENA_CAPACITY` (floored
+        //   above) guarantee non-zero size.
         // - Condition 2: `layout` is built via `Layout::from_size_align` and therefore valid.
         // SAFETY: Zero-initialized allocation guarantees all f32 slots are 0.0,
         // preventing UB when `insert_at` creates sparse gaps (indices 0..N not all written).
@@ -251,7 +275,7 @@ impl ContiguousVectors {
         use crate::contiguous_file_arena::FileArena;
 
         validate_dimension(dimension)?;
-        let capacity = capacity.max(16);
+        let capacity = capacity.max(Self::MIN_ARENA_CAPACITY);
         let byte_len = Self::byte_size(dimension, capacity)?;
         crate::alloc_guard::check_alloc_bound(byte_len)?;
 
@@ -310,6 +334,23 @@ impl ContiguousVectors {
             arena.flush().map_err(crate::error::Error::Io)?;
         }
         Ok(())
+    }
+
+    /// The file this arena is mapped from, if it is mapped at all.
+    ///
+    /// Derived from the backing rather than remembered alongside it. A caller
+    /// that needs to know whether it is about to rewrite the very file it is
+    /// reading gets the answer from the one place that cannot fall out of step
+    /// with reality — there is no second copy of the fact to keep in sync.
+    /// `persistence`-only: without it the sole backing is the heap, so the
+    /// question has one answer and no caller.
+    #[cfg(feature = "persistence")]
+    #[must_use]
+    pub(crate) fn backing_path(&self) -> Option<&std::path::Path> {
+        match &self.backing {
+            ArenaBacking::FileMapped(arena) => Some(arena.path()),
+            ArenaBacking::Heap => None,
+        }
     }
 
     /// Drops a file-backed arena's resident pages, keeping its contents.

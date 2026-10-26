@@ -32,27 +32,34 @@ pub(crate) struct QuerySearchOptions {
 impl QuerySearchOptions {
     /// Extracts search options from an optional WITH clause and fusion clause.
     ///
-    /// Maps `mode` string to [`SearchQuality`](crate::SearchQuality) using the
-    /// same parsing logic as `mode_to_search_quality()`. Invalid mode strings
-    /// are silently ignored (quality remains `None`).
-    #[must_use]
-    pub(crate) fn from_with_clause(with: Option<&crate::velesql::WithClause>) -> Self {
+    /// Maps the `mode` option, or its alias `quality`, to a
+    /// [`SearchQuality`](crate::SearchQuality) through
+    /// [`WithClause::search_quality`](crate::velesql::WithClause::search_quality),
+    /// and `ef_search` through
+    /// [`WithClause::ef_search`](crate::velesql::WithClause::ef_search): a
+    /// mode that is not a string or does not parse, or an `ef_search` outside
+    /// the documented range, is a query error, not a silently ignored
+    /// override (#2267, #2274). The query validator rejects both first on
+    /// every query path; this keeps the conversion honest for a direct
+    /// caller.
+    pub(crate) fn from_with_clause(
+        with: Option<&crate::velesql::WithClause>,
+    ) -> crate::error::Result<Self> {
         let Some(with) = with else {
-            return Self::default();
+            return Ok(Self::default());
         };
 
-        let quality = with.get_mode().and_then(parse_mode_to_quality);
-
-        let ef_search = with.get_ef_search();
+        let quality = with.search_quality().map_err(crate::error::Error::Query)?;
+        let ef_search = with.ef_search().map_err(crate::error::Error::Query)?;
         let force_rerank = with.get_rerank();
 
-        Self {
+        Ok(Self {
             quality,
             ef_search,
             force_rerank,
             fusion_clause: None,
             executed_strategy_probe: None,
-        }
+        })
     }
 
     /// Attaches the query context's executed-strategy slot, so the filtered
@@ -87,15 +94,20 @@ impl QuerySearchOptions {
     pub(crate) fn has_quality_overrides(&self) -> bool {
         self.quality.is_some() || self.ef_search.is_some() || self.force_rerank.is_some()
     }
-}
 
-/// Maps a mode string from `WITH (mode='...')` to a [`SearchQuality`](crate::SearchQuality).
-///
-/// Delegates to [`crate::api_types::mode_to_search_quality`] which also handles
-/// advanced modes (`custom:<ef>`, `adaptive:<min>:<max>`).
-#[cfg(feature = "persistence")]
-fn parse_mode_to_quality(mode: &str) -> Option<crate::SearchQuality> {
-    crate::api_types::mode_to_search_quality(mode)
+    /// The quality a search with these options runs at: an explicit
+    /// `ef_search`, which wins over `mode` as `docs/VELESQL_SPEC.md` documents
+    /// and REST resolves (#2274), else `mode`, else `default` — the
+    /// collection's runtime quality, so options that name no quality (e.g.
+    /// only `rerank`) keep the configured `[search]` default (#2399). The one
+    /// resolution the plain and the filtered vector path share.
+    #[must_use]
+    pub(crate) fn resolved_quality(&self, default: crate::SearchQuality) -> crate::SearchQuality {
+        self.ef_search
+            .map(crate::collection::search::vector_filter::ef_to_quality)
+            .or(self.quality)
+            .unwrap_or(default)
+    }
 }
 
 /// Extracted query components from the WHERE clause.
@@ -118,6 +130,8 @@ pub(in crate::collection::search::query) struct ExtractedComponents {
 
 /// Bundles the parameters for [`Collection::finalize_query_results`] to stay
 /// within the 8-parameter limit.
+///
+/// [`Collection::finalize_query_results`]: crate::collection::Collection::finalize_query_results
 pub(in crate::collection::search::query) struct QueryFinalizationContext<'a> {
     pub(in crate::collection::search::query) stmt: &'a crate::velesql::SelectStatement,
     pub(in crate::collection::search::query) params:

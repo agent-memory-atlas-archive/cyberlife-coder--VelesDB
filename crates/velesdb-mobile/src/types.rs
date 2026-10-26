@@ -114,13 +114,13 @@ impl From<DistanceMetric> for CoreDistanceMetric {
 pub enum StorageMode {
     /// Full f32 precision (4 bytes/dimension). Best recall.
     Full,
-    /// SQ8: 8-bit scalar quantization (1 byte/dimension). 4x compression, ~1% recall loss.
+    /// SQ8: 8-bit scalar quantization (1 byte/dimension). 4x compression, small recall loss.
     Sq8,
-    /// Binary: 1-bit quantization (1 bit/dimension). 32x compression, ~5-10% recall loss.
+    /// Binary: 1-bit quantization (1 bit/dimension). 32x compression, larger recall loss.
     Binary,
-    /// Product Quantization (PQ): aggressive lossy compression (8x-16x typical).
+    /// Product Quantization (PQ): lossy compression, `2 × dim / m` smaller than f32 for m subspaces (dim/4 at m = 8).
     ProductQuantization,
-    /// `RaBitQ`: 1-bit with rotation + scalar correction. 32x compression, ~1-2% recall loss.
+    /// `RaBitQ`: 1-bit with rotation + scalar correction. 32x compression, small recall loss.
     Rabitq,
 }
 
@@ -143,14 +143,20 @@ impl From<StorageMode> for velesdb_core::StorageMode {
 /// at the cost of increased latency.
 #[derive(Debug, Clone, Default, uniffi::Enum)]
 pub enum SearchQuality {
-    /// Fast search (`ef_search=96`). ~95% recall, lowest latency.
+    /// Fast search (`ef_search=96`): 97.4% recall@10 in the core's
+    /// `recall_benchmark` (10K random 128-D points), lowest latency.
     Fast,
-    /// Balanced search (`ef_search=160`). ~99.5% recall, production default.
+    /// Balanced search (`ef_search=160`): 99.8% recall@10 in the core's
+    /// `recall_benchmark`, production default.
     #[default]
     Balanced,
-    /// Accurate search (`ef_search=512`). ~100% recall.
+    /// Accurate search (`ef_search=512`): 100% recall@10 in the core's
+    /// `recall_benchmark`, 0.98 on SIFT1M's 1M.
     Accurate,
-    /// Perfect recall mode (`ef_search=4096`). Guaranteed 100% recall.
+    /// Exhaustive scan: every vector scored — the exact top-k under the index's
+    /// own distance, ties aside — at O(n).
+    /// It does not run at `ef_search=4096`; a collection larger than
+    /// `limits.max_perfect_mode_vectors` refuses it with a guard-rail error.
     Perfect,
     /// Custom `ef_search` value for fine-grained control.
     Custom {
@@ -168,22 +174,41 @@ pub enum SearchQuality {
     AutoTune,
 }
 
-impl From<SearchQuality> for velesdb_core::SearchQuality {
-    fn from(quality: SearchQuality) -> Self {
-        match quality {
+impl TryFrom<SearchQuality> for velesdb_core::SearchQuality {
+    type Error = VelesError;
+
+    /// Fallible: `Custom`'s `ef` and `Adaptive`'s `min_ef`/`max_ef` are
+    /// checked against the range the `ef_search` `WITH` option enforces
+    /// elsewhere, [`velesdb_core::api_types::validate_ef_search`]'s, so a
+    /// Swift/Kotlin caller cannot reach the HNSW traversal with an unbounded
+    /// `ef` through this FFI boundary (#2275).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VelesError::Database`] when `ef`, `min_ef` or `max_ef` falls
+    /// outside the accepted range.
+    fn try_from(quality: SearchQuality) -> Result<Self, Self::Error> {
+        Ok(match quality {
             SearchQuality::Fast => velesdb_core::SearchQuality::Fast,
             SearchQuality::Balanced => velesdb_core::SearchQuality::Balanced,
             SearchQuality::Accurate => velesdb_core::SearchQuality::Accurate,
             SearchQuality::Perfect => velesdb_core::SearchQuality::Perfect,
             SearchQuality::Custom { ef } => {
-                velesdb_core::SearchQuality::Custom(usize::try_from(ef).unwrap_or(usize::MAX))
+                let ef = usize::try_from(ef).unwrap_or(usize::MAX);
+                velesdb_core::api_types::validate_ef_search(ef).map_err(VelesError::database)?;
+                velesdb_core::SearchQuality::Custom(ef)
             }
-            SearchQuality::Adaptive { min_ef, max_ef } => velesdb_core::SearchQuality::Adaptive {
-                min_ef: usize::try_from(min_ef).unwrap_or(usize::MAX),
-                max_ef: usize::try_from(max_ef).unwrap_or(usize::MAX),
-            },
+            SearchQuality::Adaptive { min_ef, max_ef } => {
+                let min_ef = usize::try_from(min_ef).unwrap_or(usize::MAX);
+                let max_ef = usize::try_from(max_ef).unwrap_or(usize::MAX);
+                velesdb_core::api_types::validate_ef_search(min_ef)
+                    .map_err(VelesError::database)?;
+                velesdb_core::api_types::validate_ef_search(max_ef)
+                    .map_err(VelesError::database)?;
+                velesdb_core::SearchQuality::Adaptive { min_ef, max_ef }
+            }
             SearchQuality::AutoTune => velesdb_core::SearchQuality::AutoTune,
-        }
+        })
     }
 }
 

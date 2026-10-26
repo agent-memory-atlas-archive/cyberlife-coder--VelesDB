@@ -108,7 +108,8 @@ const MAX_UPSERT_BATCH_SIZE: usize = 100_000;
     responses(
         (status = 200, description = "Points upserted", body = Object),
         (status = 404, description = "Collection not found", body = ErrorResponse),
-        (status = 400, description = "Invalid request or batch too large", body = ErrorResponse)
+        (status = 400, description = "Invalid request or batch too large", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn upsert_points(
@@ -178,14 +179,15 @@ pub(super) fn upsert_result_to_response(
 
 /// Convert an `UpsertPointsRequest` into a `Vec<Point>`, merging sparse inputs.
 fn build_points_from_request(req: UpsertPointsRequest) -> Result<Vec<Point>, String> {
-    let mut points: Vec<Point> = Vec::with_capacity(req.points.len());
-    for p in req.points {
-        let sparse = convert_sparse_inputs(p.sparse_vector, p.sparse_vectors)?;
-        let mut point = Point::new(p.id, p.vector, p.payload);
-        point.sparse_vectors = sparse;
-        points.push(point);
-    }
-    Ok(points)
+    req.points
+        .into_iter()
+        .map(|p| {
+            let sparse = convert_sparse_inputs(p.sparse_vector, p.sparse_vectors)?;
+            let mut point = Point::new(p.id, p.vector, p.payload);
+            point.sparse_vectors = sparse;
+            Ok(point)
+        })
+        .collect()
 }
 
 /// Get a point by ID.
@@ -283,7 +285,8 @@ const MAX_SCROLL_BATCH_SIZE: u32 = 10_000;
     responses(
         (status = 200, description = "Scroll batch", body = ScrollResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 404, description = "Collection not found", body = ErrorResponse)
+        (status = 404, description = "Collection not found", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn scroll_points(
@@ -402,7 +405,8 @@ pub struct BulkDeleteRequest {
         (status = 200, description = "Points deleted", body = Object),
         (status = 400, description = "Batch too large", body = ErrorResponse),
         (status = 404, description = "Collection not found", body = ErrorResponse),
-        (status = 500, description = "Delete failed", body = ErrorResponse)
+        (status = 500, description = "Delete failed", body = ErrorResponse),
+        (status = 422, response = crate::types::MalformedBody)
     )
 )]
 pub async fn bulk_delete_points(

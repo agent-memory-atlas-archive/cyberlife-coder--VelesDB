@@ -26,7 +26,7 @@ VelesDB uses `unsafe` code in the following categories:
 
 | Category | Purpose | Files |
 |----------|---------|-------|
-| **SIMD (consolidated)** | AVX-512/AVX2/NEON distance kernels | `simd_native/x86_avx512.rs`, `simd_native/x86_avx2/`, `simd_native/x86_avx2_similarity.rs`, `simd_native/neon.rs`, `simd_neon.rs` |
+| **SIMD (consolidated)** | AVX-512/AVX2/NEON distance kernels | `simd_native/x86_avx512.rs`, `simd_native/x86_avx2/`, `simd_native/x86_avx2_similarity.rs`, `simd_native/neon.rs`, `simd_native/neon_hamming_jaccard.rs` |
 | **SIMD (dispatch)** | Runtime feature detection + dispatch to ISA kernels | `simd_native/dispatch/` (`mod.rs`, `dot.rs`, `euclidean.rs`, `cosine.rs`, `hamming.rs`) |
 | **SIMD (reduction)** | Horizontal sum helpers for accumulator registers | `simd_native/reduction.rs` |
 | **SIMD (ADC)** | Asymmetric Distance Computation for PQ search | `simd_native/adc.rs` |
@@ -95,35 +95,52 @@ VelesDB uses `unsafe` code in the following categories:
 **Invariants**: Same as AVX2 dot/L2 above. `hamming_binary_avx2` operates on `&[u64]`
 slices with popcount via `_mm256_set_epi8` LUT.
 
-### Module: `crates/velesdb-core/src/simd_native/neon.rs`
+### Modules: `crates/velesdb-core/src/simd_native/neon.rs` and `neon_hamming_jaccard.rs`
 
-**Functions** (all `unsafe fn` with `#[target_feature(enable = "neon")]`,
-`#[cfg(target_arch = "aarch64")]`):
-- `dot_product_neon()` / `squared_l2_neon()` / `cosine_neon()` / `hamming_neon()`
-- `jaccard_neon()` / `hamming_binary_neon()`
-- Safe wrappers: `dot_product_neon_safe()`, `euclidean_neon_safe()`, etc.
+**Functions** (`#[cfg(target_arch = "aarch64")]`; NEON is mandatory on AArch64,
+so there is no `#[target_feature]` and no runtime detection):
+- `pub(crate) unsafe fn` kernels: `dot_product_neon()` / `squared_l2_neon()` /
+  `cosine_neon()` / `hamming_neon()` / `jaccard_neon()` / `hamming_binary_neon()`,
+  and the private `dot_product_neon_4acc()` / `squared_l2_neon_4acc()` they call.
+  They were safe `fn`s until #1965, although nothing in them checks lengths: a
+  shorter `b` was read past its end with no `unsafe` at the call site.
+- `unsafe fn` helpers: `squared_l2_neon_1acc()`, `hamming_neon_{1,4}acc()`,
+  `jaccard_neon_{1,4}acc()`, the `cosine_fused_neon_*` loops, `reduce_4acc_neon()`
+  and `neon_fma_compat()`
+- The public entry points are the runtime-dispatched `simd_native::*_native`
+  functions and `DistanceEngine`; nothing outside `simd_native` calls these kernels
 
 **Invariants**:
 1. `#[cfg(target_arch = "aarch64")]` guarantees NEON availability (mandatory on AArch64)
-2. `debug_assert_eq!(a.len(), b.len())` at function entry
-3. Loop bounds `chunks = len / 4` ensure pointer arithmetic stays in bounds
-4. Unrolled remainder handles `len % 4` elements via scalar indexing
+2. `a.len() == b.len()` is each kernel's `# Safety` precondition, checked by its
+   caller: every public entry point (`*_native`, `DistanceEngine::dispatch`) runs
+   `assert_eq!(a.len(), b.len())`, in release too, and each `unsafe` call site
+   names that assert in its `SAFETY` comment
+3. The single-accumulator loops take `len / 4` chunks and handle the `len % 4`
+   left by scalar indexing
+4. The 16-wide kernels (`dot_product_neon_4acc`, `squared_l2_neon_4acc`,
+   `cosine_fused_neon_4acc`) run `len / 16 * 16` elements in the main body and
+   the 0–15 left through raw pointers. Both bounds come from `bounds_16wide`,
+   derived from `a`'s own `as_ptr_range()`, never from a subslice such as
+   `a[..main]`: that pointer may not be read past its own end (Stacked
+   Borrows), and the tail reads exactly there. `neon_bounds_tests` pins it
+   under Miri when run by hand (the command is in the test's doc); no CI job
+   runs it yet, which #2397 tracks
+5. `hamming_neon_4acc` and `jaccard_neon_4acc` also run `len / 16 * 16`
+   elements in the main body, but handle the rest by slice indexing, which is
+   bounds-checked
+6. `hamming_binary_neon` loads two `u64` at a time while `i + 2 <= len`, then
+   handles an odd last word by indexing
 
 **Why It's Sound**:
 ```rust
 // SAFETY: NEON load and FMA require in-bounds pointers.
 // - Condition 1: Loop invariant `offset + 4 <= chunks * 4 <= len`.
-// - Condition 2: `a` and `b` have equal length (debug assertion).
+// - Condition 2: `a` and `b` have equal length (the kernel's `# Safety` precondition).
 let va = vld1q_f32(a.as_ptr().add(offset));
 let vb = vld1q_f32(b.as_ptr().add(offset));
 sum = vfmaq_f32(sum, va, vb);
 ```
-
-### Module: `crates/velesdb-core/src/simd_neon.rs`
-
-Standalone NEON implementations (same pattern as `simd_native/neon.rs`).
-Contains `dot_product_neon`, `euclidean_squared_neon`, `cosine_neon`,
-`cosine_normalized_neon` with identical invariant structure.
 
 ### Module: `crates/velesdb-core/src/simd_native/dispatch/` (5 files)
 
@@ -875,67 +892,226 @@ assert!(current == self.epoch_at_creation, "Mmap was remapped");
 - Guard panics if epoch mismatches (fail-safe)
 - No data race: old pointers are never dereferenced after epoch change
 
-**Pattern 2**: CAS entry-point promotion (HNSW)
+**Pattern 2**: entry-point moves under the promotion lock (HNSW)
 
-`NativeHnsw` stores `entry_point` and `max_layer` as `AtomicUsize`. During
-batch insert, `promote_entry_point()` uses `compare_exchange(AcqRel/Acquire)`
-to atomically update the entry point without a mutex.
+`NativeHnsw` stores `entry_point` and `max_layer` as `AtomicUsize`, which
+searches load without a lock. Every write takes `promotion: Mutex<()>`
+(rank 8, before `vectors`): the first claim of an empty graph, each
+promotion together with the anchor reparenting that follows it, and the
+renumbering `reorder_for_locality` applies (#2259).
 
 ```rust
-// First insert: CAS from NO_ENTRY_POINT to node_id
+// First insert: under the lock, CAS from NO_ENTRY_POINT, then set max_layer
 self.entry_point.compare_exchange(
     NO_ENTRY_POINT, node_id, Ordering::AcqRel, Ordering::Acquire
 );
-// Layer promotion: CAS on max_layer, then store entry_point
-self.max_layer.compare_exchange(
-    current_max, node_layer, Ordering::AcqRel, Ordering::Acquire
-);
-self.entry_point.store(node_id, Ordering::Release);
+// Layer promotion: under the lock, check again, store max_layer, swap the
+// entry point, then reparent the anchor tree
+self.max_layer.store(node_layer, Ordering::Release);
+let previous = self.entry_point.swap(node_id, Ordering::AcqRel);
+self.reparent_entry_point(previous, node_id);
 ```
 
 **Why It's Sound**:
-- AcqRel on the CAS ensures that the winner's store is visible to all
-  subsequent Acquire loads.
-- The transient window between `max_layer` CAS and `entry_point` store is
-  safe: readers seeing the old entry point at the new max layer encounter
-  empty neighbor lists and perform a no-op descent.
-- Entry-point promotion occurs O(log_M(N)) times per index lifetime,
-  so the CAS loop almost never retries.
+- Writers are serialized, so two promotions never interleave: the later one
+  cannot clear the anchor the earlier one has just given its node, which
+  would strand the tree below it.
+- AcqRel on the CAS and the swap makes the new entry point visible to every
+  later Acquire load.
+- The transient window between the `max_layer` store and the swap is safe:
+  readers seeing the old entry point at the new max layer encounter empty
+  neighbor lists and perform a no-op descent.
+- A node at or below the maximum layer, the common case, returns before
+  taking the lock; promotion occurs O(log_M(N)) times per index lifetime.
 
-### HNSW Batch Insertion Ordering
+### HNSW Slot Allocation
 
-**Module**: `crates/velesdb-core/src/index/hnsw/index/batch.rs`, `crates/velesdb-core/src/index/hnsw/upsert.rs`
+**Module**: `crates/velesdb-core/src/index/hnsw/sharded_mappings.rs`, `crates/velesdb-core/src/index/hnsw/native_inner.rs`, `crates/velesdb-core/src/index/hnsw/index/batch.rs`, `crates/velesdb-core/src/index/hnsw/direct_writer.rs`, `crates/velesdb-core/src/index/hnsw/upsert.rs`, `crates/velesdb-core/src/index/hnsw/index/mod.rs`, `crates/velesdb-core/src/index/hnsw/native_index.rs`, `crates/velesdb-core/src/index/hnsw/index/vacuum.rs`, `crates/velesdb-core/src/collection/streaming/async_index_builder.rs`
 
-The batch insertion pipeline enforces a strict phase ordering to prevent
-partial state corruption:
+A slot is an index into the graph's `ContiguousVectors`, and the arena is
+its only allocator: a slot exists once a vector has been pushed into it, and
+the push returns it. Every insert path — single, batch, the vacuum rebuild
+and the bulk path's direct writer — places the vector first and then maps
+the id to the slot it got (`ShardedMappings::assign`). Nothing predicts a
+slot.
 
-1. **Validate dimensions** — All vectors are checked before any state mutation.
-   A dimension mismatch panics before `upsert_mapping_batch` runs, so no
-   orphaned mappings are created.
-2. **Register mappings** (`upsert_mapping_batch`) — Allocates internal
-   indices; a replaced ID's old graph node becomes an unreachable tombstone.
-   This is a point of no return: if the subsequent graph insert fails,
-   rollback must undo mappings in reverse order.
-3. **Graph insert** (`parallel_insert`) — Inserts nodes (and their vectors,
-   into the graph's `ContiguousVectors` — the single vector store since
-   PERF1) using rayon. On failure, rollback iterates `rollback_info` in
-   reverse to correctly restore duplicate-ID chains.
-4. **Mapping reconciliation** (`reconcile_batch_mappings`) — Re-points any
-   mapping whose graph-assigned node ID differs from the pre-registered
-   index, so search/rerank/brute-force resolve to the correct graph slot.
+1. **Validate dimensions** — every vector of a batch is checked before the
+   graph sees any, so a mismatch leaves the index untouched.
+2. **Place** (`place`, `place_parallel`, and `place_unlinked` for the
+   direct writer) — the arena appends under its own lock and returns each
+   slot as a `Placed` token, in input order.
+3. **Assign** — each id is mapped to its slot. An id that was already
+   mapped leaves its old slot behind as a tombstone; an id repeated within
+   a batch ends on its last occurrence.
 
-**Invariant**: Dimension validation (step 1) always precedes destructive
-mapping mutations (step 2). This is enforced by the structure of
-`prepare_batch_insert()`.
+The direct writer's slots are linked later, where they are, and nothing
+places them again (#2264). The async builder queues their ids, not their
+vectors, and its drain (`HnswIndex::link_placed`) resolves each id to its
+slot under the read guard. It skips an id deleted since and a slot already
+linked — the id was upserted through the graph since, or a `vacuum` rebuilt
+the graph with it — and links an id queued twice once, at the slot of its
+last write. An index with its exact-distance features off gives the direct
+writer no slot to fill; the builder then places those vectors itself.
 
-**Invariant**: Rollback iterates in reverse order so that within-batch
-duplicate IDs restore correctly (each rollback depends on the state left
-by the previous entry).
+**Invariant**: a mapping only ever names a slot that already holds that
+id's vector, so two writers — a bulk load's direct writer and a single
+upsert, say — cannot hand one slot to two ids. Debug builds check part of
+it in `assign`: a slot whose reverse entry names another id panics before
+either map changes.
 
-**Cross-reference**: The `Collection`-level 3-phase pipeline (`crud.rs`:
-`batch_store_all` -> `per_point_updates` -> `bulk_index_or_defer`) calls
-`insert_batch_parallel` in Phase 3. The crash recovery implications are
-documented in [CONCURRENCY_MODEL.md](CONCURRENCY_MODEL.md#known-limitations).
+**Invariant**: the index read guard is held from placement to assignment.
+`reorder_for_locality` and `vacuum` renumber slots under the write lock, so
+no slot can move between the push that returned it and the mapping that
+names it; `vacuum` rebuilds the mappings before it releases that lock.
+`assign` takes the `Placed` token a placement returns, never a bare slot,
+and the token borrows the guard the placement ran under: releasing that
+guard before the slot is mapped does not compile (E0505). Placements mint
+the token; outside tests (`Placed::for_test`) the one exception is
+`Placed::installed`, which `vacuum` uses for its rebuilt graph: it makes a
+token from a bare slot under a write guard and trusts its caller that the
+slot is that graph's. The token ties a mapping to a guard's lifetime, not to
+a particular index; each call site keeps an index's guard and its mappings
+together.
+
+**Invariant**: `remove` holds the index read guard across its two map
+writes: `soft_delete` borrows the graph, so releasing the guard first does
+not compile. `reorder_for_locality` re-maps under the write guard by
+snapshotting the forward map, clearing both maps and reinserting: one
+overlapping a delete could map the deleted id again, and one between its
+two writes could erase the reverse entry of the id that took its slot.
+`vacuum` re-maps under the write guard too, so no delete lands inside its
+re-map either. As with `Placed`, the borrow proves a borrow of some graph
+(through its guard, for an index's own), not that it is this index's graph:
+each call site keeps an index's guard and its mappings together.
+
+**Invariant**: a write made while `vacuum` rebuilds survives its swap
+(#2262). `vacuum` snapshots each live id with its slot under a read guard,
+rebuilds without one, copies the writes made meanwhile into the new graph in
+catch-up rounds that hold a read guard only to list them and copy their
+vectors out, then re-maps under the write guard from the mappings as they
+stand, not from the snapshot. An id still on the slot its vector was read
+from, by the snapshot or a catch-up round, takes the slot that vector got in
+the new graph. An id on any other slot was inserted or upserted since: its
+vector is copied from the old graph into the new one, one insert at a time,
+before the old graph is dropped. No rayon work runs under the write guard: a
+rayon worker parked on the index lock by a batch search cannot run it, and a
+vacuum that waited on one hung. A snapshot id no longer mapped was
+deleted since, and stays deleted; its node in the new graph is a tombstone,
+and counted as one: the re-map sets `next_idx` to the new graph's slot count,
+so `tombstone_count`, which is what triggers a vacuum, counts every slot no id
+names, wherever it falls. "Still on its snapshot slot" means "untouched"
+because the arena never hands a slot out twice and nothing renumbers
+meanwhile: `vacuum` and `reorder_for_locality` share a maintenance lock, taken
+before the index lock and never by a writer or a save. The rebuild reads M,
+`ef_construction` and alpha from the graph it replaces, so a vacuum keeps the
+parameters the index was built with, and a save after it persists them.
+With no live id the rebuild still runs, into an empty graph, so an index
+whose ids are all deleted is left with no tombstone. Tests:
+`writes_racing_a_vacuum_survive_it`,
+`writes_racing_a_vacuum_of_an_sq8_index_survive_it`,
+`deletes_racing_a_vacuum_keep_the_tombstone_count_exact`,
+`vacuum_keeps_the_index_parameters` and
+`vacuum_of_an_index_with_no_live_id_empties_it` in
+`index/hnsw/index_tests.rs`, and
+`a_vacuum_carrying_writes_finishes_beside_batch_searches` in
+`tests/vacuum_beside_batch_search.rs`.
+
+**Invariant**: a save persists mappings that name only slots of the graph it
+persists, each holding the vector of the id that names it (#2262). `save`
+copies the mappings under the read guard it dumps the graph under, before the
+dump (`persistence::dump_graph`): every slot they name already holds its
+vector, the arena only grows while the guard is held, and a renumber needs the
+write guard. That ordering is not left to timing to test: the dump carries a
+window on its far side, and
+`a_write_in_the_save_window_never_names_a_slot_the_graph_lacks` writes into
+it. With the copy first the write is named by nobody; with the copy moved
+after the dump the same write is named by the mappings and absent from the
+graph, and the reload refuses it. The copy reads the forward map once and derives the reverse map
+from it, so the two agree while writers run. The persisted `next_idx` is the
+slot count the dump wrote, so a slot placed after the copy, which no saved id
+names, reloads as a tombstone. The graph's own dump holds the arena's read
+guard across its vectors file and its graph file, in the declared order
+(vectors, then layers): no node is pushed in between, so the graph file names
+no node the vectors file lacks. Saves of one index run one at a time, under
+a lock of their own that `vacuum` never takes: two at once into one
+directory read the same generation and stamped it over each other's files.
+`HnswIndex` and `NativeHnswIndex` each hold that lock -- the second was
+missed at first, and the invariant is stated of saves, not of one of the two
+wrappers over the same files. Tests:
+`writes_racing_a_save_reload_consistent`,
+`a_write_in_the_save_window_never_names_a_slot_the_graph_lacks`,
+`batch_inserts_racing_a_save_reload_consistent`,
+`a_save_racing_a_vacuum_reloads_consistent`,
+`saves_racing_into_one_directory_reload_consistent` and
+`native_saves_racing_into_one_directory_reload_consistent`.
+
+**Invariant**: a refused vector or batch maps nothing, so there is nothing
+to roll back. A batch the graph refuses part-way leaves the nodes it already
+placed unmapped, as tombstones `vacuum` reclaims.
+
+**Why it used to be otherwise (#2246)**: the mappings kept a counter of
+their own. They predicted a slot at registration, the graph pushed wherever
+the arena was, and a reconcile step corrected the mapping afterwards; the
+direct writer wrote at the predicted slot and never reconciled. With a bulk
+load and single upserts running together the two counters diverged, and
+each of three runs of `tests/concurrent_bulk_slots.rs` lost 611 to 645 of
+6 400 ids — unfindable even by an exhaustive scan, or answering with
+another id's vector.
+
+**Cross-reference**: The `Collection`-level pipeline (`crud.rs`:
+`batch_store_all` -> `per_point_updates`, then `crud_indexing.rs`:
+`bulk_index_or_defer`) calls `insert_batch_parallel` in its last phase. The
+crash recovery implications are documented in
+[CONCURRENCY_MODEL.md](CONCURRENCY_MODEL.md#known-limitations).
+
+### HNSW Reachability Anchors
+
+**Module**: `crates/velesdb-core/src/index/hnsw/native/graph/anchors.rs`, `crates/velesdb-core/src/index/hnsw/native/layer.rs`, `crates/velesdb-core/src/index/hnsw/native/graph/neighbors.rs`, `crates/velesdb-core/src/index/hnsw/native/graph/insert.rs`
+
+Every base-layer node other than the entry point records an *anchor*: the
+node whose list holds one edge to it that eviction never removes (#2259).
+Anchors take four bytes a slot (`AtomicU32`, the width node ids have on
+disk), allocated with the base layer.
+
+**Invariant**, outside a promotion: `anchor_of(x) == a` implies `x` is in
+`a`'s base-layer list, and `a` is itself anchored or is the entry point,
+which has no anchor. The
+anchors therefore form a tree rooted at the entry point, and every anchored
+node is reachable from it over the base layer. Reachable is the guarantee: a
+search starts from where its greedy descent lands and stops on stagnation,
+so it still walks that graph approximately.
+
+- **Set and checked under the parent's list lock.** `link_protected` makes
+  sure `x` is in `a`'s list and records the anchor inside the same
+  `with_neighbors_mut` closure; `evict_most_redundant` scans a list under that
+  lock and skips every entry anchored to its owner. An evictor can never see
+  the anchor without the edge, nor remove the edge after the anchor.
+- **Eviction never removes an anchor edge**: both eviction sites skip every
+  entry anchored to the list's owner, so an evictee's anchor, once it has
+  one, is another list's edge; a batch mate still connecting gets its own
+  from the pass after its chunk. When every entry of a full list is
+  protected, `link_protected` places the edge one level down the tree
+  instead, in a protected child picked by `spread_protected_child`, so no
+  list grows past its cap;
+  only after 32 levels would one grow by one. `connect_back_with_pruning`
+  skips adding the newcomer to such a list.
+- **Every node gets one.** A single insert anchors its node from the first
+  anchored node of its own list; a parallel batch anchors each node as soon as
+  one of its neighbours is, then retries the rest until a pass adds nothing,
+  and links what remains from the entry point. The first insert into an empty
+  graph claims the entry point under the promotion lock
+  (`claim_first_entry_point`): a
+  node that loses that claim, a single insert or a batch's first node,
+  connects through the winner.
+- **The root moves with the entry point.** A promoted entry point drops its
+  own anchor and takes the previous one into its subtree (`reparent_entry_point`),
+  under the promotion lock and in the same step as the swap: two promotions
+  never interleave their reparenting.
+- **Renumbering and loading.** `Layer::remap_ids` moves and renames anchors
+  with the lists they describe. A loaded graph rebuilds them as a
+  breadth-first tree from the entry point, since they are not persisted, then
+  anchors each node that walk missed from its own list: a graph saved before
+  #2259 is repaired when it is loaded.
 
 ### Interior Mutability Invariants: `RaBitQPrecisionHnsw`
 
@@ -969,7 +1145,7 @@ behavior or data inconsistency can occur:
 - The one-time write to `rabitq_index` followed by read-only access is a
   well-established "initialize once, read many" pattern with no data race.
 - `rabitq_store` serializes writes via `RwLock::write()`, and each write
-  holds the lock for ~10ns (a single `Vec::push`), minimizing contention.
+  holds the lock for a single `Vec::push`, minimizing contention.
 
 ### Lock Ordering (MobileGraphStore)
 
@@ -1062,7 +1238,7 @@ let data_as_bytes: &mut [u8] = unsafe {
 
 ---
 
-*Last updated: 2026-08-09 · Applies to: velesdb-core 6.0.0 (this stamp tracks
+*Last updated: 2026-08-09 · Applies to: velesdb-core 7.0.0 (this stamp tracks
 the document revision; this revision adds the `parking_lot`-features invariant to
 the `VectorSliceGuard` entry. The underlying unsafe audit was last run in full on
 2026-06-12, as stated at the top of this page)*

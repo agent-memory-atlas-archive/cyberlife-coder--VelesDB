@@ -15,7 +15,7 @@
 //! To minimize blocking during `ensure_capacity` (which requires a write lock),
 //! we use aggressive pre-allocation:
 //! - Initial size: 16MB (vs 64KB before) - handles most small-medium datasets
-//! - Growth factor: 2x minimum with 64MB floor - fewer resize operations
+//! - Growth: at least doubles the file, and by no less than 64MB - fewer resize operations
 //! - Explicit `reserve_capacity()` for bulk imports
 
 mod vector_io;
@@ -605,7 +605,7 @@ impl MmapStorage {
     /// if the WAL/mmap lock cannot be acquired immediately, the flush step is
     /// skipped and shutdown continues.
     ///
-    /// Use explicit [`VectorStorage::flush`](crate::storage::traits::VectorStorage::flush)
+    /// Use explicit [`VectorStorage::flush`]
     /// to obtain a deterministic durability barrier.
     pub(crate) fn flush_on_shutdown_best_effort(&self) {
         // 1. Flush WAL first (operation log)

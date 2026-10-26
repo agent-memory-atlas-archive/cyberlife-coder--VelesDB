@@ -37,8 +37,10 @@ pub struct VelesCollection {
 
 /// Maps a batch of core search results into the UniFFI `SearchResult` shape
 /// (id + score, payload dropped — the mobile direct-search API is id/score
-/// oriented). Shared by every gated read leaf.
-fn to_mobile_results(results: Vec<velesdb_core::SearchResult>) -> Vec<SearchResult> {
+/// oriented). Shared by every gated read leaf that drops the payload;
+/// `query` keeps it and `multi_query_search_ids` maps `(id, score)` pairs,
+/// so those two build their own.
+pub(crate) fn to_mobile_results(results: Vec<velesdb_core::SearchResult>) -> Vec<SearchResult> {
     results
         .into_iter()
         .map(|r| SearchResult {
@@ -112,11 +114,18 @@ impl VelesCollection {
     ///
     /// * `vector` - Query vector
     /// * `limit` - Maximum number of results to return
-    /// * `quality` - Search quality profile (Fast, Balanced, Accurate, etc.)
+    /// * `quality` - Search quality profile (Fast, Balanced, Accurate, etc.).
+    ///   `Custom`'s `ef` and `Adaptive`'s bounds must lie in the `ef_search`
+    ///   range, 16 to 4096.
     ///
     /// # Returns
     ///
     /// Vector of search results sorted by similarity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VelesError::Database`] when a `Custom` or `Adaptive` ef falls
+    /// outside that range (#2275), or when the search itself fails.
     pub fn search_with_quality(
         &self,
         vector: Vec<f32>,
@@ -131,7 +140,7 @@ impl VelesCollection {
                 query: &vector,
                 k: usize::try_from(limit).unwrap_or(usize::MAX),
                 ef: None,
-                quality: Some(quality.into()),
+                quality: Some(quality.try_into()?),
                 filter: None,
             },
         )?;
@@ -378,16 +387,9 @@ impl VelesCollection {
             .into_iter()
             .zip(searches)
             .map(
-                |(results, s): (Vec<velesdb_core::SearchResult>, IndividualSearchRequest)| {
-                    results
-                        .into_iter()
-                        .take(usize::try_from(s.top_k).unwrap_or(usize::MAX))
-                        .map(|r| SearchResult {
-                            id: r.point.id,
-                            score: r.score,
-                            payload: None,
-                        })
-                        .collect()
+                |(mut results, s): (Vec<velesdb_core::SearchResult>, IndividualSearchRequest)| {
+                    results.truncate(usize::try_from(s.top_k).unwrap_or(usize::MAX));
+                    to_mobile_results(results)
                 },
             )
             .collect())

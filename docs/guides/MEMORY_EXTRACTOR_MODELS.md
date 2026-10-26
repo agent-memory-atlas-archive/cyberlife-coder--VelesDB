@@ -1,6 +1,6 @@
 # Choosing a graph-extraction model for velesdb-memory
 
-Last updated: 2026-08-16 · Applies to: velesdb-memory 0.14.1
+Last updated: 2026-09-13 · Applies to: velesdb-memory 0.14.2
 
 `velesdb-memory` turns a remembered fact into graph edges by asking a local
 model for JSON. Which model you point it at — `VELESDB_MEMORY_EXTRACTOR_MODEL`
@@ -44,11 +44,17 @@ Ranked by how often they eliminate a candidate, not by how interesting they are.
 Verdicts only; the report carries the counts. "Eligible" means zero fatal
 errors, every reply parsed, and a French/English gap within tolerance.
 
+**Measured on 2026-08-16, before the extractor sent its schema as Ollama's
+`format`** (#2241). Every row below describes unconstrained decoding. The
+product now constrains it, which the bench measured as moving the 8 GB tier from
+no eligible model to two — but this table is left as measured until a campaign
+is replayed against what the crate now sends.
+
 | Tier | Usable | Weight budget | Runtime | What we found |
 |---|---|---|---|---|
 | 8 GB | 8 GB | ≤ ~6.5 GB | Ollama | **No eligible model with default settings.** Every candidate produced at least one unparseable or schema-broken reply. Constrained decoding changes this completely — see below. |
 | 12 GB | 12 GB | ≤ ~10 GB | Ollama | **No eligible model.** The failures are rarer than at 8 GB but not absent. |
-| 16 GB | 16 GB | ≤ ~14 GB | Ollama | `qwen3:14b` — the only model eligible with the settings the product sends today: every reply parsed, no schema break, no language asymmetry. |
+| 16 GB | 16 GB | ≤ ~14 GB | Ollama | `qwen3:14b` — the only model eligible under the settings measured then: every reply parsed, no schema break, no language asymmetry. |
 | 24 GB / Mac 32 GB | ~24 GB | ≤ ~21 GB | MLX | Not settled. Our one measured candidate failed on schema and on language symmetry. |
 | Mac 48–64 GB | ~36–48 GB | ≤ ~46 GB | MLX | A 35B instruct model is eligible, and *loses* to `qwen3:14b` on error count while weighing more than three times as much. Size is not the axis. |
 | any | — | — | none | The built-in `outline` extractor needs no model at all. It recognises named entities but extracts neither relations nor attributes: entities without edges. That is the floor, and it is honest about being one. |
@@ -71,9 +77,13 @@ Two things to keep straight before acting on it:
 - **It repairs structure, not comprehension.** A constrained small model returns
   valid JSON that is more often wrong about the passage. It stops losing
   enrichment silently; it does not become accurate.
-- **`velesdb-memory` does not send `format` today.** Those figures describe a
-  product change, not a setting you can switch on. Until it ships, the tiers
-  above are what you get.
+- **`velesdb-memory` now sends `format` on every extraction call.** The figures
+  above were measured as a declared variant *before* that shipped, and the
+  schema the crate sends is a **superset** of the measured one: it also
+  constrains `facts`, which the bench variant left free. So the direction is
+  established and the tier table is not yet re-earned — the 8 GB and 12 GB rows
+  stay as published until a campaign is replayed against the schema the product
+  actually sends. Treat them as a floor, not as the last word.
 
 ## Settings that are yours to state, not to inherit
 
@@ -108,9 +118,20 @@ for your own language.
 
 Latency. The campaign replays its first configuration last, and rejects itself
 if the two passes disagree by more than 15%; ours disagreed by 26% and then by
-55%, because background load on the machine moved between passes. Quality
-verdicts reproduced to the digit across both campaigns — greedy decoding makes
-them deterministic — so those are published and the timings are not.
+55%, because background load on the machine moved between passes. The quality
+counts did not move: run for run, the two campaigns — one machine, half an hour
+apart — produced the same numbers, so those are published and the timings are
+not.
+
+That is a repeat on one machine, not a reproduction, and it is all the evidence
+supports. A re-run on another machine, CPU-only with `num_ctx` 4096, produced
+different counts, and nothing says what moved: none of the 26 screening files
+the two campaigns published records the Ollama version, or any decode option
+they ran with but the generation cap, and the 2 that hold their model's digest
+hold it by accident (#1949). Until a campaign that records them is run again,
+the tiers above are **unverified** beyond the machine that measured them. That
+re-run, with a declared `num_ctx`, is pending: it waits on #1956, and on the
+models being present on a machine that can run them.
 
 If you need timings, run the bench on your own quiet machine. Numbers from
 someone else's hardware would not transfer anyway: what Metal does on unified

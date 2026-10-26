@@ -19,6 +19,7 @@ type StatusSnapshot = (
     Option<usize>,
     bool,
     u64,
+    u64,
 );
 
 #[tool_router(router = status_tool_router, vis = "pub(super)")]
@@ -26,7 +27,7 @@ impl McpServer {
     #[tool(
         name = "memory_status",
         output_schema = crate::schema::wire_safe_output_schema::<MemoryStatusResult>(),
-        description = "Report this memory server's health and configuration: which embedder is running and whether recall is SEMANTIC (`embedder.semantic: false` means the offline `hash` default — recall matches surface form, not meaning, and configuring a semantic embedder is an env-var switch, no rebuild), what embedder the store was filled by per its on-disk provenance record, whether a default extraction backend is configured (`remember_extracted` may omit `extractor` iff `extraction.configured`; explicit `outline` remains available), whether the background autograph worker is active and how many enrichments a full queue dropped, and the corpus size — `memory.facts` and `memory.edges`. Read `memory.edges` when `why` seems to add nothing over `recall`: `0` means no fact was ever linked (by `relate`, `remember`'s `links`, or extraction), so `why` HAS no graph to walk and degrades to plain search — that is a wiring gap, not a defect. Call this at session start, or whenever recall quality or `why`'s evidence trails surprise you, and tell the user when the server runs degraded. Takes no parameters."
+        description = "Report server health/config: running embedder and whether recall is SEMANTIC (`embedder.semantic: false` = offline hash — surface matching, not meaning; semantic is an env-var switch, no rebuild), embedder provenance of the store, whether a default extractor is configured (`extraction.configured` lets `remember_extracted` omit `extractor`), autograph worker status, dropped/failed enrichment counts (fact stored, graph partial — re-remember to complete), corpus size (`memory.facts`, `memory.edges`). `edges: 0` means `why` has no graph to walk and degrades to plain search — a wiring gap, not a defect. Call at session start, or when recall quality or `why`'s trails surprise — and tell the user when the server runs degraded. No parameters."
     )]
     async fn memory_status(&self) -> Result<Json<MemoryStatusResult>, ErrorData> {
         let service = Arc::clone(&self.service);
@@ -44,6 +45,7 @@ impl McpServer {
                     current.edge_count(),
                     current.autograph_queue_open(),
                     current.autograph_dropped(),
+                    current.autograph_failed(),
                 )
             })
         })
@@ -54,8 +56,16 @@ impl McpServer {
     }
 
     fn status_result(&self, snapshot: StatusSnapshot) -> MemoryStatusResult {
-        let (model, dimension, provenance, facts, edges, autograph_active, autograph_dropped) =
-            snapshot;
+        let (
+            model,
+            dimension,
+            provenance,
+            facts,
+            edges,
+            autograph_active,
+            autograph_dropped,
+            autograph_failed,
+        ) = snapshot;
         MemoryStatusResult {
             embedder: embedder_status(model, dimension),
             provenance: provenance_status(provenance),
@@ -63,6 +73,7 @@ impl McpServer {
                 configured: self.extractors.read().default_is_configured(),
                 autograph_active,
                 autograph_dropped,
+                autograph_failed,
             },
             memory: MemoryCounts { facts, edges },
         }

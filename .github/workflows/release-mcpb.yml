@@ -28,6 +28,9 @@ permissions:
   id-token: write   # GitHub OIDC for mcp-publisher (proves io.github.cyberlife-coder/*)
 
 env:
+  # rustup never installs a toolchain on its own: a Rust call reached before the
+  # job's install step fails here instead of installing mid-build.
+  RUSTUP_AUTO_INSTALL: "0"
   BIN: velesdb-memory
   SERVER_NAME: io.github.cyberlife-coder/velesdb-memory
 
@@ -65,20 +68,15 @@ jobs:
           - { target: aarch64-unknown-linux-gnu, host: ubuntu-latest,  os: linux,   arch: arm64 }
           - { target: x86_64-pc-windows-msvc,    host: windows-latest, os: win32,   arch: amd64 }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # rust-toolchain.toml pins the build to its own toolchain, which rustup
-      # auto-installs WITHOUT the cross-compilation target added above (the
-      # action only adds it to `stable`). Add it to the pinned toolchain too,
-      # or every non-native matrix entry fails with E0463 "can't find crate
-      # for `std`" — which is exactly what shelved the 0.8.0–0.9.1 bundles.
-      - name: Add target to the pinned toolchain
-        run: rustup target add ${{ matrix.target }}
+      # The cross target goes onto rust-toolchain.toml's toolchain, the one
+      # cargo builds with: adding it to any other toolchain is what shelved
+      # the 0.8.0–0.9.1 bundles (E0463 "can't find crate for `std`").
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: |
+          rustup toolchain install --no-self-update --profile minimal
+          rustup target add ${{ matrix.target }}
 
       - name: Install aarch64 linux cross linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -165,7 +163,7 @@ jobs:
     needs: [version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all bundles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -180,6 +178,10 @@ jobs:
         run: |
           set -euo pipefail
           # Ensure a release exists for the tag, then upload (clobber) the bundles.
+          # The --notes below is a placeholder for the case where this job wins
+          # the create race against release-memory.yml; that workflow's
+          # publish-release-notes job then replaces the body with the crate's
+          # CHANGELOG section, so it is never what a reader ends up seeing.
           # --latest=false: the velesdb-memory release must never become the
           # repo's "Latest release" (that belongs to the VelesDB vX.Y.Z release,
           # which carries the binaries the README download link points at). Left

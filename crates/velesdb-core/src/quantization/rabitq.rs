@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 pub struct RaBitQCorrection {
     /// L2 norm of the centered vector before binarization.
     pub vector_norm: f32,
-    /// Inner product between the binary reconstruction (`±1/√D` scaled) and the
-    /// rotated normalized vector. Measures quantization quality; closer to 1.0
-    /// is better. NOT consumed by the current symmetric (query-binarized)
+    /// Inner product between the binary reconstruction (`±1/√D` scaled) and
+    /// the rotated normalized vector. Measures quantization quality; closer to
+    /// 1.0 is better. NOT consumed by the current symmetric (query-binarized)
     /// estimator, whose de-bias is the arcsine-law transform in
-    /// [`RaBitQIndex::distance_from_prepared_slice`]; it is the per-vector
+    /// `RaBitQIndex::distance_from_prepared_slice`; it is the per-vector
     /// rescale the paper's asymmetric estimator (real-valued query) divides
     /// by, kept in the persisted format for that upgrade path (#2104).
     pub quantization_ip: f32,
@@ -93,7 +93,7 @@ pub(crate) const fn last_word_mask(dim: usize) -> u64 {
 /// Computes `result[i] = sum_j rotation[i * dim + j] * vector[j]` for each `i`.
 ///
 /// F-12: Uses SIMD dot product per row instead of scalar iterator chain.
-/// For dim=768, this is ~8x faster (SIMD dot product vs scalar sum).
+/// At embedding dimensions such as 768 this beats the scalar sum it replaced.
 #[must_use]
 pub(crate) fn apply_rotation_flat(rotation: &[f32], vector: &[f32], dim: usize) -> Vec<f32> {
     (0..dim)
@@ -207,7 +207,7 @@ impl RaBitQIndex {
     ///
     /// Avoids the `Vec<u64>` allocation that `distance_from_prepared` would
     /// require when the caller only has a borrowed slice (e.g. from
-    /// [`RaBitQVectorStore::get_bits_slice`]).
+    /// [`RaBitQVectorStore::get_bits_slice`](super::RaBitQVectorStore::get_bits_slice)).
     ///
     /// `pub(crate)` for Phase 3 integration (`RaBitQ` HNSW search path).
     pub(crate) fn distance_from_prepared_slice(

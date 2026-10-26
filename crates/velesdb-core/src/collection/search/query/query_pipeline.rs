@@ -108,7 +108,7 @@ impl Collection {
 
     /// Attempts early-return paths or validates LET-binding compatibility.
     ///
-    /// When `let_bindings` is empty, delegates to [`try_early_return_path`] for
+    /// When `let_bindings` is empty, delegates to [`Self::try_early_return_path`] for
     /// NOT-similarity, union, and sparse fast paths. When LET bindings are present,
     /// checks that the query shape is compatible -- unsupported shapes get an explicit
     /// error instead of silent fallthrough.
@@ -134,7 +134,7 @@ impl Collection {
 
     /// Validates that LET bindings are compatible with the extracted query shape.
     ///
-    /// LET bindings require [`finalize_query_results`] which early-return paths
+    /// LET bindings require [`Self::finalize_query_results`] which early-return paths
     /// bypass. Returns an explicit error for unsupported combinations.
     fn validate_let_binding_support(extracted: &ExtractedComponents) -> Result<()> {
         let unsupported = if extracted.sparse_vector_search.is_some() {
@@ -290,7 +290,6 @@ impl Collection {
 
     /// Extracts all query components from the SELECT statement's WHERE clause.
     pub(super) fn extract_query_components(
-        &self,
         stmt: &crate::velesql::SelectStatement,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<ExtractedComponents> {
@@ -314,13 +313,11 @@ impl Collection {
             Self::validate_similarity_query_structure(cond)?;
             Self::collect_graph_match_predicates(cond, &mut graph_match_predicates);
             sparse_vector_search = Self::extract_sparse_vector_search(cond).cloned();
-            fused_search = self.extract_fused_vectors(cond, params)?;
+            fused_search = Self::extract_fused_vectors(cond, params)?;
 
-            let mut extracted_cond = cond.clone();
-            vector_search = self.extract_vector_search(&mut extracted_cond, params)?;
-            similarity_conditions =
-                self.extract_all_similarity_conditions(&extracted_cond, params)?;
-            filter_condition = Some(extracted_cond);
+            vector_search = Self::extract_vector_search(cond, params)?;
+            similarity_conditions = Self::extract_all_similarity_conditions(cond, params)?;
+            filter_condition = Some(cond.clone());
         }
 
         Ok(ExtractedComponents {

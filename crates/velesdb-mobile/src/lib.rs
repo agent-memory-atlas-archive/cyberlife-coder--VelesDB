@@ -191,7 +191,7 @@ impl VelesDatabase {
     /// The file is parsed with
     /// [`VelesConfig::load_from_path_engine_only`](velesdb_core::config::VelesConfig::load_from_path_engine_only):
     /// only the engine sections (`[search]`/`[hnsw]`/`[storage]`/`[limits]`/
-    /// `[quantization]`/`[wal_batch]`) are considered, any other top-level
+    /// `[quantization]`) are considered, any other top-level
     /// table is dropped, and `VELESDB_*` environment variables still layer on
     /// top of the filtered file. The database is then opened with
     /// [`Database::open_with_config`](velesdb_core::Database::open_with_config),
@@ -356,11 +356,11 @@ impl VelesDatabase {
     /// # Storage Modes
     ///
     /// - **Full**: Best recall, 4 bytes/dimension
-    /// - **Sq8**: 4x compression, ~1% recall loss (recommended for mobile)
-    /// - **Binary**: 32x compression, ~5-10% recall loss (for extreme constraints)
-    /// - **`ProductQuantization`**: 8x-16x compression via trained codebooks
+    /// - **Sq8**: 4x compression, small recall loss (recommended for mobile)
+    /// - **Binary**: 32x compression, larger recall loss (for extreme constraints)
+    /// - **`ProductQuantization`**: `2 × dim / m` compression via trained codebooks (dim/4 at m = 8)
     ///   (requires a training step before upserts)
-    /// - **`Rabitq`**: 32x compression with ~1-2% recall loss (1-bit with
+    /// - **`Rabitq`**: 32x compression with a small recall loss (1-bit with
     ///   rotation + scalar correction)
     pub fn create_collection_with_storage(
         &self,

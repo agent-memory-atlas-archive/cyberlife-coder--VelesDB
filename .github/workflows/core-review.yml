@@ -1,0 +1,120 @@
+name: Core Review
+
+# One report on a pull request that changes velesdb-core, written for the
+# reviewer rather than for the merge button: the public API it adds, changes
+# or removes. It does not block. This workflow lives outside ci.yml, so
+# `CI Success`, the only required check, neither waits for this job nor reads
+# it: red here means "read the report", not "cannot merge".
+#
+# A `mutants` job sat here too and was removed (#2339). It never once returned
+# a verdict on a real velesdb-core diff: the only two runs that met one were
+# cut at the 45-minute action limit, the first with 2 of 22 mutants tested and
+# a third still building, the second with none of 59 tested after 105 s of
+# build and 981 s of unmutated baseline. Six shards of about 45 minutes each,
+# every one re-paying that baseline, is the price of a complete verdict on a
+# report nothing is allowed to block on; narrowing the test set buys between
+# x2.3 and x28 depending on the module, and nothing at all on a diff that
+# spans two. Mutation testing has earned its keep here as a reviewer's local
+# tool aimed at one area -- 25 mutations on #2282's guards, 23 killed, both
+# survivors turned into findings -- and that is what it stays. Run it by hand:
+#
+#     cargo mutants -p velesdb-core --features internal-bench \
+#       --file '<the file under review>' -- --lib -- --test-threads=1
+#
+# `--features internal-bench` is not optional: cargo-mutants picks mutants
+# from the source text with no knowledge of `cfg`, so code the feature gates
+# is mutated either way and, without it, compiled out -- every such mutant is
+# then reported MISSED although no test could possibly kill it (#2348).
+#
+# The path filter is safe only because nothing here is required. A required
+# check behind a filter is absent on the pull requests it filters out, and an
+# absent required check blocks them (ci.yml's `pull_request` trigger, #1465).
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'crates/velesdb-core/**'
+      - '.github/workflows/core-review.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # rustup never installs a toolchain on its own: a Rust call reached before the
+  # job's install step fails here instead of installing mid-build.
+  RUSTUP_AUTO_INSTALL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  # ===========================================================================
+  # Public API diff. ci.yml's `semver-checks` fails a BREAKING change; this
+  # job prints every change, additions included, so a new public item is a
+  # decision the reviewer saw rather than a side effect. It is in the job
+  # summary.
+  #
+  # Blind spot shared with `semver-checks`: both build on x86_64 Linux, so a
+  # public item that only compiles for aarch64 (`simd_neon_prefetch`) or wasm32 is in
+  # neither report.
+  # ===========================================================================
+  public-api:
+    name: Public API diff (velesdb-core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # nightly: rustdoc writes JSON only under `-Z unstable-options
+      # --output-format json`. Set for the whole job, so the tool's install
+      # and both rustdoc builds run on the nightly installed below.
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # HEAD is the merge commit GitHub builds for the pull request; its
+          # first parent is the base it was merged onto. Depth 2 fetches both.
+          fetch-depth: 2
+
+      # nightly: the rustdoc JSON below needs `-Z unstable-options`; installed
+      # here, so rustup never installs it mid-step. cargo-public-api 0.52
+      # reads the JSON of every nightly since 2025-08-02; a nightly that
+      # changes the format breaks this job until the tool is bumped.
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # nightly
+        with:
+          toolchain: nightly
+
+      # No prebuilt binary is published, so it is built from source.
+      - name: Install cargo-public-api
+        run: cargo install cargo-public-api --version 0.52.0 --locked
+
+      # Each end's rustdoc JSON is built here and the two files are diffed, so
+      # the nightly flag the job needs is written in this file, not hidden in
+      # the tool. Both builds share target/, so dependencies compile once. All
+      # features, so an item behind `gpu` or `persistence` is listed too.
+      #
+      # `--cap-lints warn`: this job reports the API, it does not lint the docs.
+      # lib.rs denies `rustdoc::broken_intra_doc_links`, and a newer nightly can
+      # find a broken link the pinned toolchain's rustdoc does not (a
+      # `#[deprecated]` note, in run 35233555756); the base commit cannot be
+      # fixed, so without the cap it would build no JSON and the job no report.
+      # Broken links stay ci.yml's `Rustdoc intra-doc links` step's to fail.
+      - name: Diff the public API against the base
+        run: |
+          base=$(git rev-parse HEAD^1)
+          head=$(git rev-parse HEAD)
+          for end in base head; do
+            git checkout --quiet --detach "${!end}"
+            cargo rustdoc -p velesdb-core --lib --all-features -- -Z unstable-options --output-format json --cap-lints warn
+            cp target/doc/velesdb_core.json "$RUNNER_TEMP/$end.json"
+          done
+          cargo public-api diff "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/public-api.txt"
+          cat "$RUNNER_TEMP/public-api.txt"
+          {
+            echo '### velesdb-core public API, base to this pull request'
+            echo '```'
+            cat "$RUNNER_TEMP/public-api.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

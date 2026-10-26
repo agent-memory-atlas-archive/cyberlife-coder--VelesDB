@@ -13,6 +13,17 @@
 //! (bring your own LLM by implementing [`Extractor`]) while a batteries-included
 //! `OllamaExtractor` backend lives behind the `extractor-http` feature.
 
+#[cfg(feature = "extractor-http")]
+#[path = "extract_wire.rs"]
+mod wire;
+#[cfg(feature = "extractor-http")]
+use wire::{extraction_schema, fact_list_schema, generate_body};
+#[cfg(feature = "extractor-http")]
+#[path = "extract_openai.rs"]
+mod openai_extractor;
+#[cfg(feature = "extractor-http")]
+pub use openai_extractor::OpenAiExtractor;
+
 /// One extracted, graph-ready fact: a self-contained sentence plus the salient
 /// topics it concerns. The topics become shared graph hubs, so two facts about
 /// the same topic are reachable from one another even with no textual overlap.
@@ -761,7 +772,7 @@ pub type DynExtractor = std::sync::Arc<dyn Extractor + Send + Sync>;
 /// offline behavior. It reads no natural language, so a caller holding only
 /// prose wants a generative backend. What it offers instead is the one thing a
 /// model cannot: the graph is exactly the one the caller wrote down — up to
-/// [`orient_kinship`], the repointing pass EVERY backend's relations go
+/// `orient_kinship`, the repointing pass EVERY backend's relations go
 /// through, which can flip a triple whose predicate is a kinship noun the
 /// passage also states possessively.
 ///
@@ -1056,7 +1067,7 @@ impl OllamaExtractor {
     /// subordinate to the global `timeout` in `ureq` and must not be read as a
     /// per-read guarantee; `timeout_connect` and `timeout_write` are the two
     /// that actually bite. The connect bound matters most here: `ureq`'s own
-    /// default is 30 s, which for a `localhost` daemon is 15x too long — and
+    /// default is 30 s, against the 2 s given here to a `localhost` daemon — and
     /// with replays, that idle wait would be paid three times over.
     #[must_use]
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
@@ -1095,85 +1106,11 @@ fn extraction_from_reply(reply: &str) -> Result<Extraction, ExtractError> {
 #[cfg(feature = "extractor-http")]
 impl Extractor for OllamaExtractor {
     fn extract(&self, text: &str) -> Result<Vec<ExtractedFact>, ExtractError> {
-        facts_from_reply(&self.generate(&build_prompt(text))?)
+        facts_from_reply(&self.generate(&build_prompt(text), &fact_list_schema())?)
     }
 
     fn extract_graph(&self, text: &str) -> Result<Extraction, ExtractError> {
-        extraction_from_reply(&self.generate(&build_graph_prompt(text))?)
-    }
-}
-
-/// Extracts through any **OpenAI-compatible** `/v1/chat/completions` endpoint.
-///
-/// A sibling of [`OllamaExtractor`], not a layer over it — the same shape the
-/// embedding role takes. The prompt stays here, on the role side: it is what
-/// this crate wants said, not something the protocol knows about.
-#[cfg(feature = "extractor-http")]
-#[derive(Debug)]
-pub struct OpenAiExtractor {
-    client: crate::http_client::HttpJsonClient,
-    model: String,
-}
-
-#[cfg(feature = "extractor-http")]
-impl OpenAiExtractor {
-    /// Build an extractor targeting `model` on the server at `base_url`
-    /// (origin and port, no path).
-    ///
-    /// Bounded on the same four axes as [`OllamaExtractor::new`], with the
-    /// same generous [`REQUEST_TIMEOUT_SECS`]: generation is slow wherever it
-    /// runs, and the ceiling belongs to the role, not to the transport.
-    #[must_use]
-    pub fn new(
-        base_url: impl Into<String>,
-        model: impl Into<String>,
-        auth: crate::http_client::Auth,
-    ) -> Self {
-        let agent =
-            crate::http_client::bounded_agent(crate::http_client::AgentBudget::local_daemon(
-                std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS),
-            ));
-        Self {
-            client: crate::http_client::HttpJsonClient::new(
-                crate::openai::base_url(&base_url.into()),
-                auth,
-                agent,
-            ),
-            model: model.into(),
-        }
-    }
-
-    /// POST one prompt and return the assistant's reply.
-    fn generate(&self, prompt: &str) -> Result<String, ExtractError> {
-        let body = crate::openai::chat_body(&self.model, prompt, MAX_GENERATION_TOKENS);
-        let payload = self
-            .client
-            .post_json(crate::openai::CHAT_COMPLETIONS_PATH, &body)
-            .map_err(|failure| {
-                ExtractError::Backend(crate::http_retry::actionable_openai_failure(
-                    "chat/completions",
-                    &failure.url,
-                    &self.model,
-                    failure.attempts,
-                    &failure.cause,
-                    Some(
-                        "use the offline deterministic reader with \
-                         VELESDB_MEMORY_EXTRACTOR=outline",
-                    ),
-                ))
-            })?;
-        crate::openai::parse_chat_response(&payload).map_err(ExtractError::Backend)
-    }
-}
-
-#[cfg(feature = "extractor-http")]
-impl Extractor for OpenAiExtractor {
-    fn extract(&self, text: &str) -> Result<Vec<ExtractedFact>, ExtractError> {
-        facts_from_reply(&self.generate(&build_prompt(text))?)
-    }
-
-    fn extract_graph(&self, text: &str) -> Result<Extraction, ExtractError> {
-        extraction_from_reply(&self.generate(&build_graph_prompt(text))?)
+        extraction_from_reply(&self.generate(&build_graph_prompt(text), &extraction_schema())?)
     }
 }
 
@@ -1187,21 +1124,9 @@ impl OllamaExtractor {
     /// Ollama may have closed, and `ureq` will not replay a POST with a body.
     /// The whole attempt — POST and body read — is inside the closure so a
     /// truncated response is replayed rather than surfacing as a parse error.
-    fn generate(&self, prompt: &str) -> Result<String, ExtractError> {
+    fn generate(&self, prompt: &str, schema: &serde_json::Value) -> Result<String, ExtractError> {
         let url = format!("{}/api/generate", self.base_url);
-        let body = serde_json::json!({
-            "model": self.model,
-            "prompt": prompt,
-            "stream": false,
-            "think": false,
-            // Extraction models are large — the one this crate documents as an
-            // example is 21.9 GB — so an unload between calls is the dominant
-            // cost, not the generation. Shares the embedder's knob so one
-            // setting governs every Ollama call the daemon makes.
-            "keep_alive": crate::embedder::keep_alive(),
-            "options": { "temperature": 0, "num_predict": MAX_GENERATION_TOKENS },
-        })
-        .to_string();
+        let body = generate_body(&self.model, prompt, schema).to_string();
         let attempt = || {
             let response = self
                 .agent

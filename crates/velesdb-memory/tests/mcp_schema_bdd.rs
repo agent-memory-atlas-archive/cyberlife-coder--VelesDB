@@ -374,6 +374,38 @@ async fn no_polymorphic_exemption_is_stale() {
     client.cancel().await.expect("close the MCP session");
 }
 
+/// #2261: schemars copies doc comments into the schemas, so the schemas the
+/// tools published carried rustdoc links no client resolves. Every tool the
+/// server lists is read, input and output schema, and no description may
+/// hold one (`velesdb-rustdoc-guard`).
+#[tokio::test]
+async fn every_tool_schema_publishes_no_rustdoc_link() {
+    let (_store, client) = connected().await;
+    let tools = client.list_all_tools().await.expect("list tools");
+    assert!(!tools.is_empty(), "the server advertises at least one tool");
+    let mut offenders = Vec::new();
+    let mut schemas = 0_usize;
+    for tool in &tools {
+        let published = [Some(&tool.input_schema), tool.output_schema.as_ref()];
+        for schema in published.into_iter().flatten() {
+            schemas += 1;
+            let schema = Value::Object((**schema).clone());
+            for path in velesdb_rustdoc_guard::strings_with_rustdoc_links(&schema, &["description"])
+            {
+                offenders.push(format!("{}: {path}", tool.name));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} descriptions in the {schemas} schemas of {} tools hold rustdoc link syntax:\n{}",
+        offenders.len(),
+        tools.len(),
+        offenders.join("\n")
+    );
+    client.cancel().await.expect("close the MCP session");
+}
+
 /// The regression that cost four round trips: `save_working_context`'s
 /// nested arrays must be self-describing.
 #[tokio::test]
@@ -1326,7 +1358,7 @@ fn walk_named_children(map: &Map<String, Value>, path: &str, found: &mut Vec<Nam
     }
 }
 
-/// The shape `crate::schema::widen_id_properties` writes on the way OUT:
+/// The shape `widen_id_properties` (`schema_walks.rs`) writes on the way OUT:
 /// `["integer", "string"]`, directly or on the `items` of an id array
 /// (`fragment_ids`). It is the server saying, in its own published bytes,
 /// "a value under this name may legally be a decimal string".

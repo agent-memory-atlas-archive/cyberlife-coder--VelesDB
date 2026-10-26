@@ -38,6 +38,19 @@ ignore = [
     # migration as the ignores above. If cargo-deny starts erroring on
     # unsound advisories, add: { id = "RUSTSEC-2024-0429", ... } here.
 
+    # ── Demo-only transitives (demos/tauri-rag-app) ───────────────────
+    # First audited when #2322 extended the gate past the root lockfile.
+    # All three are `unmaintained`, not vulnerabilities, and NONE of them
+    # appears in the root `Cargo.lock` (verified: `grep -c '^name = "<c>"$'`
+    # returns 0 for each), so these entries can only ever match the demo.
+    # Everything the demo could fix by a version bump was fixed rather than
+    # ignored: crossbeam-epoch 0.9.18 -> 0.9.21 and h2 0.4.13 -> 0.4.19.
+    #
+    # Last reviewed: 2026-09-20
+    { id = "RUSTSEC-2024-0436", reason = "paste: proc-macro transitive of the demo's Tauri stack, unmaintained, no successor" },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix: indicatif transitive in the demo, unmaintained" },
+    { id = "RUSTSEC-2026-0105", reason = "core2: demo transitive, unmaintained and all versions yanked" },
+
     # ── Tauri non-GTK3 transitives ────────────────────────────────────
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: tauri build-time transitive, unmaintained" },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range: tauri transitive, unmaintained" },
@@ -53,6 +66,16 @@ ignore = [
 
     # ── velesdb-cli transitive ────────────────────────────────────────
     { id = "RUSTSEC-2024-0384", reason = "instant: velesdb-cli transitive (clap/indicatif chain), unmaintained" },
+
+    # ── uniffi / askama build-time transitive (velesdb-mobile) ────────
+    # basic-toml is read by askama_derive's `config` feature, a proc-macro
+    # that uniffi_bindgen's templates need at COMPILE time; nothing parses
+    # TOML with it at run time. askama_derive 0.16.1 and uniffi_bindgen
+    # 0.32.2 are the latest releases and both still depend on it, so no
+    # bump removes it. Drop this entry when uniffi moves off it.
+    #
+    # Last reviewed: 2026-10-24
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml: askama_derive (uniffi_bindgen, velesdb-mobile) build-time transitive, unmaintained, latest askama/uniffi still use it" },
 
 
     # ── Embedded / heapless transitive (postcard 1.x) ─────────────────
@@ -133,6 +156,11 @@ license-files = []
 
 [[licenses.clarify]]
 name = "velesdb-memory"
+expression = "LicenseRef-ELv2"
+license-files = []
+
+[[licenses.clarify]]
+name = "velesdb-rustdoc-guard"
 expression = "LicenseRef-ELv2"
 license-files = []
 

@@ -202,7 +202,7 @@ fn build_trained_collection(
     (coll, db, dir)
 }
 
-/// Measure average recall@k using default `ef_search` (128).
+/// Measure average recall@k at the default Balanced preset.
 fn measure_recall(
     collection: &VectorCollection,
     queries: &[Vec<f32>],
@@ -337,7 +337,7 @@ fn clustered_recall_benchmarks(c: &mut Criterion) {
             assert!(
                 recall >= 0.85,
                 "Clustered PQ rescore recall@{K} = {recall:.4}, expected >= 0.85 \
-                 (limitation: HNSW recall on clustered data is known to have a ceiling around 0.87-0.88)"
+                 (benchmarks/baseline_multidist.json recorded 1.0 for this variant on 2026-03-08)"
             );
             recall
         });
@@ -355,7 +355,7 @@ fn clustered_recall_benchmarks(c: &mut Criterion) {
             assert!(
                 recall >= 0.85,
                 "Clustered full precision recall@{K} = {recall:.4}, expected >= 0.85 \
-                 (limitation: HNSW recall on clustered data is known to have a ceiling around 0.87-0.88)"
+                 (benchmarks/baseline_multidist.json recorded 1.0 for this variant on 2026-03-08)"
             );
             recall
         });
@@ -390,7 +390,7 @@ fn clustered_recall_benchmarks(c: &mut Criterion) {
             assert!(
                 recall >= 0.85,
                 "Clustered OPQ rescore recall@{K} = {recall:.4}, expected >= 0.85 \
-                 (limitation: HNSW recall on clustered data is known to have a ceiling around 0.87-0.88)"
+                 (benchmarks/baseline_multidist.json recorded 1.0 for this variant on 2026-03-08)"
             );
             recall
         });
@@ -408,7 +408,7 @@ fn clustered_recall_benchmarks(c: &mut Criterion) {
             assert!(
                 recall >= 0.85,
                 "Clustered RaBitQ recall@{K} = {recall:.4}, expected >= 0.85 \
-                 (limitation: HNSW recall on clustered data is known to have a ceiling around 0.87-0.88)"
+                 (benchmarks/baseline_multidist.json recorded 1.0 for this variant on 2026-03-08)"
             );
             recall
         });
@@ -426,7 +426,7 @@ fn clustered_recall_benchmarks(c: &mut Criterion) {
             assert!(
                 recall >= 0.85,
                 "Clustered PQ oversampling=8 recall@{K} = {recall:.4}, expected >= 0.85 \
-                 (limitation: HNSW recall on clustered data is known to have a ceiling around 0.87-0.88)"
+                 (benchmarks/baseline_multidist.json recorded 1.0 for this variant on 2026-03-08)"
             );
             recall
         });
@@ -445,7 +445,7 @@ fn clustered_recall_benchmarks(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark Group 2: Binary {0,1} (2 variants, default ef_search=128)
+// Benchmark Group 2: Binary {0,1} (2 variants, default Balanced preset)
 // ---------------------------------------------------------------------------
 
 #[expect(clippy::significant_drop_tightening)] // Reason: the guard under test is held to the assertion on purpose

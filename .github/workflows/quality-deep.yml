@@ -24,6 +24,10 @@ on:
         description: 'Run Loom concurrency tests'
         type: boolean
         default: true
+      run_careful:
+        description: 'Run cargo-careful (std debug assertions)'
+        type: boolean
+        default: true
       run_fuzz:
         description: 'Run fuzzing (5 min per target)'
         type: boolean
@@ -36,12 +40,39 @@ on:
         description: 'Run deterministic cost-crossover harness'
         type: boolean
         default: true
+      run_minimal_versions:
+        description: 'Check velesdb-core and velesdb-memory, each alone, against their minimal dependency versions on Linux and macOS'
+        type: boolean
+        default: true
+
+  # Only minimal-versions (below) runs on a pull request: every other job here
+  # is gated on `schedule` or a dispatch input, so it skips. The filter lists
+  # the manifests that job resolves, and not Cargo.lock: `cargo update`
+  # discards the lockfile and resolves afresh, so a lockfile-only change cannot
+  # change its verdict.
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'Cargo.toml'
+      - 'crates/*/Cargo.toml'
+      - '.github/workflows/quality-deep.yml'
 
 # Pas de concurrency cancel - ces tests sont importants
+#
+# Scheduled and dispatched runs each get a group of their own, so the rule
+# above holds for them. Only a pull request's run is cancelled, by the next
+# push to that pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 env:
+  # rustup never installs a toolchain on its own: a Rust call reached before the
+  # job's install step fails here instead of installing mid-build.
+  RUSTUP_AUTO_INSTALL: "0"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -58,6 +89,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # nightly: Miri ships with nightly only; the override below keeps every
+      # cargo call of this job, rust-cache's included, on it.
       - name: Install Miri
         run: |
           rustup toolchain install nightly --component miri
@@ -69,38 +102,56 @@ jobs:
           shared-key: "velesdb-miri"
           save-if: true
 
-      # Distance module - code SIMD scalaire (pas les intrinsics)
+      # Every step goes through scripts/miri-step.sh: libtest exits 0 on a
+      # filter that matches nothing, so each step also asserts that a test of
+      # the module it names passed (AGENTS.md method 17). `--lib` keeps the
+      # integration-test binaries, which never match, out of the run.
+
+      # Distance module - code SIMD scalaire (pas les intrinsics). The scalar
+      # tests live in `distance_tests`, at the crate root, which `distance::`
+      # does not match. `geo_distance_tests` also ends in `distance_tests::`
+      # but holds no unsafe code and asserts bit-exact trigonometry, which
+      # Miri deliberately perturbs, so it is skipped.
       - name: Miri - distance module
         run: |
-          cargo miri test --no-default-features \
-            -p velesdb-core -- \
-            distance:: --test-threads=1
+          scripts/miri-step.sh 'distance_tests::' \
+            --no-default-features -p velesdb-core --lib -- \
+            distance:: distance_tests:: --skip geo_distance_tests \
+            --test-threads=1
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
       # Parser VelesQL - parsing user input
+      # `--no-default-features` is load-bearing here: velesdb-core's
+      # `persistence` enables `pest/std`, which links stacker/psm, and Miri
+      # cannot run psm's stack-pointer assembly (red from #2468 until #2475).
       - name: Miri - VelesQL parser
         run: |
-          cargo miri test --no-default-features \
-            -p velesdb-core -- \
+          scripts/miri-step.sh 'velesql::parser::' \
+            --no-default-features -p velesdb-core --lib -- \
             velesql::parser:: --test-threads=1
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
-      # Storage vector_bytes - raw pointer manipulation
+      # Storage vector_bytes - raw pointer manipulation. `storage` is compiled
+      # only with `persistence`, so this step cannot use
+      # `--no-default-features` (it ran 0 tests that way). It still never
+      # reaches pest's `std` path: no test here parses VelesQL, and the
+      # parser step above is what keeps psm's assembly off Miri. The tests sit
+      # in `vector_bytes_tests`, not `vector_bytes::`.
       - name: Miri - vector bytes storage
         run: |
-          cargo miri test --no-default-features \
-            -p velesdb-core -- \
-            storage::vector_bytes:: --test-threads=1
+          scripts/miri-step.sh 'storage::vector_bytes_tests::' \
+            --features persistence -p velesdb-core --lib -- \
+            storage::vector_bytes_tests:: --test-threads=1
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
       # ContiguousVectors / AllocGuard - manual allocation, raw pointers, resize
       - name: Miri - contiguous vectors & alloc guard
         run: |
-          cargo miri test --no-default-features \
-            -p velesdb-core --lib -- \
+          scripts/miri-step.sh 'perf_optimizations' \
+            --no-default-features -p velesdb-core --lib -- \
             perf_optimizations alloc_guard contiguous_resize --test-threads=1
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
@@ -121,8 +172,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # rust-toolchain.toml pins the toolchain; the rustup shim installs it
-      # on first cargo invocation.
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: "velesdb-crossover"
@@ -146,9 +198,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly
-        with:
-          toolchain: nightly
+      # loom needs only `--cfg loom`, which the pinned toolchain builds.
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -164,7 +216,7 @@ jobs:
       # Tests Loom existants (storage, sync primitives)
       - name: Run Loom tests
         run: |
-          cargo +nightly test --features loom,persistence \
+          cargo test --features loom,persistence \
             -p velesdb-core --test loom_tests \
             -- --test-threads=1
         env:
@@ -175,7 +227,7 @@ jobs:
       # Tests Loom inline dans storage/
       - name: Run Loom storage tests
         run: |
-          cargo +nightly test --features loom,persistence \
+          cargo test --features loom,persistence \
             -p velesdb-core storage::loom \
             -- --test-threads=1
         env:
@@ -190,10 +242,16 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'schedule' || inputs.run_fuzz }}
     timeout-minutes: 30
+    env:
+      # nightly: cargo-fuzz instruments with -Zsanitizer.
+      # Set for the whole job, so rust-cache's `cargo metadata` stays on it
+      # too instead of falling back to rust-toolchain.toml.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly
+      # nightly: cargo fuzz needs it; installed here, so rustup never installs it mid-step.
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # nightly
         with:
           toolchain: nightly
 
@@ -202,8 +260,17 @@ jobs:
           shared-key: "velesdb-fuzz"
           save-if: true
 
+      # `--locked`: without it `cargo install` re-resolves cargo-fuzz's
+      # dependencies to their newest versions, and this step runs on the
+      # stable toolchain `rust-toolchain.toml` pins, not on the nightly
+      # installed above for the runs. On 2026-09-13 that resolved
+      # `cargo-platform 0.3.3`, which requires rustc 1.91, and the install
+      # failed on 1.90 before a single fuzz target ran -- the whole job red,
+      # for three scheduled runs, on a dependency of a tool (#2292). The
+      # lockfile cargo-fuzz ships resolves what its release was tested with,
+      # and cargo itself suggests this flag in the failure.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
 
       # VelesQL Parser - input utilisateur critique
       - name: Fuzz VelesQL parser
@@ -247,19 +314,32 @@ jobs:
   careful:
     name: Careful (extra checks)
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' }}
+    # Dispatchable, like every other job here. It was the only one without a
+    # `run_*` input, so a fix to it could not be verified without waiting for
+    # the next weekly run -- which is how it stayed red from 2026-08-09 to
+    # 2026-09-13 without anyone confirming a repair (#2292). A job you cannot
+    # trigger is a job whose fixes ship on credit.
+    if: ${{ github.event_name == 'schedule' || inputs.run_careful }}
     timeout-minutes: 20
     continue-on-error: true
+    env:
+      # nightly: cargo-careful rebuilds std with -Zbuild-std.
+      # Set for the whole job, so rust-cache's `cargo metadata` stays on it
+      # too instead of falling back to rust-toolchain.toml.
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly
+      # nightly: cargo careful needs it; installed here, so rustup never installs it mid-step.
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # nightly
         with:
           toolchain: nightly
           components: rust-src
 
+      # `--locked` for the same reason as cargo-fuzz above: an unpinned
+      # re-resolve turns a tool's dependency release into a red scheduled run.
       - name: Install cargo-careful
-        run: cargo install cargo-careful
+        run: cargo install cargo-careful --locked
 
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@681749ae568c81c2037cb9185e38b709b261bd2f # v1.6.1
@@ -272,12 +352,122 @@ jobs:
           shared-key: "velesdb-careful"
 
       # Tests avec assertions std activées
+      # `--lib --tests`, so doctests are left out. They cannot compile in this
+      # configuration and never could: `#![doc = include_str!("../README.md")]`
+      # pulls the crate's front page into the docs, and the front page
+      # documents `Database`, which `persistence` gates. Under
+      # `--no-default-features` every example naming it fails with
+      # `E0432: unresolved import velesdb_core::Database` -- two of them did,
+      # in three scheduled runs running (#2292).
+      #
+      # Nothing is lost by leaving them out. `cargo test --doc --package
+      # velesdb-core` runs in ci.yml's `lint` job, inside `CI Success`, with
+      # the default features the README describes -- so doctests are checked
+      # on every pull request, in the configuration they are written for.
+      # They would add nothing here either way: cargo-careful exists to run
+      # code against a std built with debug assertions, and the README's
+      # examples are `no_run`.
       - name: Run careful tests
         run: |
           cargo +nightly careful test \
             -p velesdb-core \
             --no-default-features \
+            --lib --tests \
             -- --test-threads=1
+
+  # ===========================================================================
+  # Minimal versions: velesdb-core and velesdb-memory each still compile at the
+  # lowest dependency versions their own resolve accepts, on Linux and macOS
+  # ===========================================================================
+  # A fresh resolve picks the newest version of everything, so it never meets
+  # a lower bound that is too low. The consumer who does is one whose other
+  # dependencies hold a crate at the bottom of the range our manifest allows:
+  # a `foo = "1.2"` whose code needs 1.4 then fails in their build, never in
+  # ours. `-Z direct-minimal-versions` builds that consumer: each direct
+  # dependency at the lowest version the resolve accepts, transitive ones at
+  # their newest. The resolve, not the manifest taken alone: another crate in
+  # the same graph requiring the same dependency raises it, and the check then
+  # says nothing about the versions below that. velesdb-memory declared
+  # `ureq = "2"` before #1987 and still resolved to 2.5.0, because
+  # velesdb-core's own `[dependencies.ureq]` asks for 2.5.0; both now declare
+  # 2.5.0. The check runs on the MSRV toolchain rust-toolchain.toml pins.
+  #
+  # One crate per leg, resolved in a workspace cut down to it: its path
+  # dependencies (velesdb-core, for velesdb-memory) come back in on their own,
+  # and nothing else does. A consumer of velesdb-core never resolves
+  # tauri-plugin-velesdb's graph, so a floor that graph imposes is not one
+  # velesdb-core needs, and a joint resolve would hide the difference.
+  #
+  # Linux and macOS, because a lower bound can build on one and not the other:
+  # tar 0.4.0-0.4.2 masks `st_mode` with `libc::S_IFMT`, a u16 on macOS, and
+  # fails there only. Windows is not checked. velesdb-core and velesdb-memory
+  # are the two crates ci.yml's `semver-checks` also scopes itself to; the other
+  # published members (velesdb-server, velesdb-cli, velesdb-migrate,
+  # velesdb-mobile, tauri-plugin-velesdb) are not compiled here.
+  #
+  # Not a merge gate: this workflow is outside ci.yml, so `CI Success` never
+  # reads it, and its verdict can move with no change here whenever a
+  # dependency publishes. A source change that starts using a newer API
+  # without raising the bound is caught by the weekly run, not on its PR.
+  minimal-versions:
+    name: Minimal versions (${{ matrix.crate }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_minimal_versions }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        crate: [velesdb-core, velesdb-memory]
+    env:
+      CRATE: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Installed before rust-cache, whose `cargo metadata` runs on it, and
+      # before the check below, which builds with it.
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update --profile minimal
+
+      # nightly: `cargo update -Z direct-minimal-versions` is unstable. Only
+      # the resolve step names it (`cargo +nightly`); the check does not.
+      - name: Install nightly for the resolve
+        run: rustup toolchain install nightly --no-self-update --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: "velesdb-minimal-versions-${{ matrix.crate }}"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+
+      - name: Keep only this crate in the workspace
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          crate = os.environ["CRATE"]
+          root = pathlib.Path("Cargo.toml")
+          text = root.read_text()
+          kept = []
+          for member in tomllib.loads(text)["workspace"]["members"]:
+              if tomllib.loads(pathlib.Path(member, "Cargo.toml").read_text())["package"]["name"] == crate:
+                  kept.append(member)
+              else:
+                  text = re.sub(rf'^\s*"{re.escape(member)}",?\n', "", text, flags=re.M)
+          if len(kept) != 1:
+              raise SystemExit(f"{crate} is not exactly one workspace member: {kept}")
+          root.write_text(text)
+          PY
+          sed -n '/^members/,/^]/p' Cargo.toml
+
+      # `fallback` keeps the transitive picks within the workspace MSRV, so a
+      # dependency whose newest release needs a newer rustc is not reported as
+      # a lower-bound failure.
+      - name: Resolve direct dependencies to their minimal versions
+        run: cargo +nightly update -Z direct-minimal-versions
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+
+      - name: Check the crate at its minimal versions
+        run: cargo check -p "$CRATE" --all-features
 
   # ===========================================================================
   # Summary
@@ -286,7 +476,9 @@ jobs:
     name: Quality Summary
     runs-on: ubuntu-latest
     needs: [miri, loom, fuzz]
-    if: always()
+    # A pull request runs minimal-versions alone: a table of three skipped
+    # jobs would report nothing.
+    if: always() && github.event_name != 'pull_request'
     steps:
       - name: Results
         run: |

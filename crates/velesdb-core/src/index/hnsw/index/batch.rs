@@ -1,79 +1,62 @@
 //! Batch operations for HnswIndex.
 
 use super::HnswIndex;
+use crate::index::hnsw::native::PARALLEL_BATCH_MIN;
 use crate::index::hnsw::params::SearchQuality;
-use crate::index::hnsw::upsert::{self, UpsertResult};
 use crate::scored_result::ScoredResult;
 use crate::validation::validate_dimension_match;
 use rayon::prelude::*;
 
-/// Prepared batch of vectors ready for HNSW graph insertion.
+/// The rayon pool every operation that holds `HnswIndex::inner` runs its graph
+/// work on — never the global pool.
 ///
-/// Contains both the data needed for `parallel_insert` and the rollback
-/// information needed to restore mappings on failure.
-pub(crate) struct PreparedBatch<'a> {
-    /// `(internal_idx, vector_slice)` pairs for HNSW insertion.
-    pub to_insert: Vec<(usize, &'a [f32])>,
-    /// `(external_id, upsert_result)` pairs for rollback on failure.
-    pub rollback_info: Vec<(u64, UpsertResult)>,
+/// This is the locking contract's one liveness rule, and \#2343 is what breaks
+/// without it. A holder of `inner.read()` that joins on the **global** pool
+/// closes a cycle: a pending `vacuum` writer blocks every new reader, so a
+/// global worker that takes `inner.read()` — `rerank_candidates_simd`, the
+/// per-query search — parks; the holder's own jobs never get a worker, and the
+/// guard the writer waits on is never released. Nobody advances.
+///
+/// A pool of its own breaks that cycle at its only edge. The jobs submitted
+/// here reach the graph's arena, layers and entry point and never `HnswIndex`
+/// itself, so no job on this pool can take `inner`.
+///
+/// That isolation holds **only for a caller that is not already a rayon
+/// worker**, and the precondition is asserted rather than assumed. A thread
+/// that belongs to another pool does not merely block in `install`:
+/// `rayon-core`'s `Registry::in_worker_cross` (1.13.0, `registry.rs`) says so
+/// — "This thread is a member of a different pool, so let it process other
+/// work while waiting for this `op` to complete" — and then calls
+/// `current_thread.wait_until(&job.latch)`. A global worker installing here
+/// while holding `inner.read()` would keep running *global* jobs, one of
+/// which takes `inner.read()`, parks behind the pending writer, and closes
+/// \#2343's cycle again by stealing instead of by starvation.
+///
+/// Both holders that join on rayon use it: [`HnswIndex::link_placed`]'s
+/// connect phase (\#2290) and [`HnswIndex::insert_batch_parallel`]'s place
+/// phase, which reaches `par_iter` through
+/// `native::backend_adapter::connect_batch_chunked`.
+///
+/// `index/hnsw/index/global_pool_tests.rs` holds the rule: it parks every
+/// global worker and requires each of those operations to finish anyway.
+pub(super) fn graph_pool() -> crate::error::Result<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("veles-hnsw-graph-{i}"))
+            .build()
+            .inspect_err(|e| tracing::error!("hnsw: dedicated rayon pool: {e}"))
+            .ok()
+    })
+    .as_ref()
+    .ok_or_else(|| {
+        crate::error::Error::Internal(
+            "the dedicated rayon pool HNSW graph work runs on is unavailable".to_string(),
+        )
+    })
 }
 
 impl HnswIndex {
-    /// Prepares vectors for batch insertion: validates dimensions and registers IDs.
-    ///
-    /// Returns a [`PreparedBatch`] containing insertion data and rollback
-    /// information. Existing IDs are replaced (upsert semantics): the old
-    /// mapping is updated and stale vector data is removed.
-    ///
-    /// # Phase Ordering Invariant
-    ///
-    /// Dimension validation runs to completion **before** any call to
-    /// `upsert_mapping_batch`. This prevents orphaned mappings when a
-    /// dimension mismatch would otherwise leave partially-mutated
-    /// state. See `docs/SOUNDNESS.md` "HNSW Batch Insertion Ordering".
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::error::Error::DimensionMismatch`] if any vector has a dimension
-    /// different from the index dimension.
-    ///
-    /// # Performance
-    ///
-    /// - Single pass over input (no intermediate collection)
-    /// - Pre-allocated output vectors
-    /// - Inline dimension validation
-    /// - Zero-copy: stores borrowed slices, no cloning
-    #[inline]
-    pub(crate) fn prepare_batch_insert<'a, I>(
-        &self,
-        vectors: I,
-    ) -> crate::error::Result<PreparedBatch<'a>>
-    where
-        I: IntoIterator<Item = (u64, &'a [f32])>,
-    {
-        let items: Vec<(u64, &'a [f32])> = vectors.into_iter().collect();
-
-        // RF-DEDUP #448 Group D — shared validate + upsert_mapping_batch
-        // pipeline (see `NativeHnswIndex::insert_batch`). Runs dimension
-        // validation to completion BEFORE any mapping registration so
-        // failures cannot leave orphaned mappings.
-        let upsert_results =
-            upsert::validate_and_register_batch(&self.mappings, self.dimension, &items)?;
-
-        let mut to_insert = Vec::with_capacity(items.len());
-        let mut rollback_info = Vec::with_capacity(items.len());
-
-        for ((id, vector), result) in items.into_iter().zip(upsert_results) {
-            to_insert.push((result.idx, vector));
-            rollback_info.push((id, result));
-        }
-
-        Ok(PreparedBatch {
-            to_insert,
-            rollback_info,
-        })
-    }
-
     /// Inserts multiple vectors in parallel using rayon.
     ///
     /// This method is optimized for bulk insertions and can significantly
@@ -81,11 +64,13 @@ impl HnswIndex {
     ///
     /// # Ordering
     ///
-    /// The pipeline executes: validate dims -> register mappings -> graph
-    /// insert -> mapping reconciliation. On graph failure, rollback undoes
-    /// mappings in reverse order. Because `parallel_insert` uses rayon, the
-    /// HNSW graph construction order is non-deterministic across runs (see
-    /// v1.7.2 CHANGELOG note).
+    /// Every dimension is checked before the graph sees any vector. The graph
+    /// then places the batch and returns each vector's slot in input order,
+    /// and only then is each id mapped to its slot (#2246) — see
+    /// `docs/SOUNDNESS.md` "HNSW Slot Allocation". An id repeated within the
+    /// batch ends on its last occurrence. Because `parallel_insert` uses
+    /// rayon, the HNSW graph construction order is non-deterministic across
+    /// runs (see v1.7.2 CHANGELOG note).
     ///
     /// # Arguments
     ///
@@ -93,15 +78,23 @@ impl HnswIndex {
     ///
     /// # Returns
     ///
-    /// Number of vectors successfully inserted or updated (upsert semantics).
+    /// Number of vectors inserted or updated (upsert semantics). A batch
+    /// holding a vector of the wrong dimension, or one the graph refuses,
+    /// maps nothing and returns 0, with the cause logged; nodes the graph had
+    /// already placed stay unmapped, as tombstones.
     ///
     /// # Panics
     ///
-    /// Panics if any vector has a dimension different from the index dimension.
+    /// In debug builds, if called from a rayon worker with a batch large
+    /// enough to reach the dedicated pool. Such a caller would keep executing
+    /// its own pool's jobs while waiting on this one (`rayon-core`'s
+    /// `Registry::in_worker_cross`), and a stolen job that takes the index
+    /// read guard would re-close \#2343's deadlock cycle. Release builds carry
+    /// no check. A smaller batch installs no pool and is never refused.
     ///
     /// # Performance (v0.8.5+)
     ///
-    /// - **~15x faster** than sequential insertion (29k/s vs 1.9k/s on 8-core CPU)
+    /// - **Faster** than sequential insertion on multi-core CPUs
     /// - Automatically scales with available CPU cores
     /// - Lock-free ID mapping via `DashMap`
     ///
@@ -123,52 +116,153 @@ impl HnswIndex {
     where
         I: IntoIterator<Item = (u64, &'a [f32])>,
     {
-        let batch = match self.prepare_batch_insert(vectors) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!("insert_batch_parallel: dimension validation failed: {e}");
-                return 0;
-            }
-        };
-        let count = batch.to_insert.len();
-
-        if count == 0 {
+        let items: Vec<(u64, &'a [f32])> = vectors.into_iter().collect();
+        if let Some(e) = items
+            .iter()
+            .find_map(|(_, vector)| validate_dimension_match(self.dimension, vector.len()).err())
+        {
+            tracing::error!("insert_batch_parallel: dimension validation failed: {e}");
+            return 0;
+        }
+        if items.is_empty() {
             return 0;
         }
 
-        let refs_for_hnsw: Vec<(&[f32], usize)> = batch
-            .to_insert
-            .iter()
-            .map(|(idx, vec)| (*vec, *idx))
-            .collect();
-
-        // Bound so the graph read guard is released before `rollback_batch`
-        // touches `mappings`.
-        let inserted = self.inner.read().parallel_insert(&refs_for_hnsw);
-        let assigned_ids = match inserted {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::error!("insert_batch_parallel: parallel_insert failed: {e}");
-                // RF-DEDUP #448 Group D — reverse-order rollback shared with
-                // NativeHnswIndex::insert_batch.
-                upsert::rollback_batch(&self.mappings, &batch.rollback_info);
-                return 0;
+        // A batch large enough for `place_batch` to connect in parallel joins
+        // on rayon while the guard below is held, so it runs on `graph_pool`
+        // and never on the global pool: a global worker can take
+        // `inner.read()`, and under a pending `vacuum` writer that closes the
+        // deadlock cycle of #2343.
+        //
+        // A smaller batch places node by node and never enters rayon, so it
+        // needs no pool and must not pay for one. `install` costs a flat
+        // ~32 us of thread hand-off whatever the work inside, and what that
+        // is worth depends entirely on the batch: measured on this call at
+        // 16 dimensions, release, medians of 20 runs — n=1 places in 250 ns,
+        // so the hand-off would be 128x the work; n=10 in 7.96 us, 4x; n=50
+        // in 161 us, 20%; n=99 in 1.28 ms, 2.5%. So the skip earns its keep
+        // on tiny batches and almost nothing at the threshold, and it is
+        // worth stating that way rather than as one dramatic ratio. At a
+        // larger dimension the same batch costs more and the hand-off matters
+        // less still (`docs/BENCHMARKS.md` measures ~300 us per vector at
+        // 768D against ~6.5 us here). The threshold read here is
+        // `place_batch`'s own, so the two cannot drift apart.
+        // Standard is the only backend whose `place_batch` reaches rayon:
+        // RaBitQ and Sq8 insert one vector at a time at every length, to keep
+        // their positional code store consistent with NodeId order
+        // (`native_inner::parallel_insert`). They therefore never need the
+        // pool; the length test below still installs it for them, which costs
+        // the hand-off above and nothing else. Left as is rather than adding a
+        // backend test here: `place_batch` owns that decision, and duplicating
+        // it is how the two drift apart.
+        let pool = if items.len() >= PARALLEL_BATCH_MIN {
+            // Only this branch joins on rayon under the guard, so only this
+            // branch has the precondition. A sub-threshold batch enters no
+            // pool and must not be refused for being called from a worker.
+            debug_assert!(
+                rayon::current_thread_index().is_none(),
+                "insert_batch_parallel holds the index guard across a rayon join: \
+                 calling it from a rayon worker lets that worker steal a job which \
+                 takes inner.read(), re-closing #2343's cycle"
+            );
+            match graph_pool() {
+                Ok(pool) => Some(pool),
+                Err(e) => {
+                    tracing::error!("insert_batch_parallel: {e}");
+                    return 0;
+                }
             }
+        } else {
+            None
         };
 
-        // RF-DEDUP #448 Group D — mapping reconciliation shared with
-        // NativeHnswIndex::insert_batch.
-        upsert::reconcile_batch_mappings(&self.mappings, &batch.rollback_info, &assigned_ids);
+        let vectors: Vec<&[f32]> = items.iter().map(|(_, vector)| *vector).collect();
+        // Held across the placement and the mappings: a sealed `vacuum` is
+        // settling a frozen remainder, and this batch must land either wholly
+        // before its seal or wholly after (#2335). Taken before `inner`,
+        // always.
+        let _publishing = self.publishing.read();
+        // Held until every id is mapped: `reorder_for_locality` and `vacuum`
+        // renumber slots under the write lock, so each slot placed here is still
+        // its vector's when the mapping names it.
+        let inner = self.inner.read();
+        let placed = match pool {
+            Some(pool) => pool.install(|| inner.place_parallel(&vectors)),
+            None => inner.place_parallel(&vectors),
+        };
+        let outcome = placed.map(|placements| {
+            for ((id, _), placed) in items.iter().zip(placements) {
+                self.mappings.assign(*id, placed);
+            }
+        });
+        drop(inner);
+        match outcome {
+            Ok(()) => items.len(),
+            Err(e) => {
+                tracing::error!("insert_batch_parallel: parallel_insert failed: {e}");
+                0
+            }
+        }
+    }
 
-        count
+    /// Links into the graph, where they are, the nodes `upsert_bulk`'s direct
+    /// writer placed for `ids`: the async builder's drain (#2264). Returns the
+    /// number of nodes linked.
+    ///
+    /// Each id resolves to its slot now, under the read guard that keeps
+    /// `reorder_for_locality` and `vacuum` from renumbering it. An id no longer
+    /// mapped (deleted since it was queued) is skipped, and so is a slot
+    /// already linked: the id was upserted through the graph since, or a
+    /// `vacuum` rebuilt the graph with it. An id queued twice is linked once,
+    /// at the slot of its last write.
+    ///
+    /// The guard is held across the connect phase, so that phase runs on
+    /// [`graph_pool`] and never on the global rayon pool: a global worker can
+    /// take `inner.read()`, and under a pending `vacuum` writer that closes
+    /// the deadlock cycle of \#2343.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and links nothing, if the arena does not hold a slot
+    /// a mapping names, or if the dedicated pool cannot be built.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if called from a rayon worker — see
+    /// [`HnswIndex::insert_batch_parallel`] for why. Release builds carry no
+    /// check.
+    #[cfg(feature = "persistence")]
+    pub(crate) fn link_placed(&self, ids: &[u64]) -> crate::error::Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        debug_assert!(
+            rayon::current_thread_index().is_none(),
+            "link_placed holds the index guard across a rayon join: see \
+             insert_batch_parallel for why a rayon worker must not call it"
+        );
+        let pool = graph_pool()?;
+        let inner = self.inner.read();
+        let mut slots: Vec<usize> = ids
+            .iter()
+            .filter_map(|&id| self.mappings.get_idx(id))
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        let unlinked = inner.unlinked_nodes(slots);
+        let graph: &crate::index::hnsw::native_inner::NativeHnswInner = &inner;
+        pool.install(|| graph.link_placed(&unlinked))?;
+        drop(inner);
+        Ok(unlinked.len())
     }
 
     /// Performs batch search for multiple queries in parallel.
     ///
-    /// When quality requires two-stage reranking and vector storage is enabled,
-    /// the method first runs HNSW search for all queries (rayon), then reranks
-    /// each query's candidates using GPU or SIMD as appropriate. Otherwise,
-    /// falls back to HNSW-only search.
+    /// `Perfect`, `Adaptive`, `AutoTune`, and an index of at most 100 vectors whose graph holds at
+    /// least one slot and whose exact-distance features are on, run [`Self::search_with_quality`]
+    /// per query. Otherwise, when the quality calls for two-stage reranking and the index's
+    /// exact-distance features are on, the method runs HNSW search for all queries (rayon), then
+    /// reranks each query's candidates on GPU or SIMD; failing that, it runs HNSW-only search.
     ///
     /// # Arguments
     ///
@@ -200,7 +294,8 @@ impl HnswIndex {
 
         // Perfect, Adaptive, AutoTune, or very small collections: delegate to
         // search_with_quality per-query to match single-query behavior.
-        // - Perfect: uses brute-force for 100% recall
+        // - Perfect: brute force (the exact top-k) unless exact-distance
+        //   features are off
         // - Adaptive: uses spread-based two-phase escalation (not batch-compatible)
         // - AutoTune: computes auto-ef range per dataset/dim/k (issue #699 follow-up)
         // - Small (<=100): uses brute-force for fully-connected graph safety
@@ -303,7 +398,8 @@ impl HnswIndex {
     ///
     /// # Performance
     ///
-    /// - **Recall**: 100% (exact)
+    /// - **Result**: the exact top-k under the index's own distance, ties aside;
+    ///   nothing when the index's exact-distance features are off
     /// - **Latency**: O(n/cores) on CPU, O(n/GPU-threads) on GPU
     /// - **GPU threshold**: 100K vectors (below this, rayon is faster)
     ///
@@ -334,7 +430,7 @@ impl HnswIndex {
     /// Delegates to `search_brute_force_gpu_inner` without the 100K threshold
     /// gate, so tests can exercise the GPU path with smaller datasets.
     ///
-    /// Returns `None` if GPU is unavailable.
+    /// Returns `None` in every case `search_brute_force_gpu_inner` lists.
     #[cfg(all(test, feature = "gpu"))]
     #[must_use]
     pub(crate) fn brute_force_search_gpu_dispatch(
@@ -395,7 +491,7 @@ impl HnswIndex {
 
     /// Minimum dataset size for GPU brute-force dispatch.
     ///
-    /// Benchmarks show wgpu has ~900 us of fixed overhead per dispatch.
+    /// wgpu pays a fixed overhead per dispatch, which no recorded run measures.
     /// Below 100K vectors, rayon parallel SIMD is faster due to zero
     /// GPU buffer upload overhead.
     #[cfg(feature = "gpu")]

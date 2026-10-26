@@ -8,7 +8,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use common::{
-    create_graph_collection, create_graph_node, create_test_app, create_test_app_with_state,
+    create_graph_collection, create_graph_node, create_test_app, create_test_app_with_core_config,
+    create_test_app_with_state,
 };
 use futures::stream;
 use serde_json::{json, Value};
@@ -2976,6 +2977,790 @@ async fn test_search_ids_with_mode() {
     }
 }
 
+/// An unparseable `mode` must fail with a 400 naming the accepted forms
+/// instead of silently running at the default quality (#2267). Covers both
+/// `/search` and `/search/ids`, whose eligibility check for the ids-only fast
+/// path used to swallow the same typo.
+#[tokio::test]
+async fn test_search_unknown_mode_returns_400() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app = create_test_app(&temp_dir);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collections")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "unknown_mode",
+                        "dimension": 4,
+                        "metric": "cosine"
+                    })
+                    .to_string(),
+                ))
+                .expect("Failed to build request"),
+        )
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collections/unknown_mode/points")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({ "points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}] }).to_string(),
+                ))
+                .expect("Failed to build request"),
+        )
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A well-formed `custom:` mode whose ef is out of range is refused as
+    // well, naming the value rather than calling the mode unknown (#2275).
+    for (mode, named) in [("acurate", "acurate"), ("custom:5000", "got 5000")] {
+        for uri in [
+            "/collections/unknown_mode/search",
+            "/collections/unknown_mode/search/ids",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "vector": [1.0, 0.0, 0.0, 0.0],
+                                "top_k": 2,
+                                "mode": mode
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build request"),
+                )
+                .await
+                .expect("Request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "uri={uri} mode={mode}"
+            );
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Failed to read body");
+            let json: Value = serde_json::from_slice(&body).expect("Invalid JSON");
+            let error = json["error"].as_str().expect("error is string");
+            assert!(error.contains(named), "uri={uri} error={error}");
+        }
+    }
+}
+
+/// An `ef_search` outside the documented `[16, 4096]` range must fail with a
+/// 400 naming the range instead of silently running an oversized or
+/// near-useless traversal (#2274). Covers `/search` and `/search/ids`, whose
+/// fast-path eligibility check must not swallow the same out-of-range value.
+#[tokio::test]
+async fn test_search_out_of_range_ef_search_returns_400() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app = create_test_app(&temp_dir);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collections")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "bad_ef_search",
+                        "dimension": 4,
+                        "metric": "cosine"
+                    })
+                    .to_string(),
+                ))
+                .expect("Failed to build request"),
+        )
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collections/bad_ef_search/points")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({ "points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}] }).to_string(),
+                ))
+                .expect("Failed to build request"),
+        )
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for uri in [
+        "/collections/bad_ef_search/search",
+        "/collections/bad_ef_search/search/ids",
+    ] {
+        for ef_search in [0, 999_999] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "vector": [1.0, 0.0, 0.0, 0.0],
+                                "top_k": 2,
+                                "ef_search": ef_search
+                            })
+                            .to_string(),
+                        ))
+                        .expect("Failed to build request"),
+                )
+                .await
+                .expect("Request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "uri={uri} ef_search={ef_search}"
+            );
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Failed to read body");
+            let json: Value = serde_json::from_slice(&body).expect("Invalid JSON");
+            let error = json["error"].as_str().expect("error is string");
+            assert!(
+                error.contains("ef_search"),
+                "uri={uri} ef_search={ef_search} error={error}"
+            );
+        }
+    }
+}
+
+/// A valid `ef_search` reaches the search: over REST it wins over `mode` for
+/// a dense search, so with `limits.max_perfect_mode_vectors` at 1, `perfect`
+/// alone is refused over two points while `perfect` with `ef_search = 64`
+/// runs, on `/search` and `/search/ids` (#2274).
+#[tokio::test]
+async fn test_a_valid_ef_search_reaches_the_search() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = TempDir::new().expect("Failed to create config dir");
+    let config_path = config_dir.path().join("velesdb.toml");
+    std::fs::write(&config_path, "[limits]\nmax_perfect_mode_vectors = 1\n")
+        .expect("Failed to write config");
+    let app = create_test_app_with_core_config(&temp_dir, &config_path);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "ef_applied", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [
+        {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]},
+        {"id": 2, "vector": [0.0, 1.0, 0.0, 0.0]},
+    ]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/ef_applied/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    for uri in [
+        "/collections/ef_applied/search",
+        "/collections/ef_applied/search/ids",
+    ] {
+        let perfect = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "perfect"});
+        let response = app
+            .clone()
+            .oneshot(post(uri, &perfect))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let with_ef = json!({
+            "vector": [1.0, 0.0, 0.0, 0.0],
+            "top_k": 1,
+            "mode": "perfect",
+            "ef_search": 64
+        });
+        let response = app
+            .clone()
+            .oneshot(post(uri, &with_ef))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+/// A refused `ef_search` counts one request error, as a refused `mode` does:
+/// `query_errors` rises by one for each out-of-range request on `/search` and
+/// `/search/ids`, and a request at either end of the range adds none (#2274).
+#[tokio::test]
+async fn test_bad_ef_search_counts_one_request_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let (app, state) = create_test_app_with_state(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "ef_errors", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/ef_errors/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let errors = || {
+        state
+            .operational_metrics
+            .query_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let before = errors();
+    let mut refused = 0_u64;
+    for uri in [
+        "/collections/ef_errors/search",
+        "/collections/ef_errors/search/ids",
+    ] {
+        for ef in [15, 4097] {
+            let bad = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": ef});
+            let response = app
+                .clone()
+                .oneshot(post(uri, &bad))
+                .await
+                .expect("Request failed");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri} {ef}");
+            refused += 1;
+        }
+        for ef in [16, 4096] {
+            let good = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": ef});
+            let response = app
+                .clone()
+                .oneshot(post(uri, &good))
+                .await
+                .expect("Request failed");
+            assert_eq!(response.status(), StatusCode::OK, "{uri} {ef}");
+        }
+    }
+    assert_eq!(errors() - before, refused);
+}
+
+/// A bad `ef_search` is the client's error, not the collection's: refusing it
+/// records no circuit-breaker failure, exactly like a bad `mode` (#2267), and
+/// a `/search/batch` entry is checked too, naming its index, though the batch
+/// applies no `ef_search` either (#2274).
+#[tokio::test]
+async fn test_bad_ef_search_does_not_open_the_circuit_breaker_and_is_checked_in_batch() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let (app, state) = create_test_app_with_state(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "ef_search_breaker", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/ef_search_breaker/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let threshold = state
+        .db
+        .get_vector_collection("ef_search_breaker")
+        .expect("the collection exists")
+        .guard_rails()
+        .limits()
+        .circuit_failure_threshold;
+    let uris = [
+        "/collections/ef_search_breaker/search",
+        "/collections/ef_search_breaker/search/ids",
+    ];
+    let bad = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": 999_999});
+    let good = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1});
+    for uri in uris {
+        for _ in 0..threshold {
+            let response = app
+                .clone()
+                .oneshot(post(uri, &bad))
+                .await
+                .expect("Request failed");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+    for uri in uris {
+        let response = app
+            .clone()
+            .oneshot(post(uri, &good))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+
+    let batch = json!({"searches": [
+        {"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1},
+        {"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": 999_999}
+    ]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/ef_search_breaker/search/batch", &batch))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read body");
+    let json: Value = serde_json::from_slice(&body).expect("Invalid JSON");
+    let error = json["error"].as_str().expect("error is string");
+    assert!(error.contains("index 1"), "{error}");
+}
+
+/// An `ef_search` that is not a non-negative integer fails the body's JSON
+/// parsing: axum answers a plain-text `422` on every path whose body carries
+/// one, and the OpenAPI document declares that answer, in that content type,
+/// on each (#2274).
+#[tokio::test]
+async fn test_a_mistyped_ef_search_gets_the_documented_422() {
+    let spec = serde_json::to_value(velesdb_server::ApiDoc::openapi()).expect("the spec is JSON");
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app = create_test_app(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    for ef in [json!(-1), json!("high"), json!(1.5)] {
+        let search = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "ef_search": ef});
+        for (path, body) in [
+            ("/collections/{name}/search", search.clone()),
+            ("/collections/{name}/search/ids", search.clone()),
+            (
+                "/collections/{name}/search/batch",
+                json!({"searches": [search.clone()]}),
+            ),
+        ] {
+            let uri = path.replace("{name}", "ef_typed");
+            let response = app
+                .clone()
+                .oneshot(post(&uri, &body))
+                .await
+                .expect("Request failed");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{uri} {body}"
+            );
+            let content_type = &response.headers()[axum::http::header::CONTENT_TYPE];
+            assert!(
+                content_type.as_bytes().starts_with(b"text/plain"),
+                "{uri}: {content_type:?}"
+            );
+            let declared = &spec["paths"][path]["post"]["responses"]["422"]["content"];
+            assert!(
+                declared.get("text/plain").is_some(),
+                "{path} declares no plain-text 422: {declared}"
+            );
+        }
+    }
+}
+
+/// A valid `mode` reaches the search: with `limits.max_perfect_mode_vectors`
+/// at 1, the engine refuses `perfect` over two points on `/search` and
+/// `/search/ids`, where the same request with `fast` runs (#2267).
+#[tokio::test]
+async fn test_a_valid_mode_reaches_the_search() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = TempDir::new().expect("Failed to create config dir");
+    let config_path = config_dir.path().join("velesdb.toml");
+    std::fs::write(&config_path, "[limits]\nmax_perfect_mode_vectors = 1\n")
+        .expect("Failed to write config");
+    let app = create_test_app_with_core_config(&temp_dir, &config_path);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "mode_applied", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [
+        {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]},
+        {"id": 2, "vector": [0.0, 1.0, 0.0, 0.0]}
+    ]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/mode_applied/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    for uri in [
+        "/collections/mode_applied/search",
+        "/collections/mode_applied/search/ids",
+    ] {
+        let fast = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "fast"});
+        let response = app
+            .clone()
+            .oneshot(post(uri, &fast))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let perfect = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "perfect"});
+        let response = app
+            .clone()
+            .oneshot(post(uri, &perfect))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read body");
+        let json: Value = serde_json::from_slice(&body).expect("Invalid JSON");
+        let error = json["error"].as_str().expect("error is string");
+        assert!(error.contains("max_perfect_mode_vectors"), "{uri}: {error}");
+    }
+}
+
+/// A refused `mode` counts one request error, as any other refused search
+/// does: `query_errors` rises by one for each bad-mode request on `/search`
+/// and `/search/ids`, and a good request adds none (#2267).
+#[tokio::test]
+async fn test_bad_mode_counts_one_request_error() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let (app, state) = create_test_app_with_state(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "mode_errors", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/mode_errors/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let errors = || {
+        state
+            .operational_metrics
+            .query_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let before = errors();
+    let mut refused = 0_u64;
+    for uri in [
+        "/collections/mode_errors/search",
+        "/collections/mode_errors/search/ids",
+    ] {
+        let bad = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "acurate"});
+        let response = app
+            .clone()
+            .oneshot(post(uri, &bad))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        refused += 1;
+        let good = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "fast"});
+        let response = app
+            .clone()
+            .oneshot(post(uri, &good))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    assert_eq!(errors() - before, refused);
+}
+
+/// A bad `mode` is the client's error, not the collection's: refusing it
+/// records no circuit-breaker failure, so a client repeating a typo on
+/// `/search` or `/search/ids` cannot make the collection answer every other
+/// client's searches with `503` (#2267).
+#[tokio::test]
+async fn test_bad_mode_does_not_open_the_circuit_breaker() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let (app, state) = create_test_app_with_state(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "mode_breaker", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/mode_breaker/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let threshold = state
+        .db
+        .get_vector_collection("mode_breaker")
+        .expect("the collection exists")
+        .guard_rails()
+        .limits()
+        .circuit_failure_threshold;
+    let uris = [
+        "/collections/mode_breaker/search",
+        "/collections/mode_breaker/search/ids",
+    ];
+    let bad = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1, "mode": "acurate"});
+    let good = json!({"vector": [1.0, 0.0, 0.0, 0.0], "top_k": 1});
+    for uri in uris {
+        for _ in 0..threshold {
+            let response = app
+                .clone()
+                .oneshot(post(uri, &bad))
+                .await
+                .expect("Request failed");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+    for uri in uris {
+        let response = app
+            .clone()
+            .oneshot(post(uri, &good))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+/// A bad `mode` is refused on `/search` and `/search/ids` whatever the
+/// request's shape (sparse, or dense plus sparse), on a `/search/batch` entry,
+/// and by `/query` and `/query/explain` (`V013`). The five `/search*` requests
+/// succeed with a good mode (#2267).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_bad_mode_is_refused_on_every_search_shape() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app = create_test_app(&temp_dir);
+    let post = |uri: &str, body: &Value| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("Failed to build request")
+    };
+    let collection = json!({"name": "mode_shapes", "dimension": 4, "metric": "cosine"});
+    let response = app
+        .clone()
+        .oneshot(post("/collections", &collection))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let points = json!({"points": [
+        {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0],
+         "sparse_vectors": {"": {"indices": [0, 1], "values": [1.0, 0.5]}}},
+        {"id": 2, "vector": [0.0, 1.0, 0.0, 0.0],
+         "sparse_vectors": {"": {"indices": [1, 2], "values": [0.8, 0.3]}}}
+    ]});
+    let response = app
+        .clone()
+        .oneshot(post("/collections/mode_shapes/points", &points))
+        .await
+        .expect("Request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sparse = json!({"indices": [0, 1], "values": [1.0, 0.5]});
+    let dense = json!([1.0, 0.0, 0.0, 0.0]);
+    let shapes = |mode: &str| {
+        vec![
+            (
+                "/collections/mode_shapes/search",
+                json!({"sparse_vector": sparse.clone(), "top_k": 2, "mode": mode}),
+            ),
+            (
+                "/collections/mode_shapes/search",
+                json!({
+                    "vector": dense.clone(),
+                    "sparse_vector": sparse.clone(),
+                    "top_k": 2,
+                    "mode": mode
+                }),
+            ),
+            (
+                "/collections/mode_shapes/search/ids",
+                json!({"sparse_vector": sparse.clone(), "top_k": 2, "mode": mode}),
+            ),
+            (
+                "/collections/mode_shapes/search/ids",
+                json!({
+                    "vector": dense.clone(),
+                    "sparse_vector": sparse.clone(),
+                    "top_k": 2,
+                    "mode": mode
+                }),
+            ),
+            (
+                "/collections/mode_shapes/search/batch",
+                json!({"searches": [
+                    {"vector": dense.clone(), "top_k": 2},
+                    {"vector": dense.clone(), "top_k": 2, "mode": mode}
+                ]}),
+            ),
+        ]
+    };
+    for (uri, body) in shapes("fast") {
+        let response = app
+            .clone()
+            .oneshot(post(uri, &body))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::OK, "uri={uri} body={body}");
+    }
+    for (uri, body) in shapes("acurate") {
+        let response = app
+            .clone()
+            .oneshot(post(uri, &body))
+            .await
+            .expect("Request failed");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "uri={uri} body={body}"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read body");
+        let json: Value = serde_json::from_slice(&bytes).expect("Invalid JSON");
+        let error = json["error"].as_str().expect("error is string");
+        assert!(error.contains("acurate"), "uri={uri} error={error}");
+    }
+
+    let query = json!({
+        "query": "SELECT * FROM mode_shapes WHERE vector NEAR $v LIMIT 2 WITH (mode = 'acurate')",
+        "params": {"v": [1.0, 0.0, 0.0, 0.0]}
+    });
+    for uri in ["/query", "/query/explain"] {
+        let response = app
+            .clone()
+            .oneshot(post(uri, &query))
+            .await
+            .expect("Request failed");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "uri={uri}"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read body");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("V013") && text.contains("acurate"),
+            "uri={uri} body={text}"
+        );
+    }
+
+    // Precedence inside the pre-check `/search` and `/search/ids` share: a
+    // request carrying BOTH a bad `mode` and a bad `ef_search` answers the
+    // `mode` error, because `mode` is parsed first. Without this case the
+    // order of the two validations is pinned by nothing and either one may
+    // answer, changing the 400 body a client reads.
+    let both_bad = json!({
+        "vector": dense.clone(),
+        "top_k": 2,
+        "mode": "acurate",
+        "ef_search": 0
+    });
+    for uri in [
+        "/collections/mode_shapes/search",
+        "/collections/mode_shapes/search/ids",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post(uri, &both_bad))
+            .await
+            .expect("Request failed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri={uri}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read body");
+        let json: Value = serde_json::from_slice(&bytes).expect("Invalid JSON");
+        let error = json["error"].as_str().expect("error is string");
+        assert!(
+            error.starts_with("Unknown search mode"),
+            "uri={uri}: mode must be refused before ef_search, got {error}"
+        );
+    }
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn test_search_ids_sparse() {
@@ -4660,6 +5445,97 @@ async fn test_create_with_invalid_hnsw_alpha_returns_422() {
 /// the collection via `Database::delete_collection` so the client
 /// can retry without hitting `CollectionExists`.
 ///
+/// The `POST /collections` request every step of
+/// `test_advanced_config_failure_rolls_back_collection` sends. Writing it
+/// once is what keeps that test under the line budget, and what makes the
+/// fault-injected create and the retry demonstrably the same call.
+#[cfg(feature = "test-fault-injection")]
+fn create_collection_request(body: &Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/collections")
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("test: build create request")
+}
+
+/// The body the rollback test creates twice: once against the injected fault,
+/// once as the retry that must succeed. One literal, so "the same POST" in
+/// that test's own comment is a fact about the code, not a claim about it.
+#[cfg(feature = "test-fault-injection")]
+fn rollback_cfg_body() -> Value {
+    json!({
+        "name": "rollback_cfg",
+        "dimension": 16,
+        "metric": "cosine",
+        "pq_rescore_oversampling": 8
+    })
+}
+
+/// How many `save_config()` calls a plain create makes.
+///
+/// Probed on a throw-away collection so the counter state is realistic, then
+/// deleted so the retry assertion starts clean without relying on collection
+/// name uniqueness. The count is the zero-based index of the first Phase 2
+/// call, which is where the fault has to fire.
+#[cfg(feature = "test-fault-injection")]
+async fn probe_phase1_save_config_calls(app: &axum::Router) -> usize {
+    use std::sync::atomic::Ordering;
+    use velesdb_core::fault_injection::SAVE_CONFIG_CALL_COUNT;
+
+    SAVE_CONFIG_CALL_COUNT.store(0, Ordering::SeqCst);
+    let probe_response = app
+        .clone()
+        .oneshot(create_collection_request(&json!({
+            "name": "rollback_probe",
+            "dimension": 16,
+            "metric": "cosine"
+        })))
+        .await
+        .expect("test: probe request failed");
+    assert_eq!(probe_response.status(), StatusCode::CREATED);
+    let phase1_save_calls = SAVE_CONFIG_CALL_COUNT.load(Ordering::SeqCst);
+
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/collections/rollback_probe")
+                .body(Body::empty())
+                .expect("test: build delete request"),
+        )
+        .await;
+    phase1_save_calls
+}
+
+/// The collection names `GET /collections` reports.
+#[cfg(feature = "test-fault-injection")]
+async fn listed_collection_names(app: &axum::Router) -> Vec<String> {
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/collections")
+                .body(Body::empty())
+                .expect("test: build list request"),
+        )
+        .await
+        .expect("test: list request failed");
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .expect("test: read list body");
+    let list_json: Value = serde_json::from_slice(&list_body).expect("test: parse list json");
+    list_json["collections"]
+        .as_array()
+        .expect("collections must be an array")
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The only realistic failure mode of `apply_advanced_config` is a
 /// disk I/O error in `save_config()`. Sprint 1.5 item S1.5-05
 /// introduced the `SaveConfigFaultGuard` seam in
@@ -4678,87 +5554,31 @@ async fn test_create_with_invalid_hnsw_alpha_returns_422() {
 #[cfg(feature = "test-fault-injection")]
 #[tokio::test]
 async fn test_advanced_config_failure_rolls_back_collection() {
-    use std::sync::atomic::Ordering;
-    use velesdb_core::fault_injection::{SaveConfigFaultGuard, SAVE_CONFIG_CALL_COUNT};
+    use velesdb_core::fault_injection::SaveConfigFaultGuard;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app = create_test_app(&temp_dir);
 
-    // Step 1: probe how many `save_config()` calls a normal Phase 1
-    // (create_vector_collection) makes so we can configure the
-    // fault to fire exactly on the first Phase 2 call. We do this
-    // on a throw-away collection so the counter state is realistic.
-    SAVE_CONFIG_CALL_COUNT.store(0, Ordering::SeqCst);
-    let probe_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/collections")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "name": "rollback_probe",
-                        "dimension": 16,
-                        "metric": "cosine"
-                    })
-                    .to_string(),
-                ))
-                .expect("test: build probe request"),
-        )
-        .await
-        .expect("test: probe request failed");
-    assert_eq!(probe_response.status(), StatusCode::CREATED);
-    let phase1_save_calls = SAVE_CONFIG_CALL_COUNT.load(Ordering::SeqCst);
+    let phase1_save_calls = probe_phase1_save_config_calls(&app).await;
 
-    // Delete the probe so the retry assertion below starts from a
-    // clean state without relying on collection name uniqueness.
-    let _ = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/collections/rollback_probe")
-                .body(Body::empty())
-                .expect("test: build delete request"),
-        )
-        .await;
-
-    // Step 2: GIVEN Phase 2 `save_config()` is scheduled to fail on
-    // the call immediately after Phase 1 completes (phase1_save_calls
-    // is the zero-based index of the first Phase 2 call).
+    // GIVEN Phase 2 `save_config()` is scheduled to fail on the call
+    // immediately after Phase 1 completes.
     {
         let _guard = SaveConfigFaultGuard::activate(phase1_save_calls);
 
-        // WHEN: POST with advanced config → Phase 1 completes
-        // normally (probe calls reproduced), then Phase 2's
-        // apply_advanced_config hits the injected save_config error.
+        // WHEN: POST with advanced config -> Phase 1 completes normally (probe
+        // calls reproduced), then Phase 2's apply_advanced_config hits the
+        // injected save_config error.
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/collections")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "name": "rollback_cfg",
-                            "dimension": 16,
-                            "metric": "cosine",
-                            "pq_rescore_oversampling": 8
-                        })
-                        .to_string(),
-                    ))
-                    .expect("test: build create request"),
-            )
+            .oneshot(create_collection_request(&rollback_cfg_body()))
             .await
             .expect("test: create request failed");
 
         // THEN: the handler surfaces a 400/500 depending on how the
-        // core::Error::Io variant maps through core_error_response.
-        // What matters is the downstream invariant verified below:
-        // the collection must be absent from the registry so retry
-        // succeeds.
+        // core::Error::Io variant maps through core_error_response. What
+        // matters is the downstream invariant verified below: the collection
+        // must be absent from the registry so retry succeeds.
         assert!(
             response.status() == StatusCode::BAD_REQUEST
                 || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
@@ -4766,53 +5586,19 @@ async fn test_advanced_config_failure_rolls_back_collection() {
             response.status()
         );
     }
-    // Guard dropped here — save_config() returns to normal operation.
+    // Guard dropped here -- save_config() returns to normal operation.
 
     // Invariant 1: the collection must be absent from the list.
-    let list_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/collections")
-                .body(Body::empty())
-                .expect("test: build list request"),
-        )
-        .await
-        .expect("test: list request failed");
-    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
-        .await
-        .expect("test: read list body");
-    let list_json: Value = serde_json::from_slice(&list_body).expect("test: parse list json");
-    let collections_array = list_json["collections"]
-        .as_array()
-        .expect("collections must be an array");
+    let names = listed_collection_names(&app).await;
     assert!(
-        !collections_array
-            .iter()
-            .any(|v| v.get("name").and_then(Value::as_str) == Some("rollback_cfg")),
-        "rollback_cfg must be absent after Phase 2 failure rollback, got: {collections_array:?}"
+        !names.iter().any(|name| name == "rollback_cfg"),
+        "rollback_cfg must be absent after Phase 2 failure rollback, got: {names:?}"
     );
 
-    // Invariant 2: retrying the same POST without fault injection
-    // must succeed — no CollectionExists error from orphaned state.
+    // Invariant 2: retrying the same POST without fault injection must
+    // succeed -- no CollectionExists error from orphaned state.
     let retry_response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/collections")
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "name": "rollback_cfg",
-                        "dimension": 16,
-                        "metric": "cosine",
-                        "pq_rescore_oversampling": 8
-                    })
-                    .to_string(),
-                ))
-                .expect("test: build retry request"),
-        )
+        .oneshot(create_collection_request(&rollback_cfg_body()))
         .await
         .expect("test: retry request failed");
     assert_eq!(

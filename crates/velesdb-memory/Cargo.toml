@@ -2,7 +2,7 @@
 name = "velesdb-memory"
 # Independent of the workspace version: velesdb-memory is a young MCP wrapper
 # with its own release cadence, decoupled from the core engine's 3.x line.
-version = "0.14.1"
+version = "0.14.2"
 edition.workspace = true
 rust-version.workspace = true
 license-file = "../../LICENSE"
@@ -25,9 +25,11 @@ exclude = ["media/"]
 # one like velesdb-wasm that explicitly disables it to stay off tokio/mio.
 velesdb-core = { workspace = true, default-features = false }
 thiserror = { workspace = true }
-# Guards `WORKING_INDEX_WRITE` (src/context/memory_bridge.rs) — no poisoning,
-# unlike `std::sync::Mutex`, per the workspace's lock policy (AGENTS.md).
-parking_lot = "0.12"
+# Guards `WORKING_INDEX_WRITE` (src/context/memory_bridge.rs) and the HTTP
+# session limiter's live-session map (src/http/session_limit.rs) — no
+# poisoning, unlike `std::sync::Mutex`, per the workspace's lock policy
+# (AGENTS.md).
+parking_lot = "0.12.3"
 serde = { workspace = true }
 # The optional `velesdb-memory.toml` config file (see `src/config.rs`).
 # Native-only by `cfg` rather than by feature: a config file is not an opt-in
@@ -40,10 +42,13 @@ fs2 = { version = "0.4", optional = true }
 # Secure sibling temporary files for durable extraction-job snapshots. The
 # dependency follows `persistence`, so wasm/no-default consumers do not carry
 # filesystem code.
-tempfile = { version = "3", optional = true }
-# Pinned to rmcp's schemars (1.2.x) so domain types and MCP DTOs share one
-# JsonSchema derive — no duplicate wire/domain structs.
-schemars = "1"
+tempfile = { workspace = true, optional = true }
+# Same `schemars` as rmcp, so domain types and MCP DTOs share one JsonSchema
+# derive — no duplicate wire/domain structs. That sharing comes from Cargo
+# unifying two caret requirements, not from this floor: rmcp 3.1.0 asks only
+# for `^1` (`cargo update -p schemars --precise 1.0.0` resolves here). 1.0.2 is
+# the lowest 1.x this crate's own minimal-versions resolve selects.
+schemars = "1.0.2"
 # The MCP server stack — optional, behind the (default) `mcp` feature. Library
 # consumers (e.g. the language bindings) build with `default-features = false`
 # to get the memory core without the `rmcp`/`tokio` server dependencies.
@@ -67,7 +72,7 @@ tracing-subscriber = { workspace = true, optional = true }
 # `tls` (rustls) so the SAME env vars reach a local server over http:// or a
 # cloud endpoint over https:// — the user pastes a URL, nothing to rebuild or
 # discover. Local stays the default posture; TLS is capability, not policy.
-ureq = { version = "2", optional = true, default-features = false, features = [
+ureq = { version = "2.5.0", optional = true, default-features = false, features = [
     "tls",
 ] }
 # HTTP transport (multi-client daemon), behind the `http` feature only — the
@@ -86,6 +91,12 @@ tokio-util = { workspace = true, optional = true }
 # before it reaches the inner service, so it works regardless of how the
 # body is consumed downstream.
 tower-http = { workspace = true, optional = true, features = ["limit"] }
+# The Markdown parser the advertised tool schemas are read with, so the
+# rustdoc links schemars copies from doc comments into each `description` are
+# found as rustdoc finds them rather than by a hand-written scan (#2261, see
+# `src/schema_walks.rs`). `mcp`-gated: the tool schemas are its only consumer.
+# No default features: the rewrite reads events and offsets, never HTML.
+pulldown-cmark = { workspace = true, optional = true }
 # `futures::Stream`, the bound `rmcp::SessionManager`'s streaming methods
 # return — needed to forward them from `BoundedSessionManager` (src/http/
 # session_limit.rs) to the wrapped `LocalSessionManager`.
@@ -99,9 +110,15 @@ futures = { version = "0.3", optional = true }
 rcgen = { version = "0.14", optional = true, features = ["x509-parser"] }
 # `CertificateParams::not_before`/`not_after` are `time::OffsetDateTime` —
 # rcgen's own public field type, not re-exported, so constructing "now" and
-# "now + N days" needs `time` directly. Version pinned to match rcgen's own
-# `^0.3.6` requirement.
-time = { version = "0.3", optional = true }
+# "now + N days" needs `time` directly. rcgen 0.14.0 asks for `^0.3.6` itself,
+# but the `x509-parser` feature enabled above pulls x509-parser 0.17.0, which
+# asks for `^0.3.35`, so this crate's own resolve accepts nothing below 0.3.35
+# (`cargo update -p time --precise 0.3.6` fails on that requirement,
+# `--precise 0.3.35` succeeds). 0.3.47 is above it — it comes from
+# a resolve of the whole workspace, where `plist` requires it — and is kept
+# rather than lowered because no build at 0.3.35 backs the lower number yet;
+# see the root CHANGELOG's #1987 entry.
+time = { version = "0.3.47", optional = true }
 # TLS termination for the HTTP transport — same stack `velesdb-server`
 # already uses (`src/tls.rs` there), reused here rather than adding
 # `axum-server` as a second, independent TLS dependency (see `src/tls.rs`'s
@@ -109,7 +126,7 @@ time = { version = "0.3", optional = true }
 # choice, kept explicit (rather than relying on a process-wide default
 # `CryptoProvider`) since the `reqwest` dev-dependency below links a
 # different backend (`aws-lc-rs`) into the very same test binaries.
-rustls = { version = "0.23", optional = true, default-features = false, features = [
+rustls = { version = "0.23.27", optional = true, default-features = false, features = [
     "ring",
     "logging",
     "std",
@@ -121,8 +138,8 @@ rustls-pemfile = { version = "2", optional = true }
 # pre-handshake `TlsAcceptor`, so an accepted TLS connection is served
 # through `hyper`'s own connection builder instead (identical to
 # `velesdb-server`'s `spawn_tls_connection`).
-hyper = { version = "1", optional = true }
-hyper-util = { version = "0.1", optional = true, features = [
+hyper = { version = "1.6.0", optional = true }
+hyper-util = { version = "0.1.12", optional = true, features = [
     "tokio",
     "server-auto",
 ] }
@@ -134,6 +151,14 @@ tower = { workspace = true, optional = true }
 # Safe wrapper around MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH), keeping
 # the crate's own code free of unsafe while retaining a durable replacement.
 version = "0.4.4"
+optional = true
+
+[target.'cfg(unix)'.dependencies.libc]
+# O_NOFOLLOW for `mutation::atomic_file::open_regular_file`, so the symlink
+# check and the open of a state/journal file cannot be raced apart (#2404).
+# Pinned to the same floor as velesdb-core's own libc dependency: two
+# different floors for one package fail cargo's minimal-versions build.
+version = "0.2.186"
 optional = true
 
 [features]
@@ -150,6 +175,7 @@ optional = true
 # product's own pitch without them (#1846 aftermath).
 default = ["mcp", "persistence", "context", "embedder-http", "extractor-http"]
 mcp = [
+    "dep:pulldown-cmark",
     "dep:rmcp",
     "dep:tokio",
     "dep:tracing",
@@ -195,6 +221,7 @@ persistence = [
     "dep:fs2",
     "dep:tempfile",
     "dep:atomicwrites",
+    "dep:libc",
 ]
 # Real on-device semantic recall via a local Ollama or OpenAI-compatible
 # embeddings endpoint. On by default — see the `default` comment; nothing is
@@ -214,8 +241,21 @@ extract = ["extractor-http"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The guard on rustdoc link syntax in published descriptions (#2330). Path
+# only, no `version`: the crate is never published, and cargo strips this
+# entry when this crate publishes. So the packaged crate's tests do not
+# compile outside this workspace (`schema_tests.rs` and `mcp_schema_bdd.rs`
+# import it); they already read files the package does not ship
+# (`docs/reference/mcp-tools.json`), so they run here, not from the tarball.
+velesdb-rustdoc-guard = { path = "../velesdb-rustdoc-guard" }
 tokio = { workspace = true }
 criterion = { workspace = true }
+# session_limit_tests.rs implements rmcp's `EventStore` trait (an
+# `#[async_trait]` trait) for a test double proving `BoundedSessionManager`
+# forwards `event_store()` (#2331). Floor matches rmcp's own (`^0.1.89`) so
+# `-Z direct-minimal-versions` resolves one shared version instead of
+# conflicting with it over two different ones of the same crate.
+async-trait = "0.1.89"
 # Integration tests use scratch stores even when `persistence` is not one of
 # the features under test. Keep the production dependency optional while
 # making the test harness feature-independent.
@@ -246,7 +286,7 @@ rmcp = { version = "3.1", features = [
 # itself rather than only via rmcp's convenience constructors. `blocking` is
 # for tests/http_insecure_process.rs's synchronous polling of a spawned
 # subprocess (that test is plain `#[test]`, not `#[tokio::test]`).
-reqwest = { version = "0.13", features = ["blocking"] }
+reqwest = { version = "0.13.2", features = ["blocking"] }
 
 [[bin]]
 name = "velesdb-memory"

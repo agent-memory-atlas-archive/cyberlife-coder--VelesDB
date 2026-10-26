@@ -310,28 +310,31 @@ Guardrails are the other half of the control plane: `updateGuardrails(limits)` s
 
 | Preset | `ef_search` | Note |
 |---|---|---|
-| `Fast` | 96 | ~95% recall, lowest latency |
-| `Balanced` | 160 | ~99.5% recall, default |
-| `Accurate` | 512 | ~100% recall |
-| `Perfect` | 4096 | Guaranteed 100% recall |
-| `Custom { ef }` | caller-set | Fine-grained control |
-| `Adaptive { minEf, maxEf }` | two-phase | Starts low, doubles until the cap |
+| `Fast` | 96 | 97.4% recall@10*, lowest latency |
+| `Balanced` | 160 | 99.8% recall@10*, default |
+| `Accurate` | 512 | 100% recall@10*; 0.98 on SIFT1M's 1M |
+| `Perfect` | — (exhaustive scan, no graph) | Exact top-k, ties aside; refused above `max_perfect_mode_vectors` |
+| `Custom { ef }` | caller-set, 16–4096 | Fine-grained control; outside the range, `searchWithQuality` throws `VelesError.Database` (#2275) |
+| `Adaptive { minEf, maxEf }` | max(minEf, k), then once more at min(2×, maxEf) on a hard query | Escalates only hard queries; both bounds in 16–4096, or `searchWithQuality` throws |
+
+\* Recall@10 in `recall_benchmark` (10K random 128-D vectors, an index built with `HnswParams::max_recall`, 100 queries), measured 2026-09-10 on 6.0.0; see [BENCHMARKS.md](../BENCHMARKS.md#hnsw-recall-profiles-10k128d).
 
 ### Storage modes
 
-| Mode | Compression | Memory/dim | Recall loss | Use case |
-|------|-------------|------------|-------------|----------|
-| `Full` | 1x | 4 bytes | 0% | Best quality |
-| `Sq8` | 4x | 1 byte | ~1% | **Recommended for mobile** |
-| `Binary` | 32x | 1 bit | ~5–10% | Extreme constraints (IoT) |
-| `ProductQuantization` | 8x–16x typical | codebook | aggressive | Train first with `trainPq` |
-| `Rabitq` | 32x | 1 bit | ~1–2% | 1-bit plus rotation and scalar correction |
+| Mode | Compression | Memory/dim | Use case |
+|------|-------------|------------|----------|
+| `Full` | 1x | 4 bytes | Best quality |
+| `Sq8` | 4x | 1 byte | **Recommended for mobile** |
+| `Binary` | 32x | 1 bit | Extreme constraints (IoT) |
+| `ProductQuantization` | `2 × dim / m` (m subspaces) | `2 × m / dim` bytes, plus the codebook | Train first with `trainPq` |
+| `Rabitq` | 32x | 1 bit | 1-bit plus rotation and scalar correction |
 
-(Compression and recall figures above are the ones documented on the enum itself in
-`crates/velesdb-mobile/src/types.rs`.)
+Compression follows from each mode's encoding, as the enum documents it in
+`crates/velesdb-mobile/src/types.rs`. No recorded run measures these modes'
+recall on mobile, so the table gives none.
 
 ```swift
-// iOS — SQ8: 4x less memory, ~1% recall loss
+// iOS — SQ8: 4x less memory, small recall loss
 try db.createCollectionWithStorage(
     name: "embeddings",
     dimension: 384,
@@ -405,8 +408,8 @@ from the FFI boundary without string matching.
 3. Run every call off the main thread (see [Threading](#threading)).
 4. Reuse the embedding buffers you hand to the binding; each call copies the vector
    across the FFI boundary.
-5. ARM64 builds use core's NEON paths (`velesdb_core::simd_neon`,
-   `simd_neon_prefetch`) for distance computation and prefetching.
+5. ARM64 builds use core's NEON distance kernels (`velesdb_core::simd_native`,
+   dispatched at runtime) and its NEON prefetching (`simd_neon_prefetch`).
 
 ## Memory footprint
 
@@ -431,4 +434,4 @@ not a measurement.
 
 ---
 
-Last updated: 2026-07-25 · Applies to: velesdb-core 6.0.0
+Last updated: 2026-09-10 · Applies to: velesdb-core 7.0.0

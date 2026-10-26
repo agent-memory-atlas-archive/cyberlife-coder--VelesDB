@@ -20,9 +20,10 @@
 //!   wrapper (maps to [`velesdb_core::config::VelesConfig`]), with TOML
 //!   loading via `from_toml` / `from_toml_path`
 //!
-//! `WalBatchOptions` is intentionally **not** exposed: the concurrent
-//! WAL writer is a velesdb-premium Enterprise feature (see Commit 8
-//! `docs/CORE_WIRING_DEBT.md` and `docs/guides/WRITE_CONCURRENCY.md`).
+//! There is no WAL batching option: the core `[wal_batch]` table it
+//! would have mirrored was never wired and was removed in 7.0.0 (#2174).
+//! Concurrent WAL writing is a velesdb-premium Enterprise feature (see
+//! `docs/guides/WRITE_CONCURRENCY.md`).
 
 use pyo3::prelude::*;
 use std::path::PathBuf;
@@ -153,7 +154,7 @@ impl HnswOptions {
         Self::from_params(HnswParams::fast())
     }
 
-    /// **Preset — turbo**: maximum insert throughput, ~85% recall.
+    /// **Preset — turbo**: maximum insert throughput, at a lower recall.
     ///
     /// Best for bulk loading, benchmarking, and cold-start ingestion
     /// where search quality is not yet the priority. Maps to
@@ -267,14 +268,14 @@ pub struct LimitsOptions {
     /// Maximum vector dimension. Default: 4096.
     #[pyo3(get, set)]
     pub max_dimensions: Option<usize>,
-    /// Maximum vectors per collection (soft cap, not yet enforced).
+    /// Maximum vectors per collection, enforced at ingest (GuardRail VELES-027).
     #[pyo3(get, set)]
     pub max_vectors_per_collection: Option<usize>,
-    /// Maximum payload size in bytes (not yet enforced).
+    /// Maximum payload size in bytes, enforced at ingest (GuardRail VELES-027).
     #[pyo3(get, set)]
     pub max_payload_size: Option<usize>,
-    /// Maximum vector count before "perfect" mode disengages (not yet
-    /// enforced).
+    /// Collection size above which a Perfect search is refused with a
+    /// guard-rail error rather than scanned (GuardRail VELES-027).
     #[pyo3(get, set)]
     pub max_perfect_mode_vectors: Option<usize>,
 }
@@ -673,69 +674,37 @@ impl HnswConfigOptions {
 
 /// Storage engine settings mapped to
 /// [`velesdb_core::config::StorageConfig`] (the `[storage]` TOML section).
+/// Its one field does not reach the engine yet (core issue #2087).
+/// Unspecified, it falls back to the engine default (`storage_mode="mmap"`).
 ///
-/// All fields are optional — unspecified fields fall back to the engine
-/// defaults (`data_dir="./velesdb_data"`, `storage_mode="mmap"`,
-/// `mmap_cache_mb=1024`, `vector_alignment=64`).
+/// `data_dir`, `mmap_cache_mb` and `vector_alignment` were removed in
+/// 7.0.0 with the core fields they mirrored (#2087): none had an engine
+/// counterpart. Passing one is a `TypeError`.
 #[pyclass(module = "velesdb", from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct StorageOptions {
-    /// Data directory path. Default: `"./velesdb_data"`.
-    #[pyo3(get, set)]
-    pub data_dir: Option<String>,
-    /// Storage mode: `"mmap"` or `"memory"`. Default: `"mmap"`.
+    /// Storage mode: `"mmap"` or `"memory"`. Default: `"mmap"`. Reserved (core #2087): parsed but not yet applied.
     #[pyo3(get, set)]
     pub storage_mode: Option<String>,
-    /// Mmap cache size in megabytes. Default: 1024.
-    #[pyo3(get, set)]
-    pub mmap_cache_mb: Option<usize>,
-    /// Vector alignment in bytes. Default: 64.
-    #[pyo3(get, set)]
-    pub vector_alignment: Option<usize>,
 }
 
 #[pymethods]
 impl StorageOptions {
     #[new]
-    #[pyo3(signature = (
-        data_dir = None,
-        storage_mode = None,
-        mmap_cache_mb = None,
-        vector_alignment = None,
-    ))]
-    fn new(
-        data_dir: Option<String>,
-        storage_mode: Option<String>,
-        mmap_cache_mb: Option<usize>,
-        vector_alignment: Option<usize>,
-    ) -> Self {
-        Self {
-            data_dir,
-            storage_mode,
-            mmap_cache_mb,
-            vector_alignment,
-        }
+    #[pyo3(signature = (storage_mode = None))]
+    fn new(storage_mode: Option<String>) -> Self {
+        Self { storage_mode }
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "StorageOptions(data_dir={:?}, storage_mode={:?}, mmap_cache_mb={:?}, vector_alignment={:?})",
-            self.data_dir, self.storage_mode, self.mmap_cache_mb, self.vector_alignment,
-        )
+        format!("StorageOptions(storage_mode={:?})", self.storage_mode)
     }
 }
 
 impl StorageOptions {
     pub(crate) fn to_core(&self) -> CoreStorageConfig {
         let mut cfg = CoreStorageConfig::default();
-        if let Some(ref data_dir) = self.data_dir {
-            cfg.data_dir.clone_from(data_dir);
-        }
-        if let Some(ref storage_mode) = self.storage_mode {
-            cfg.storage_mode.clone_from(storage_mode);
-        }
-        cfg.mmap_cache_mb = self.mmap_cache_mb.unwrap_or(cfg.mmap_cache_mb);
-        cfg.vector_alignment = self.vector_alignment.unwrap_or(cfg.vector_alignment);
+        cfg.storage_mode = self.storage_mode.clone().unwrap_or(cfg.storage_mode);
         cfg
     }
 
@@ -743,10 +712,7 @@ impl StorageOptions {
     /// (see [`LimitsOptions::from_core`]).
     fn from_core(core: &CoreStorageConfig) -> Self {
         Self {
-            data_dir: Some(core.data_dir.clone()),
             storage_mode: Some(core.storage_mode.clone()),
-            mmap_cache_mb: Some(core.mmap_cache_mb),
-            vector_alignment: Some(core.vector_alignment),
         }
     }
 }
@@ -965,12 +931,12 @@ impl QuantizationOptions {
 /// shell-owned `[server]`/`[logging]` table in a shared file is ignored,
 /// mirroring `VelesConfig::from_toml_engine_only`).
 ///
-/// `wal_batch` is intentionally not exposed: the concurrent WAL
-/// writer is a velesdb-premium Enterprise feature. See
-/// `docs/guides/WRITE_CONCURRENCY.md`. A `[wal_batch]` TOML section is
-/// accepted by the loaders (it is a valid engine section for the
-/// server/CLI) but is not surfaced on — nor applied by — this embedded
-/// options type.
+/// There is no `wal_batch` section: the core removed that never-wired
+/// table in 7.0.0 (#2174), and concurrent WAL writing is a
+/// velesdb-premium Enterprise feature (see
+/// `docs/guides/WRITE_CONCURRENCY.md`). A file that still carries
+/// `[wal_batch]` loads; the core loader names the table in a warning and
+/// applies nothing from it.
 ///
 /// `server`/`logging` are likewise not exposed: they configure hosting
 /// shells, not the embedded engine surface.
@@ -1088,8 +1054,8 @@ impl VelesConfigOptions {
     /// Builds a fully-populated options object from a validated core
     /// config (every exposed section `Some`, every field set), so
     /// [`Self::to_core`] round-trips the loaded values losslessly.
-    /// `wal_batch`/`server`/`logging` are intentionally not carried over
-    /// (see the type-level docs).
+    /// `server`/`logging` are intentionally not carried over (see the
+    /// type-level docs).
     fn from_core(core: &CoreVelesConfig) -> PyResult<Self> {
         Ok(Self {
             limits: Some(LimitsOptions::from_core(&core.limits)),

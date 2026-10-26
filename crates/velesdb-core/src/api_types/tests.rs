@@ -543,12 +543,225 @@ fn test_mode_to_search_quality_invalid_adaptive() {
     assert!(mode_to_search_quality("adaptive:512:32").is_none());
 }
 
+// `custom:<ef>` and `adaptive:<min_ef>:<max_ef>` reach the same ef_search
+// bound the dedicated `ef_search` `WITH` option enforces (#2275): an ef
+// outside `[MIN_EF_SEARCH, MAX_EF_SEARCH]` must not silently pass through
+// this alternate spelling of the option.
+#[cfg(feature = "persistence")]
+#[test]
+fn test_mode_to_search_quality_custom_out_of_range_is_rejected() {
+    use super::mode_to_search_quality;
+    assert!(mode_to_search_quality("custom:0").is_none());
+    assert!(mode_to_search_quality(&format!("custom:{}", MAX_EF_SEARCH + 1)).is_none());
+    assert!(mode_to_search_quality("custom:18446744073709551615").is_none());
+}
+
+#[cfg(feature = "persistence")]
+#[test]
+fn test_mode_to_search_quality_custom_in_range_boundaries() {
+    use super::mode_to_search_quality;
+    assert!(matches!(
+        mode_to_search_quality(&format!("custom:{MIN_EF_SEARCH}")),
+        Some(crate::SearchQuality::Custom(ef)) if ef == MIN_EF_SEARCH
+    ));
+    assert!(matches!(
+        mode_to_search_quality(&format!("custom:{MAX_EF_SEARCH}")),
+        Some(crate::SearchQuality::Custom(ef)) if ef == MAX_EF_SEARCH
+    ));
+}
+
+#[cfg(feature = "persistence")]
+#[test]
+fn test_mode_to_search_quality_adaptive_out_of_range_is_rejected() {
+    use super::mode_to_search_quality;
+    // min_ef below the accepted range.
+    assert!(mode_to_search_quality(&format!("adaptive:0:{MAX_EF_SEARCH}")).is_none());
+    // max_ef above the accepted range, even though min_ef <= max_ef holds.
+    assert!(
+        mode_to_search_quality(&format!("adaptive:{MIN_EF_SEARCH}:{}", MAX_EF_SEARCH + 1))
+            .is_none()
+    );
+    // The unbounded shape #2275 was filed for.
+    assert!(mode_to_search_quality("adaptive:32:18446744073709551615").is_none());
+}
+
 #[cfg(feature = "persistence")]
 #[test]
 fn test_mode_to_search_quality_unknown() {
     use super::mode_to_search_quality;
     assert!(mode_to_search_quality("nonexistent").is_none());
     assert!(mode_to_search_quality("").is_none());
+}
+
+// ============================================================================
+// E2. parse_search_mode: same parsing, but an unparseable mode is an Err (#2267)
+// ============================================================================
+
+#[cfg(feature = "persistence")]
+#[test]
+fn test_parse_search_mode_accepts_every_documented_form() {
+    use super::parse_search_mode;
+    use crate::SearchQuality;
+    assert!(matches!(parse_search_mode("fast"), Ok(SearchQuality::Fast)));
+    assert!(matches!(
+        parse_search_mode("balanced"),
+        Ok(SearchQuality::Balanced)
+    ));
+    assert!(matches!(
+        parse_search_mode("BALANCED"),
+        Ok(SearchQuality::Balanced)
+    ));
+    assert!(matches!(
+        parse_search_mode("accurate"),
+        Ok(SearchQuality::Accurate)
+    ));
+    assert!(matches!(
+        parse_search_mode("perfect"),
+        Ok(SearchQuality::Perfect)
+    ));
+    assert!(matches!(
+        parse_search_mode("autotune"),
+        Ok(SearchQuality::AutoTune)
+    ));
+    assert!(matches!(
+        parse_search_mode("auto_tune"),
+        Ok(SearchQuality::AutoTune)
+    ));
+    assert!(matches!(
+        parse_search_mode("auto"),
+        Ok(SearchQuality::AutoTune)
+    ));
+    assert!(matches!(
+        parse_search_mode("custom:256"),
+        Ok(SearchQuality::Custom(256))
+    ));
+    assert!(matches!(
+        parse_search_mode("adaptive:32:512"),
+        Ok(SearchQuality::Adaptive {
+            min_ef: 32,
+            max_ef: 512
+        })
+    ));
+    assert!(matches!(
+        parse_search_mode("adaptive:64:64"),
+        Ok(SearchQuality::Adaptive {
+            min_ef: 64,
+            max_ef: 64
+        })
+    ));
+}
+
+#[cfg(feature = "persistence")]
+#[test]
+fn test_parse_search_mode_rejects_unknown_mode() {
+    use super::parse_search_mode;
+    let err = parse_search_mode("acurate").expect_err("typo should be rejected");
+    assert!(err.contains("acurate"));
+    assert!(err.contains("balanced"), "error should name valid values");
+}
+
+#[cfg(feature = "persistence")]
+#[test]
+fn test_parse_search_mode_rejects_bare_adaptive() {
+    use super::parse_search_mode;
+    // `adaptive` without its `<min_ef>:<max_ef>` bounds is unparseable, same
+    // as any other unknown mode — it does not fall back to a default range.
+    assert!(parse_search_mode("adaptive").is_err());
+}
+
+/// A well-formed `custom:`/`adaptive:` mode whose ef falls outside the
+/// `ef_search` range is not an unknown mode: the error names the value, as
+/// `ef_search`'s own does, instead of listing `custom:<ef>` among the valid
+/// forms the caller just used (#2275).
+#[cfg(feature = "persistence")]
+#[test]
+fn test_parse_search_mode_names_the_out_of_range_ef() {
+    use super::{ef_search_out_of_range, parse_search_mode};
+    let too_big = (MAX_EF_SEARCH + 1).to_string();
+    // One more than `u64::MAX`: still an integer, so still out of range
+    // rather than malformed, as #2304 reads such an `ef_search` literal.
+    let past_u64 = "18446744073709551616".to_string();
+    for (mode, shown) in [
+        (format!("custom:{too_big}"), too_big.clone()),
+        (format!("CUSTOM:{past_u64}"), past_u64),
+        (format!("adaptive:0:{MAX_EF_SEARCH}"), "0".to_string()),
+        (
+            format!("adaptive:{MIN_EF_SEARCH}:{too_big}"),
+            too_big.clone(),
+        ),
+        // Negative: an integer, so out of range, as `ef_search = -5` is.
+        ("custom:-5".to_string(), "-5".to_string()),
+        // Out of order too, but no order makes 4097 a valid bound.
+        (format!("adaptive:{too_big}:32"), too_big),
+    ] {
+        let err = parse_search_mode(&mode).expect_err(&mode);
+        let expected = format!("Search mode '{mode}': {}", ef_search_out_of_range(shown));
+        assert_eq!(err, expected);
+    }
+}
+
+/// A malformed `adaptive:` mode stays an unknown one whatever its other
+/// bound holds, and so does an out-of-order one whose bounds are both in
+/// range (#2275).
+#[cfg(feature = "persistence")]
+#[test]
+fn test_parse_search_mode_malformed_adaptive_stays_unknown() {
+    use super::parse_search_mode;
+    for mode in [
+        "adaptive:0:x",
+        "adaptive:x:0",
+        "adaptive:0",
+        "adaptive:4096:16",
+    ] {
+        let err = parse_search_mode(mode).expect_err(mode);
+        assert!(err.starts_with("Unknown search mode"), "{mode}: {err}");
+    }
+}
+
+// ============================================================================
+// F. validate_ef_search / parse_with_ef_search (#2274)
+// ============================================================================
+
+#[test]
+fn test_validate_ef_search_accepts_the_documented_range() {
+    use super::validate_ef_search;
+    assert!(validate_ef_search(16).is_ok());
+    assert!(validate_ef_search(4096).is_ok());
+    assert!(validate_ef_search(160).is_ok());
+}
+
+#[test]
+fn test_validate_ef_search_rejects_outside_the_range() {
+    use super::validate_ef_search;
+    let err = validate_ef_search(0).expect_err("below range");
+    assert!(err.contains('0'));
+    let err = validate_ef_search(4097).expect_err("above range");
+    assert!(err.contains("4097"));
+}
+
+#[test]
+fn test_parse_with_ef_search_accepts_the_documented_range() {
+    use super::parse_with_ef_search;
+    assert_eq!(parse_with_ef_search(16), Ok(16));
+    assert_eq!(parse_with_ef_search(4096), Ok(4096));
+}
+
+/// The VelesQL grammar accepts a leading `-` on any integer literal, so
+/// `ef_search = -1` must be rejected here rather than cast to
+/// `usize::MAX` — an uncapped graph traversal (#2274).
+#[test]
+fn test_parse_with_ef_search_rejects_negative() {
+    use super::parse_with_ef_search;
+    let err = parse_with_ef_search(-1).expect_err("negative ef_search should be rejected");
+    assert!(err.contains("-1"));
+}
+
+#[test]
+fn test_parse_with_ef_search_rejects_outside_the_range() {
+    use super::parse_with_ef_search;
+    assert!(parse_with_ef_search(0).is_err());
+    assert!(parse_with_ef_search(4097).is_err());
+    assert!(parse_with_ef_search(i64::MAX).is_err());
 }
 
 // ============================================================================

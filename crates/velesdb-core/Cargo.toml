@@ -34,7 +34,7 @@ tempfile = { workspace = true }
 workspace = true
 
 [dependencies.parking_lot]
-version = "0.12"
+version = "0.12.3"
 
 # rayon moved to optional deps section (persistence feature)
 
@@ -42,7 +42,7 @@ version = "0.12"
 version = "1.9"
 
 [dependencies.rustc-hash]
-version = "2.1"
+version = "2.1.1"
 
 [dependencies.indexmap]
 version = "2.14"
@@ -62,18 +62,19 @@ optional = true
 version = "1.0"
 optional = true
 
+# Non-optional: `cast_slice` is on the `.vectors` dump path, which every build
+# reaches. The `derive` feature stays behind `gpu` so a non-GPU build does not
+# pull in the proc-macro for `Pod`/`Zeroable` impls it never writes.
 [dependencies.bytemuck]
-version = "1.14"
-features = ["derive"]
-optional = true
+version = "1.22.0"
 
 [dependencies.half]
-version = "2.4"
+version = "2.5.0"
 features = ["std", "serde"]
 
 # EPIC-033/US-003: Windows hole-punch (FSCTL_SET_ZERO_DATA)
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
-version = "0.61"
+version = "0.61.2"
 features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
@@ -88,13 +89,17 @@ version = "0.4.4"
 
 # EPIC-033/US-003: Linux hole-punch (fallocate)
 [target.'cfg(target_os = "linux")'.dependencies.libc]
-version = "0.2"
+version = "0.2.186"
 
 [dependencies.rand]
 workspace = true
 
 [dependencies.pest]
-version = "2.7"
+version = "2.9.1"
+## Without `std`: that feature links `stacker`/`psm`, which Miri cannot run.
+## `persistence` turns it back on; see the note on that feature.
+default-features = false
+features = ["memchr"]
 
 [dependencies.pest_derive]
 version = "2.7"
@@ -102,15 +107,37 @@ version = "2.7"
 [features]
 ## Feature flags
 ##
-## - `persistence` (default): Enables mmap storage, WAL, rayon parallelism, and tokio async.
+## - `persistence` (default): Enables mmap storage, WAL, rayon parallelism, and tokio async,
+##   and pest's native-stack check on VelesQL parsing (see the note on its line below).
 ##   Disable for WASM builds: `velesdb-core = { default-features = false }`
 ## - `gpu`: Enables wgpu-based GPU acceleration for distance calculations.
 ## - `update-check`: Enables HTTP client for automatic version checking.
 ## - `openapi`: Enables utoipa::ToSchema derives on api_types DTOs.
-## - `loom`: Enables loom-based concurrency testing (nightly only).
-##   Run with: `cargo +nightly test --features loom --test loom_tests`
+## - `loom`: Enables loom-based concurrency testing (built with `--cfg loom`).
+##   Run with: `LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS="--cfg loom" cargo test -p velesdb-core --features loom,persistence --test loom_tests -- --test-threads=1`
+## - `bytemuck`: Compatibility only — see the note on its line below.
 default = ["persistence"]
 gpu = ["wgpu", "pollster", "bytemuck"]
+## Compatibility feature. `bytemuck` was `optional = true` before the
+## `.vectors` dump path (#2212) made it mandatory, which silently dropped the
+## `bytemuck` feature Cargo had derived from that `optional = true` — and which
+## `gpu` used to enable transitively.
+##
+## It re-enables `bytemuck/derive`, not merely the name. The 6.0.0 manifest
+## carried `features = ["derive"]` on the optional dependency, so enabling the
+## implicit feature there gave the caller bytemuck **with** its derive macro. A
+## stub that only kept the name valid would resolve and then fail to compile
+## for anyone who wrote `velesdb-core = { features = ["bytemuck"] }` alongside
+## their own `bytemuck` dependency and expected `Pod` to be derivable — the very
+## break this is meant to undo, moved from resolution to compilation.
+##
+## `cargo-semver-checks` cannot catch that: `feature_missing` and
+## `feature_no_longer_enables_feature` read this package's feature graph, where
+## an empty stub looks restored. Green is not the same as fixed.
+##
+## With this line, `gpu` is byte-for-byte its 6.0.0 form again, and a non-GPU
+## build that never names the feature still pulls no proc-macro.
+bytemuck = ["bytemuck/derive"]
 internal-bench = []
 ## Enables the standardized SIFT1M ANN benchmark
 ## (`cargo bench -p velesdb-core --bench sift1m_recall --features bench-sift1m`).
@@ -125,7 +152,17 @@ internal-bench = []
 ## to catch API drift).
 bench-sift1m = ["dep:flate2", "dep:tar", "dep:ureq", "dep:sha2"]
 openapi = ["dep:utoipa"]
-persistence = ["dep:memmap2", "dep:rayon", "dep:tokio", "dep:fs2"]
+## `pest/std` is pest's native-stack check (pest 2.9.3+): on every rule entry
+## it reads the stack pointer through `stacker`/`psm` and fails the parse with
+## "stack limit reached" rather than overflowing. It is the second layer behind
+## the #896 nesting bound in `velesql/parser/prescan.rs`, and it belongs here
+## because it needs what this feature already assumes, a native OS target:
+## `psm` reads the stack pointer in assembly, which Miri cannot execute (the
+## `Miri UB Detection` job builds `--no-default-features`), and on
+## `wasm32-unknown-unknown` stacker finds no stack limit, so the check never
+## fired there. `pest_stack_guard_refuses_nesting_the_prescan_never_sees`
+## (`velesql/parser/robustness_tests.rs`) aborts if this line is dropped.
+persistence = ["dep:memmap2", "dep:rayon", "dep:tokio", "dep:fs2", "pest/std"]
 update-check = [
     "dep:reqwest",
     "dep:tokio",
@@ -188,6 +225,17 @@ harness = false
 [[bench]]
 name = "hnsw_adjacency_scale"
 harness = false
+
+[[bench]]
+name = "persistence_save_scale"
+harness = false
+
+[[bench]]
+name = "persistence_load_scale"
+harness = false
+# Adoption of the durable file is `persistence`-gated; without the feature this
+# would measure the copy path on both sides and say nothing.
+required-features = ["persistence"]
 
 [[bench]]
 name = "scalability_benchmark"
@@ -379,7 +427,7 @@ version = "0.11"
 optional = true
 
 [dependencies.hex]
-version = "0.4"
+version = "0.4.3"
 optional = true
 
 [dependencies.hostname]
@@ -391,7 +439,7 @@ version = "2.1"
 optional = true
 
 [dependencies.reqwest]
-version = "0.13"
+version = "0.13.2"
 features = ["json"]
 optional = true
 
@@ -401,22 +449,22 @@ optional = true
 
 # OpenAPI schema derives (optional, gated behind openapi feature)
 [dependencies.utoipa]
-version = "5"
+version = "6.0.0"
 optional = true
 
 # Dataset loader deps (optional, gated behind bench-sift1m feature).
 # These are only pulled in when compiling the SIFT1M benchmark —
 # never in default / WASM / production builds.
 [dependencies.flate2]
-version = "1"
+version = "1.1.1"
 optional = true
 
 [dependencies.tar]
-version = "0.4"
+version = "0.4.3"
 optional = true
 
 [dependencies.ureq]
-version = "2"
+version = "2.5.0"
 features = ["tls"]
 optional = true
 
@@ -445,6 +493,18 @@ harness = false
 
 [[test]]
 name = "adaptive_resume_evals"
+required-features = ["internal-bench", "persistence"]
+
+# #2335: asserts the swap holds the write guard for a bounded remainder.
+[[test]]
+name = "vacuum_swap_bounded"
+required-features = ["internal-bench", "persistence"]
+
+# #2177's crossover harness: scores one corpus with both sparse strategies and
+# compares the work in posting inspections. `internal-bench` compiles in the
+# counter and the seam that reaches each strategy past the router.
+[[test]]
+name = "sparse_strategy_crossover"
 required-features = ["internal-bench"]
 
 [[bench]]

@@ -2,24 +2,30 @@
 //!
 //! During bulk insert with deferred HNSW construction, vectors must be
 //! visible to rerank/brute-force before graph indexing completes.
-//! `DirectVectorWriter` registers ID mappings and writes vector data
-//! straight into the graph's `ContiguousVectors` (the single vector store).
+//! `DirectVectorWriter` writes vector data straight into the graph's
+//! `ContiguousVectors` (the single vector store) and maps each id to the slot
+//! its vector got.
 
 use super::index::HnswIndex;
-use super::upsert::{self, UpsertResult};
+use super::upsert::UpsertResult;
 use crate::validation::validate_dimension_match;
 
 /// Writes vectors directly to the graph's `ContiguousVectors`.
 ///
 /// Used exclusively during `upsert_bulk` so vectors are immediately
-/// available for SIMD re-ranking and brute-force search while HNSW graph
-/// construction is deferred to `AsyncIndexBuilder`.
-#[allow(dead_code)] // Wired into Collection pipeline in Task 4
+/// available for SIMD re-ranking and brute-force search while linking them
+/// into the graph is deferred to `AsyncIndexBuilder`, which links each slot
+/// placed here where it is (#2264).
+// Reason: only the persistence-gated bulk path (collection::core::crud_bulk)
+// writes directly.
+#[cfg_attr(not(feature = "persistence"), allow(dead_code))]
 pub(crate) struct DirectVectorWriter<'a> {
     hnsw_index: &'a HnswIndex,
 }
 
-#[allow(dead_code)] // Wired into Collection pipeline in Task 4
+// Reason: only the persistence-gated bulk path (collection::core::crud_bulk)
+// writes directly.
+#[cfg_attr(not(feature = "persistence"), allow(dead_code))]
 impl<'a> DirectVectorWriter<'a> {
     /// Creates a new direct writer for the given `HnswIndex`.
     #[must_use]
@@ -27,19 +33,27 @@ impl<'a> DirectVectorWriter<'a> {
         Self { hnsw_index }
     }
 
-    /// Inserts a batch of vectors directly into `ContiguousVectors`.
+    /// Inserts a batch of vectors directly into `ContiguousVectors`, then maps
+    /// each id to the slot its vector got (#2246).
     ///
-    /// For each vector:
-    /// 1. Registers the external ID via `ShardedMappings` (upsert semantics)
-    /// 2. Writes the vector data to `ContiguousVectors` inside `NativeHnsw`
+    /// The vectors are appended under one write lock on the graph's arena —
+    /// the same lock every graph insert allocates under — and each id is then
+    /// mapped to the slot its vector landed in. The mapping never predicts a
+    /// slot, so a concurrent graph insert can no longer take the slot this
+    /// batch writes, nor this batch overwrite a vector the graph placed.
     ///
-    /// When `enable_vector_storage` is `false`, only mappings are registered
-    /// (the deferred HNSW insert path will populate `ContiguousVectors`).
+    /// When `enable_vector_storage` is `false` (the index's exact-distance
+    /// features are off) this writer places no vector and returns `None`: it
+    /// has no slot to map, nothing is written or registered here, and the
+    /// caller leaves the deferred HNSW insert to place each vector and map
+    /// its id.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::Error::DimensionMismatch`] if any vector has wrong dimension.
     /// Returns [`Error::AllocationFailed`] if `ContiguousVectors` cannot grow.
+    /// Returns [`crate::error::Error::Internal`] if the graph's arena is not
+    /// initialized.
     /// On error, state is unchanged (all-or-nothing validation).
     ///
     /// [`crate::error::Error::DimensionMismatch`]: crate::error::Error::DimensionMismatch
@@ -47,57 +61,38 @@ impl<'a> DirectVectorWriter<'a> {
     pub(crate) fn write_batch_direct(
         &self,
         vectors: &[(u64, &[f32])],
-    ) -> crate::error::Result<Vec<UpsertResult>> {
-        if vectors.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Validate ALL dimensions upfront before any mutation.
+    ) -> crate::error::Result<Option<Vec<UpsertResult>>> {
+        // Every dimension is checked before any mutation, whatever the
+        // index's features: `# Errors` promises it.
         for (_, vector) in vectors {
             validate_dimension_match(self.hnsw_index.dimension, vector.len())?;
         }
-
-        // Register mappings (upsert semantics: replaces existing IDs).
-        let ids: Vec<u64> = vectors.iter().map(|(id, _)| *id).collect();
-        let results = upsert::upsert_mapping_batch(&self.hnsw_index.mappings, &ids);
-
-        // Write vectors to ContiguousVectors inside NativeHnsw.
-        // When enable_vector_storage is false, the graph's own ContiguousVectors
-        // is still populated by the (deferred) HNSW insert path, so we skip the
-        // direct write here.
-        if self.hnsw_index.enable_vector_storage {
-            self.write_to_contiguous(vectors, &results)?;
+        if !self.hnsw_index.enable_vector_storage {
+            return Ok(None);
+        }
+        if vectors.is_empty() {
+            return Ok(Some(Vec::new()));
         }
 
-        Ok(results)
-    }
-
-    /// Writes vector data into the `NativeHnsw` `ContiguousVectors` storage.
-    ///
-    /// Acquires the write lock once for the entire batch.
-    fn write_to_contiguous(
-        &self,
-        vectors: &[(u64, &[f32])],
-        results: &[UpsertResult],
-    ) -> crate::error::Result<()> {
+        let refs: Vec<&[f32]> = vectors.iter().map(|&(_, vector)| vector).collect();
+        // The third mapping publication site, sealed like the other two: a
+        // sealed `vacuum` settles a remainder no write can grow (#2335).
+        // Taken before `inner`, always.
+        let _publishing = self.hnsw_index.publishing.read();
+        // Held until every id is mapped: `reorder_for_locality` and `vacuum`
+        // renumber slots under the write lock, so each slot placed here is still
+        // its vector's when the mapping names it.
         let inner = self.hnsw_index.inner.read();
-        inner.with_contiguous_vectors_mut(|storage| {
-            // Ensure capacity for all new vectors.
-            let max_idx = results.iter().map(|r| r.idx).max().unwrap_or(0);
-            // #899 follow-up: use checked_add for consistency with the rest of
-            // the allocation hardening — a wrapped `max_idx + 1` would otherwise
-            // request capacity 0 and let `insert_at` write out of bounds.
-            let required = max_idx.checked_add(1).ok_or_else(|| {
-                crate::error::Error::AllocationFailed(format!(
-                    "write_to_contiguous: max index {max_idx} + 1 overflows usize"
-                ))
-            })?;
-            storage.ensure_capacity(required)?;
-
-            for ((_, vector), result) in vectors.iter().zip(results.iter()) {
-                storage.insert_at(result.idx, vector)?;
-            }
-            Ok(())
-        })
+        let placed = inner.place_unlinked(&refs)?;
+        let results = vectors
+            .iter()
+            .zip(placed)
+            .map(|(&(id, _), placed)| UpsertResult {
+                idx: placed.slot(),
+                old_idx: self.hnsw_index.mappings.assign(id, placed),
+            })
+            .collect();
+        drop(inner);
+        Ok(Some(results))
     }
 }

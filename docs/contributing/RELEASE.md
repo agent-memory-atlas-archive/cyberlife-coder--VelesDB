@@ -4,13 +4,15 @@ Guide simplifié pour publier une nouvelle version de VelesDB.
 
 ## Workflow Architecture
 
-VelesDB utilise **4 workflows GitHub Actions** :
+VelesDB utilise **6 workflows GitHub Actions** :
 
 | Workflow | Trigger | Fonction |
 |----------|---------|----------|
 | `ci.yml` | Push/PR sur main | Tests, lint, security audit |
 | `tag-release.yml` | Déclenchement manuel sur develop/main | Création gardée du tag quand le push Git direct est impossible |
 | `release.yml` | Tag `v*` | Publication complète |
+| `release-memory.yml` | Tag `velesdb-memory-v*` | Publication indépendante de `velesdb-memory` |
+| `release-mcpb.yml` | Tag `velesdb-memory-vX.Y.Z` (version finale) | Bundles MCPB + publication au MCP registry |
 | `bench-regression.yml` | Push sur main | Benchmarks de régression |
 
 ## Publishing a Release
@@ -26,6 +28,13 @@ python3 scripts/bump_version.py X.Y.Z
 # bump just created, leaving docs/openapi.{json,yaml} at the old version.
 UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p velesdb-server --features openapi generate_openapi_spec_files -- --include-ignored --test-threads=1
 cargo build  # refresh Cargo.lock
+# Refresh the lockfiles of the standalone Rust projects that path-depend on the
+# workspace crates (fuzz/, the examples, the Tauri demo): `--locked` jobs such
+# as "Fuzz Targets Compile Check" fail on the release commit if one still pins
+# the previous version.
+for m in $(git ls-files '*Cargo.lock' | grep -v '^Cargo.lock$' | xargs -n1 dirname); do
+  cargo update --workspace --manifest-path "$m/Cargo.toml"
+done
 python3 scripts/check-version-sync.py  # must report: All versions match
 ```
 
@@ -85,7 +94,8 @@ tag. Dans ce cas, utiliser le workflow permanent `tag-release.yml` :
 1. Ouvrir **Actions → Create Release Tag → Run workflow**.
 2. Sélectionner `develop` ou `main` comme branche du workflow.
 3. Saisir le tag `vX.Y.Z`, le SHA complet du commit dont le CI est vert sur
-   `main`, et le message du tag annoté.
+   `main`, et le message du tag annoté. Pour le train `velesdb-memory`, voir la
+   sous-section suivante : même workflow, tag et branche différents.
 
 Le workflow refuse un SHA qui n'est pas dans l'historique de `main` et un tag
 qui existe déjà. Après avoir poussé le tag, il déclenche explicitement
@@ -95,6 +105,20 @@ lui seul un workflow écoutant `push.tags`.
 Si le tag a été créé mais que ce second déclenchement échoue, relancer
 manuellement **Release** avec le tag comme ref et `X.Y.Z` comme version. Ne pas
 recréer ni déplacer le tag.
+
+#### Le même repli pour le train `velesdb-memory`
+
+`velesdb-memory` suit sa propre cadence 0.x et se tague sur `develop`, pas sur
+`main`. Le même workflow **Create Release Tag** couvre ce train : saisir
+`velesdb-memory-vX.Y.Z` comme tag et le SHA complet du commit dont le CI est
+vert sur `develop`.
+
+Le train est déduit du tag, pas d'un champ supplémentaire : un tag `vX.Y.Z` est
+vérifié contre `origin/main`, un tag `velesdb-memory-vX.Y.Z` contre
+`origin/develop`. Une paire tag/branche incohérente est donc impossible à
+saisir. Après le push du tag, le workflow déclenche `release-memory.yml` sur ce
+tag, puis `release-mcpb.yml` sauf si la version est une pre-release — ce
+workflow-là n'écoute que les tags de version finale.
 
 ### 6. The `release.yml` workflow publishes automatically
 

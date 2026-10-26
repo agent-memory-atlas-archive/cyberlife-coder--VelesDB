@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryService } from '../src/memory';
 import type { CompileContextFragment, MemoryMetadata } from '../src/memory';
-import { ConnectionError, NotFoundError, ValidationError } from '../src/types';
+import { ConnectionError, NotFoundError, ValidationError, VelesDBError } from '../src/types';
 
 // Captures the most recently constructed mock instance so a test can
 // override one of its methods for that specific instance. Overriding
@@ -137,6 +137,7 @@ class MockWasmMemoryService {
   free = vi.fn();
 
   constructor(public dimension: number) {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- publishes the instance memory.ts builds, so each test can drive it
     lastMockInstance = this;
   }
 }
@@ -196,9 +197,24 @@ describe('MemoryService', () => {
       await expect(memory.recall('query')).rejects.toThrow(ConnectionError);
     });
 
-    it('wraps a wasm-bindgen default() failure in ConnectionError', async () => {
-      mockWasmModule.default.mockRejectedValueOnce(new Error('boom'));
-      await expect(memory.init()).rejects.toThrow(ConnectionError);
+    it("wraps a wasm-bindgen default() failure in ConnectionError, keeping the binding's reason (#2282)", async () => {
+      // What the loader really rejects with, probed on 6.0.0: a
+      // `WebAssembly.CompileError`, not a bare string. wasm-bindgen's
+      // `Result::Err(String)` shape reaches user code from a METHOD call
+      // (`throw takeObject(…)` in the glue), and `mod.default()`'s glue has
+      // no such unwrap. The reason must still reach the message: a caller
+      // reading only `err.message` otherwise sees "Failed to initialize the
+      // memory wedge" with nothing about magic words.
+      mockWasmModule.default.mockRejectedValueOnce(
+        new WebAssembly.CompileError(
+          'WebAssembly.instantiate(): expected magic word 00 61 73 6d'
+        )
+      );
+      const rejection = memory.init();
+      await expect(rejection).rejects.toBeInstanceOf(ConnectionError);
+      await expect(rejection).rejects.toThrow(
+        /Failed to initialize the memory wedge WASM module: WebAssembly\.instantiate\(\): expected magic word 00 61 73 6d/
+      );
       expect(memory.isInitialized()).toBe(false);
     });
 
@@ -245,7 +261,7 @@ describe('MemoryService', () => {
 
     it('remember() passes empty links and undefined metadata/ttl when not provided', async () => {
       await memory.remember('a fact');
-      expect(lastMockInstance!.remember).toHaveBeenCalledWith('a fact', [], undefined, undefined);
+      expect(lastMockInstance!.remember).toHaveBeenCalledWith('a fact', [], undefined, null);
     });
 
     it.each([1.5, -1, Number.NaN, 2 ** 64, Number.POSITIVE_INFINITY])(
@@ -349,7 +365,7 @@ describe('MemoryService', () => {
       expect(lastMockInstance!.rememberExtracted).toHaveBeenCalledWith(
         'edge: Camille | sister of | Theo',
         undefined,
-        undefined
+        null
       );
     });
 
@@ -434,7 +450,7 @@ describe('MemoryService', () => {
     it('explainCompilation() omits fragmentIndex when not provided', async () => {
       const request = { query: 'q', token_budget: 1000, fragments: [{ content: 'x' }] };
       await memory.explainCompilation(request, '1');
-      expect(lastMockInstance!.explainCompilation).toHaveBeenCalledWith(request, '1', undefined);
+      expect(lastMockInstance!.explainCompilation).toHaveBeenCalledWith(request, '1', null);
     });
 
     it('contextSavings() delegates the project and returns the aggregate', async () => {
@@ -447,7 +463,7 @@ describe('MemoryService', () => {
 
     it('contextSavings() works with no project filter', async () => {
       await memory.contextSavings();
-      expect(lastMockInstance!.contextSavings).toHaveBeenCalledWith(undefined);
+      expect(lastMockInstance!.contextSavings).toHaveBeenCalledWith(null);
     });
 
     it('suggestBudget() passes reserveTokens as a BigInt and returns the suggestion', async () => {
@@ -457,11 +473,11 @@ describe('MemoryService', () => {
       expect(budget.suggested_budget).toBe(199000);
     });
 
-    it('suggestBudget() passes undefined reserveTokens when omitted', async () => {
+    it('suggestBudget() passes a null reserveTokens when omitted', async () => {
       await memory.suggestBudget('claude-sonnet-4-5');
       expect(lastMockInstance!.suggestBudget).toHaveBeenCalledWith(
         'claude-sonnet-4-5',
-        undefined
+        null
       );
     });
 
@@ -671,11 +687,66 @@ describe('MemoryService', () => {
 
     it('wraps a thrown non-Error value in VelesDBError', async () => {
       lastMockInstance!.forget.mockImplementationOnce(() => {
-        // eslint-disable-next-line @typescript-eslint/no-throw-literal
         throw 'a raw string throw';
       });
 
       await expect(memory.forget('1')).rejects.toThrow('a raw string throw');
+    });
+
+    /** Rejects with a `VelesDBError` coded `INTERNAL` and exactly `message`. */
+    async function expectInternal(thrown: unknown, message: string): Promise<void> {
+      lastMockInstance!.forget.mockImplementationOnce(() => {
+        throw thrown;
+      });
+      await expect(memory.forget('1')).rejects.toSatisfy((e: unknown) => {
+        expect(e).toBeInstanceOf(VelesDBError);
+        expect((e as VelesDBError).code).toBe('INTERNAL');
+        expect((e as Error).message).toBe(message);
+        return true;
+      });
+    }
+
+    it('keeps the message of a non-Error whose string coercion throws', async () => {
+      const thrown = {
+        message: 'kernel refused the batch',
+        toString(): string {
+          throw new Error('toString detonated');
+        },
+      };
+      await expectInternal(thrown, 'wasm error (translation failed): kernel refused the batch');
+    });
+
+    it('names a non-Error that neither coerces nor carries a message', async () => {
+      // No prototype: `String()` finds no `toString` and throws a TypeError.
+      await expectInternal(
+        Object.create(null),
+        'non-coercible value thrown across the wasm boundary'
+      );
+    });
+
+    it('degrades an uncoded Error whose message getter throws', async () => {
+      const thrown = new Error('never read');
+      Object.defineProperty(thrown, 'message', {
+        get(): string {
+          throw new Error('getter detonated');
+        },
+      });
+      await expectInternal(thrown, 'wasm error (message unavailable)');
+    });
+
+    it('coerces a non-string message rather than dropping it', async () => {
+      const err = new Error();
+      Object.defineProperty(err, 'message', { value: 404 });
+      (err as Error & { code: string }).code = 'NOT_FOUND';
+      lastMockInstance!.relate.mockImplementationOnce(() => {
+        throw err;
+      });
+
+      await expect(memory.relate('404', '1', 'x')).rejects.toSatisfy((e: unknown) => {
+        expect(e).toBeInstanceOf(NotFoundError);
+        expect((e as Error).message).toBe('404');
+        return true;
+      });
     });
   });
 });

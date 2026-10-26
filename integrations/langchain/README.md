@@ -72,7 +72,7 @@ VelesDBVectorStore(
     path: str = "./velesdb_data",
     collection_name: str = "langchain",
     metric: str = "cosine",         # "cosine", "euclidean", "dot" (aliases: "dotproduct", "inner", "ip"), "hamming", "jaccard"
-    storage_mode: str = "full",     # "full"/"f32", "sq8"/"int8" (4× compression), "binary"/"bit" (32× compression), "pq" (8-32× compression), "rabitq" (32× with scalar correction)
+    storage_mode: str = "full",     # "full"/"f32", "sq8"/"int8" (4× compression), "binary"/"bit" (32× compression), "pq" (2 × dim / m compression), "rabitq" (32× with scalar correction)
     search_quality: str = None,     # "fast", "balanced", "accurate", "perfect", "autotune", "custom:N", "adaptive:MIN:MAX"
 )
 ```
@@ -209,6 +209,19 @@ results = vectorstore.similarity_search_with_ef(
     ef_search=256,
     k=10
 )
+```
+
+> **Limitation: `ef_search` cannot be combined with `filter`.** The VelesDB
+> binding's `search_with_ef` has no filter argument, so
+> `similarity_search_with_ef` raises `ValueError` whenever a `filter` is
+> passed (`ef_search` always has a value there, default 64). For a filtered
+> search use `similarity_search_with_filter`, which runs at the engine's
+> default `ef_search`. Tracked in
+> [#2302](https://github.com/cyberlife-coder/VelesDB/issues/2302).
+
+```python
+vectorstore.similarity_search_with_ef("machine learning", ef_search=256, filter=flt)
+# ValueError: ef_search cannot be combined with filter: ...
 ```
 
 ### Hybrid Search (Vector + BM25)
