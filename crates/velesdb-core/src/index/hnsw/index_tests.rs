@@ -4505,6 +4505,10 @@ const RENUMBERED: u64 = 1_200;
 /// Should `REORDER_THRESHOLD` ever rise past [`RENUMBERED`], the pass starts
 /// declining here, `moved` falls to zero, and this test says so rather than
 /// passing on a silent skip.
+///
+/// The lookups at the end are exact (`SearchQuality::Perfect`): the question
+/// is whether an id still resolves to its own vector, which a graph search
+/// answers only up to its recall.
 #[test]
 fn reordering_renumbers_the_slots_and_the_mappings_follow() {
     use std::collections::{BTreeMap, BTreeSet};
@@ -4538,9 +4542,16 @@ fn reordering_renumbers_the_slots_and_the_mappings_follow() {
          from: the renumbering is not a permutation of them",
         before.len()
     );
+    // `Perfect` scores every stored vector, so the nearest one to `id`'s own
+    // vector is `id` unless the mappings stopped following the slots. A graph
+    // search would also miss now and then on an index built by parallel
+    // inserts, and that is recall, not what this test is about.
     for id in [0, RENUMBERED / 2, RENUMBERED - 1] {
+        let hits = index
+            .search_with_quality(&wide_vector(id), 1, SearchQuality::Perfect)
+            .expect("test: exact search");
         assert_eq!(
-            index.search(&wide_vector(id), 1).first().map(|hit| hit.id),
+            hits.first().map(|hit| hit.id),
             Some(id),
             "after the renumbering {id}'s own vector no longer finds {id}: \
              the mappings did not follow the slots"
