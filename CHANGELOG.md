@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `Code Coverage` job gets 90 minutes instead of 45.** Its single-threaded
+  `cargo llvm-cov` run of the whole workspace took 23 minutes in July and 39 to
+  40 on 6.0.0, then passed 45 on both `main` pushes of the 7.0.0 cycle, so the
+  job was cancelled by its own timeout and reported no coverage. It runs on
+  `main` only and is not part of `CI Success`; the 78% line threshold has not
+  been checked since 6.0.0 and will be again on the next push to `main`.
+
 ## [7.0.0] - 2026-10-26
 
 > **MAJOR release.** The breaking changes are listed in
