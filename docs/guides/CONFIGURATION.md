@@ -349,7 +349,8 @@ rerank_multiplier = 2
 
 # -----------------------------------------------------------------------------
 # UPDATE CHECK (v1.9.2+)
-# Non-blocking startup check for new versions. No PII collected.
+# Non-blocking check for new versions, with an anonymous install count.
+# What is sent and how to opt out: "Update check and telemetry" below.
 # -----------------------------------------------------------------------------
 [update_check]
 # Enable/disable update check (default: true)
@@ -661,7 +662,55 @@ unaffected.
 | `endpoint` | string | `"https://velesdb.com/api/check"` | Update check endpoint URL |
 | `timeout_ms` | u64 | `2000` | Timeout in milliseconds |
 
-**Privacy**: Only sends version, OS, architecture, and a non-reversible SHA256 instance hash. No personal data collected. Disable with `VELESDB_NO_UPDATE_CHECK=1` or `enabled = false`.
+See [Update check and telemetry](#update-check-and-telemetry) for exactly what is sent, what is stored, and every way to turn it off.
+
+### Update check and telemetry
+
+`velesdb-server` and `velesdb-cli` are built with the `update-check` feature by default. `velesdb-core` used as a library does not enable it, so embedding the crate sends nothing.
+
+**When it runs.** The server checks once at start-up and then once every 24 hours while it runs. The CLI checks once per invocation. Each request has a short timeout, runs on a background thread, and fails silently: a missing network never delays or breaks start-up, and the check never keeps the process alive at shutdown.
+
+**What is sent.** One JSON `POST` to `https://velesdb.com/api/check`, with exactly these fields and no others:
+
+| Field | Example | Meaning |
+|---|---|---|
+| `version` | `"6.0.0"` | VelesDB version |
+| `os` | `"linux"` | Operating system family |
+| `arch` | `"aarch64"` | CPU architecture |
+| `instance_hash` | 64 hex characters | SHA-256 of a random install id (below) |
+| `edition` | `"core"` | `core` or `premium` |
+| `entry` | `"server"` | Which binary sent it: `server` or `cli` |
+| `ci` | `false` | `true` when a CI system's environment variables are present (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `TF_BUILD`, `JENKINS_URL`, `TEAMCITY_VERSION`, ...) |
+
+Nothing else is read or sent: no hostname, user name, machine identifier, data-directory path, collection name, query, or data. The request necessarily carries the sender's IP address, as every HTTP request does. To see the payload, run `velesdb-server` with debug logging for `velesdb_core` and look for the `Update check payload` line; `velesdb-cli` prints no log output, so point `endpoint` at a local listener to inspect what it sends.
+
+**The install id.** The first check generates a random 128-bit id and stores it in a file named `install-id`, in `velesdb/` under your per-user configuration directory (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows). If that directory is not writable or cannot be locked, the server falls back to its data directory; if nothing works, the id lives for that process only. On a filesystem without file locking (a network home directory, some FUSE mounts), the next location is tried; a run gets a throwaway id, and counts as a new install, only when no location supports locking (always the case for `velesdb-cli`, which has no data directory, if its config directory cannot lock). Only the SHA-256 of the id leaves your machine. An empty `.install-id.lock` file sits next to it; it is only used to keep two processes that start together from each writing an id. Delete the id file and the next run is a new install. The id is unrelated to the machine, the user, or the data directory, so it cannot be recomputed from any of them. An install that has opted out never creates the file.
+
+**What the server stores** (the Cloudflare Worker behind `velesdb.com/api/check`, which keeps its data in a Cloudflare D1 database in the EU):
+
+- `instances`: one row per install id, with first and last seen, the number of check-ins, and the latest `version`, `os`, `arch`, `entry`, `edition` and `ci`, plus a country code that the Cloudflare edge derives from the connection. A row is deleted 400 days after its last check-in.
+- `daily_active`: one `(day, install id)` row for every day an install checked in, kept for 400 days. This is what the active-install and lifetime figures are computed from.
+- An abuse counter, which links an IP address to installs for the day. The raw IP address is not stored. The worker stores `ip_pseudonyms` rows made of the day, an HMAC of the IP address (the /64 prefix for IPv6), and an HMAC of the instance hash (`instance_token`). Both HMACs are keyed with a secret held by the worker plus a random per-day key kept in `day_keys`. A cap on new installs per address and per day, and the abuse alert below, are computed from these rows.
+- A rate-limit key. The worker limits requests per client (600 per minute) with a Cloudflare rate-limit binding, keyed by an HMAC of the client IP address (the /64 prefix for IPv6). The key is derived with `IP_HASH_SECRET`, or a fixed fallback string if that secret is not configured, and it does not rotate daily: a given address always maps to the same key. It lives in Cloudflare's rate-limit state with a 60-second window and is not written to the database.
+- `alerts`: when 100 distinct installs reach the worker from one IP address within one UTC day, one row `(day, HMAC of the IP)` is kept for 30 days and an e-mail is sent to the maintainers. That e-mail contains the raw IP address and the count, which is the only place the raw address is written down. Apart from it, the raw IP address exists in memory while a request is handled.
+
+**Retention of the abuse counter.** A daily job deletes the `ip_pseudonyms` rows and the `day_keys` of previous days from the live database. Cloudflare D1 Time Travel keeps point-in-time backups of the database for 30 days, so for that long someone with access to the Cloudflare account could recover the pseudonyms and the day keys. These are pseudonyms, not anonymous data: with the secret and a day's key, an IPv4 address can be brute-forced from its HMAC.
+
+**What this measures, and what it does not.** It counts installs of the server and the CLI and how long each stays in use, with CI runs separated. It does not see library users, opted-out installs, installs without network access, or installs behind a blocked `velesdb.com`.
+
+**How to turn it off.** Any one of these is enough. With the first three, nothing is sent and no id file is written:
+
+1. `VELESDB_NO_UPDATE_CHECK=1` (environment; `true` also works)
+2. `VELESDB_UPDATE_CHECK=0` (environment; `false` also works)
+3. `enabled = false` under `[update_check]` in `velesdb.toml`
+4. Build without the feature, e.g. `cargo install velesdb-server --no-default-features --features persistence`
+
+Blocking `velesdb.com` at the network level also works: the check fails silently, though the id file is still written locally.
+
+The environment variables win over the configuration file. A config file that exists but cannot be read, an `[update_check]` table that cannot be understood (a wrong type such as `timeout_ms = "fast"`), and a `--config` / `VELESDB_CONFIG` path that does not exist all disable the check, so a typo next to `enabled = false` never turns it back on; only a missing implicit `./velesdb.toml` gives the defaults. What you see depends on the binary and the problem:
+
+- a file that is not valid TOML (for example `enabled = no`): `velesdb-server` refuses to start, and every `velesdb-cli` command that opens a database fails with the parse error;
+- an `[update_check]` table that cannot be understood in an otherwise valid file: `velesdb-server` logs a warning and sends nothing; `velesdb-cli` gives no signal at all, it simply sends nothing.
 
 ### Section [premium]
 

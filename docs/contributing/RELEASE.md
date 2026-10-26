@@ -138,6 +138,30 @@ workflow-là n'écoute que les tags de version finale.
 - PyPI : https://pypi.org/project/velesdb/
 - npm : https://www.npmjs.com/package/@wiscale/velesdb-wasm
 
+### 8. Merge `main` back into `develop`
+
+The release pull request is squashed, so `main` holds the release as one commit
+whose history is not `develop`'s even though the content is. Until `main` is an
+ancestor of `develop`, the next release repeats the same large conflict (38
+files for 7.0.0). Open a `chore/` pull request into `develop` and merge it with
+a **merge commit**, never a squash: a squash reproduces the tree but leaves
+`main` outside `develop`'s ancestry.
+
+When `develop` gained nothing that the release branch did not already contain
+(the release branch was last synced from it), the merge takes `main`'s tree
+wholesale:
+
+```bash
+git switch -c chore/merge-main-into-develop-X.Y.Z origin/develop
+git merge -s ours --no-commit origin/main
+git read-tree -u --reset origin/main
+git commit -m "chore: merge main into develop after the X.Y.Z release"
+test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse origin/main^{tree})"
+```
+
+If `develop` did move after the last sync, merge `main` normally and resolve
+the conflicts instead: taking `main`'s tree would drop those commits.
+
 ## Pre-releases
 
 Pour une pre-release (beta, rc) :

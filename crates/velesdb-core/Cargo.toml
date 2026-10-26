@@ -163,14 +163,7 @@ openapi = ["dep:utoipa"]
 ## fired there. `pest_stack_guard_refuses_nesting_the_prescan_never_sees`
 ## (`velesql/parser/robustness_tests.rs`) aborts if this line is dropped.
 persistence = ["dep:memmap2", "dep:rayon", "dep:tokio", "dep:fs2", "pest/std"]
-update-check = [
-    "dep:reqwest",
-    "dep:tokio",
-    "dep:sha2",
-    "dep:hex",
-    "dep:hostname",
-    "dep:whoami",
-]
+update-check = ["dep:reqwest", "dep:tokio", "dep:sha2", "dep:hex"]
 loom = ["dep:loom"]
 ## Test-only fault injection seams. Exposes RAII guards in
 ## `velesdb_core::fault_injection` that force specific internal
@@ -428,14 +421,6 @@ optional = true
 
 [dependencies.hex]
 version = "0.4.3"
-optional = true
-
-[dependencies.hostname]
-version = "0.4"
-optional = true
-
-[dependencies.whoami]
-version = "2.1"
 optional = true
 
 [dependencies.reqwest]

@@ -107,6 +107,16 @@ and inspects `e` as a `serde_yaml::Error` has to read the message instead.
 file parses to the same value (YAML 1.2 booleans: `yes`/`no` stay strings). The
 `velesdb-migrate` binary grows by about 1 MiB.
 
+### `update-check`: three functions are deprecated, not removed
+
+`check_for_updates`, `spawn_update_check` and `compute_instance_hash` carry
+`#[deprecated]` and keep working; they report the entry `"library"`. Move to
+`check_for_updates_with` or `spawn_update_check_with` (one check), or to
+`spawn_update_heartbeat` (start-up check, then every 24 hours), each taking an
+`UpdateCheckContext::new(entry, edition)`. `compute_instance_hash` no longer
+creates the install id, so calling it cannot write for an install that opted
+out.
+
 ### Dependency floors
 
 The published crates now declare the lowest dependency versions they can
@@ -130,3 +140,12 @@ queries. See `docs/STORAGE_FORMAT.md`.
   engine sections (`[search]`, `[hnsw]`, `[storage]`, `[limits]`,
   `[quantization]`, `[wal_batch]`). A `velesdb.toml` that is present but
   invalid now fails every command that opens a database; delete or fix it.
+- The update check sends two more fields, `entry` (`"server"` or `"cli"`) and
+  `ci`, and its `instance_hash` is now the hash of a random id stored in the
+  per-user configuration directory instead of one derived from the machine:
+  every existing install is counted as new once, at upgrade. `velesdb-server`
+  repeats the check every 24 hours while it runs. `[update_check]` in
+  `velesdb.toml` is now read by both binaries, so an `enabled = false` that
+  was ignored before takes effect; an unreadable file or table switches the
+  check off. The fields sent and every opt-out are listed in
+  `docs/guides/CONFIGURATION.md`.
