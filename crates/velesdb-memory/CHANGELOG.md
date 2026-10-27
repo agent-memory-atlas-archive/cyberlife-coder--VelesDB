@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Migration and export failures are typed, not smuggled through
+  `velesdb_core::Error::Query`.** Every refusal of the migration, online
+  migration, switchover, diagnostic copy and export paths (a missing workspace,
+  a held lock, a failed precondition, a violated integrity check) used to be a
+  `Storage(Error::Query(String))`, which `MemoryError::category()` had to read as
+  "invalid input" whatever the cause. They now surface as the new
+  `MemoryError::Migration(MigrationError)` (`persistence` feature), whose four
+  variants (`NotFound`, `Precondition`, `Environment`, `Integrity`) map to the
+  right `ErrorCategory` (`NotFound`, `InvalidInput`, `Internal`, `Internal`). The
+  detail of each message is unchanged; its prefix reads `migration error:`
+  instead of `storage error: [VELES-010] Query error:`, so a caller that parsed
+  that prefix has to drop it. `MemoryError` and `MigrationError` are
+  `#[non_exhaustive]`, so adding the variant breaks no exhaustive match; a caller
+  that matched `Storage(Error::Query(_))` to recognise a migration refusal should
+  match `Migration(_)` or read `category()` instead. A test scans the sources and
+  fails if a migration path builds an `Error::Query` again.
+
 ## [0.15.0] - 2026-10-26
 
 > **BREAKING for Rust callers (0.x minor).** `velesdb-memory` now builds
