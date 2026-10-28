@@ -8,7 +8,7 @@
 //! once at the boundary, keep the pipeline core pure). Called from the MCP
 //! adapter (`crate::mcp::context_tools`) ahead of `compile_context` and
 //! `explain_compilation`; a `path` fragment that reaches the compiler
-//! unresolved is rejected with [`MemoryError::IngestDisabled`] (see
+//! unresolved is rejected with [`crate::error::MemoryError::IngestDisabled`] (see
 //! `context::validate`) rather than silently compiling empty content.
 //!
 //! # Security model
@@ -24,7 +24,7 @@
 //!    of the three is refused too. Checked first, independent of whether
 //!    ingestion is even enabled (a malformed request is a malformed
 //!    request regardless of server configuration).
-//! 2. At least one configured root, else [`MemoryError::IngestDisabled`].
+//! 2. At least one configured root, else [`crate::error::MemoryError::IngestDisabled`].
 //! 3. The number of `path` fragments in the request is bounded
 //!    ([`crate::limits::MAX_INGEST_FILES`]).
 //! 4. The path must be absolute — an MCP server's working directory is not
@@ -60,6 +60,27 @@ use crate::limits::{
     MAX_INGEST_FILES, MAX_INGEST_FILE_BYTES, MAX_TOTAL_INGEST_BYTES, MAX_TRANSCRIPT_BYTES,
 };
 
+/// Why `VELESDB_MEMORY_INGEST_ROOTS` was refused at startup.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum IngestRootsError {
+    /// An entry does not exist, or cannot be read or canonicalized.
+    #[error("VELESDB_MEMORY_INGEST_ROOTS entry '{}' could not be resolved: {source}", entry.display())]
+    Unresolvable {
+        /// The entry as written in the list.
+        entry: PathBuf,
+        /// The underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// An entry resolves, but not to a directory.
+    #[error("VELESDB_MEMORY_INGEST_ROOTS entry '{}' is not a directory", entry.display())]
+    NotADirectory {
+        /// The entry as written in the list.
+        entry: PathBuf,
+    },
+}
+
 /// A parsed, canonicalized allowlist of filesystem roots a `path` fragment
 /// may resolve under. The only way to construct one is [`Self::parse`] —
 /// there is no "allow everything" escape hatch.
@@ -78,24 +99,20 @@ impl IngestRoots {
     /// unset value parses to an empty (disabled) allowlist, not an error.
     ///
     /// # Errors
-    /// A human-readable message naming the offending entry.
-    pub fn parse(value: &str) -> Result<Self, String> {
+    /// [`IngestRootsError`] naming the offending entry.
+    pub fn parse(value: &str) -> Result<Self, IngestRootsError> {
         let mut roots = Vec::new();
         for raw in std::env::split_paths(value) {
             if raw.as_os_str().is_empty() {
                 continue;
             }
-            let canonical = fs::canonicalize(&raw).map_err(|err| {
-                format!(
-                    "VELESDB_MEMORY_INGEST_ROOTS entry '{}' could not be resolved: {err}",
-                    raw.display()
-                )
-            })?;
+            let canonical =
+                fs::canonicalize(&raw).map_err(|source| IngestRootsError::Unresolvable {
+                    entry: raw.clone(),
+                    source,
+                })?;
             if !canonical.is_dir() {
-                return Err(format!(
-                    "VELESDB_MEMORY_INGEST_ROOTS entry '{}' is not a directory",
-                    raw.display()
-                ));
+                return Err(IngestRootsError::NotADirectory { entry: raw });
             }
             roots.push(canonical);
         }

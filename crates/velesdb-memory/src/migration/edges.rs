@@ -36,6 +36,7 @@
 //! the migration. Rather than renumber it silently, the export stops and names
 //! it.
 
+use crate::migration::{integrity, precondition};
 use velesdb_core::agent::AgentMemory;
 use velesdb_core::collection::graph::GraphEdge;
 use velesdb_core::Database;
@@ -63,11 +64,10 @@ fn subsystem_of(collection: &str) -> Result<Subsystem, crate::MemoryError> {
     } else if collection == AGENT_COLLECTIONS[2] {
         Ok(Subsystem::Procedural)
     } else {
-        Err(velesdb_core::Error::Query(format!(
+        Err(precondition(format!(
             "`{collection}` is not an agent memory collection; edges are exported \
              per subsystem, and the subsystems are {AGENT_COLLECTIONS:?}"
-        ))
-        .into())
+        )))
     }
 }
 
@@ -109,7 +109,7 @@ fn require_derived_id(edge: GraphEdge) -> Result<GraphEdge, crate::MemoryError> 
     if edge.id() == derived {
         return Ok(edge);
     }
-    Err(velesdb_core::Error::Query(format!(
+    Err(integrity(format!(
         "edge {} ({} -{}-> {}) carries an id its triple does not derive (expected \
          {derived}); reinserting it would rederive the expected id and give one \
          logical edge two identities, so the export stops here rather than \
@@ -118,8 +118,7 @@ fn require_derived_id(edge: GraphEdge) -> Result<GraphEdge, crate::MemoryError> 
         edge.source(),
         edge.label(),
         edge.target(),
-    ))
-    .into())
+    )))
 }
 
 /// Collect the edges reachable from `ids` through `direction`.
@@ -151,14 +150,13 @@ fn collect(
             // edge store would be handing out one id twice and quietly keeping
             // the first is the worst available answer.
             if !seen.insert(edge.id()) {
-                return Err(velesdb_core::Error::Query(format!(
+                return Err(integrity(format!(
                     "edge {} was reported twice by a single {direction:?} walk of \
                      one collection; edge ids are unique per collection, so the \
                      edge index is inconsistent and no export from it can be \
                      trusted",
                     edge.id(),
-                ))
-                .into());
+                )));
             }
             out.push(edge);
         }
@@ -224,7 +222,7 @@ pub fn export_edges_verified(
     let crossed = collect(memory, subsystem, &ids, Direction::Incoming)?;
     let (left, right) = (comparable(&exported), comparable(&crossed));
     if left != right {
-        return Err(velesdb_core::Error::Query(format!(
+        return Err(integrity(format!(
             "the outgoing and incoming edge indexes disagree over the same {} live \
              facts: {} tuples out, {} tuples in, {} present in only one of them. \
              An export cannot be called lossless while the two indexes describe \
@@ -233,32 +231,50 @@ pub fn export_edges_verified(
             left.len(),
             right.len(),
             left.symmetric_difference(&right).count(),
-        ))
-        .into());
+        )));
     }
     Ok(exported)
+}
+
+/// How two edge sets that should be equal are not: the sizes and the
+/// symmetric difference, never the tuples themselves. An operator debugging a
+/// mismatch wants to know HOW diverged before wading into WHAT, and the full
+/// tuples are one export away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EdgeDivergence {
+    pub(super) left: usize,
+    pub(super) right: usize,
+    pub(super) in_only_one: usize,
+}
+
+impl std::fmt::Display for EdgeDivergence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} tuples on one side, {} on the other, {} present in only one of them",
+            self.left, self.right, self.in_only_one,
+        )
+    }
 }
 
 /// Whether two collections of edges hold the same SET OF TUPLES, every field
 /// included.
 ///
-/// The failure names the sizes and the symmetric difference count rather than
-/// the tuples themselves: an operator debugging a mismatch wants to know HOW
-/// diverged before wading into WHAT, and the full tuples are one export away.
-///
 /// # Errors
-/// A message describing the divergence when the sets differ.
-pub(super) fn same_edge_tuples(left: &[GraphEdge], right: &[GraphEdge]) -> Result<(), String> {
+/// The [`EdgeDivergence`] between the two sets when they differ.
+pub(super) fn same_edge_tuples(
+    left: &[GraphEdge],
+    right: &[GraphEdge],
+) -> Result<(), EdgeDivergence> {
     let (left, right) = (comparable(left), comparable(right));
     if left == right {
         return Ok(());
     }
-    Err(format!(
-        "{} tuples on one side, {} on the other, {} present in only one of them",
-        left.len(),
-        right.len(),
-        left.symmetric_difference(&right).count(),
-    ))
+    Err(EdgeDivergence {
+        left: left.len(),
+        right: right.len(),
+        in_only_one: left.symmetric_difference(&right).count(),
+    })
 }
 
 /// The canonical, orderable form of one edge: every field, with properties
@@ -377,7 +393,7 @@ pub fn reinsert_edges(
             properties.as_ref(),
         )?;
         if returned != edge.id() {
-            return Err(velesdb_core::Error::Query(format!(
+            return Err(integrity(format!(
                 "edge {} ({} -{}-> {}) was reinserted under id {returned}; the \
                  destination derives edge ids differently from the source, so no \
                  edge in this export can be trusted to keep its identity",
@@ -385,8 +401,7 @@ pub fn reinsert_edges(
                 edge.source(),
                 edge.label(),
                 edge.target(),
-            ))
-            .into());
+            )));
         }
         inserted += 1;
     }

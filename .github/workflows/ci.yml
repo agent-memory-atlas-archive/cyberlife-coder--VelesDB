@@ -1829,9 +1829,11 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     # Bound the job so a lost/hung runner fails fast (and can be re-run) instead
-    # of hanging toward the 6h default — the full single-threaded suite under
-    # llvm-cov + gpu features runs well within this.
-    timeout-minutes: 45
+    # of hanging toward the 6h default. The full single-threaded suite under
+    # llvm-cov + gpu features took 23 min in July, 39-40 min on 6.0.0, and
+    # passed 45 min on the two main pushes of the 7.0.0 cycle, which cancelled
+    # the job; 90 keeps the bound at about twice what the suite takes now.
+    timeout-minutes: 90
     needs: test
     if: (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) && (github.event.action != 'edited' || github.event.changes.base != null)
     steps:

@@ -9,6 +9,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `IngestRoots::parse` fails with `IngestRootsError`, not `String`.**
+  A root that cannot be resolved is `Unresolvable { entry, source }` (the io cause is
+  kept as the error source), one that is not a directory is `NotADirectory { entry }`.
+  The messages are unchanged.
+
+- **BREAKING: `McpServer::with_extraction_jobs` fails with `ExtractionJobError`, not
+  `String`.** The job error enum was private to the MCP layer; it is now public
+  (`mcp::ExtractionJobError`, `#[non_exhaustive]`) and is what startup returns when the
+  durable job directory cannot be created, read or recovered. The messages are unchanged.
+
+- **BREAKING: the id wire helpers fail with `InvalidId`, not `String`.**
+  `context::wire::parse_id_fields` and `parse_fragment_id_strings` returned
+  `Result<(), String>`; they return `InvalidId { text }`, whose message is unchanged
+  (`invalid id '<text>' (expected a decimal u64 string)`). The Node and WASM bindings
+  render it with `to_string()` as before.
+
+- **BREAKING: the embedding record fails with `ProvenanceError`, not `String`.**
+  `embedding_provenance::read`, `write` and `check` (`persistence` feature) returned
+  `Result<_, String>`, and each caller billed the message as it saw fit: the online
+  migration as a capture failure, the migration steps as integrity or environment
+  faults. They return `ProvenanceError` (`Read`, `Parse`, `Serialise`, `Write`,
+  `ModelMismatch`), which `MemoryError::Provenance` carries: a store filled with
+  another model than the configured one is `InvalidInput` (point the daemon back at
+  the recorded model, or migrate), the record or the disk failing is `Internal`. The
+  messages are unchanged; a caller that matched the `String` reads `to_string()` or
+  the variant.
+
+- **BREAKING: the startup settings fail with `SettingError` and
+  `LoggingError`, not `String`.** `select_embedder`, `select_extractor`,
+  `RemoteEndpoint::require`, `role_auth`, `embedder_env_endpoint` and
+  `McpServer::with_named_extractor` used to return `Result<_, String>`, and every
+  language binding wrapped the message in its own invalid-argument error. They
+  return the new `SettingError` (`UnknownEmbedder`, `UnknownExtractor`,
+  `MissingUrl`, `MissingModel`, `BlankToken`, `ExtractionDisabled`), which names the
+  setting that is wrong; `logging::init_from_env` returns `LoggingError`
+  (`InvalidFilter`, `AlreadyInstalled`). Both are `#[non_exhaustive]` and `Display`
+  the same messages as before. A caller that matched the `String` reads
+  `to_string()` or the variant; the Node and Python bindings map a `SettingError`
+  to their invalid-argument error as they did. The daemon prints a startup
+  refusal as `Error: <message>` (its `Display`), no longer through the `Debug`
+  rendering `main` returned it with, which showed a typed error as its fields.
+
+- **BREAKING: the migration journal and its lock fail with `MigrationError`,
+  not `String`.** `MigrationState::read`, `write` and `may_resume`,
+  `MigrationLock::acquire`, `release` and the helpers behind them used to return
+  `Result<_, String>`, and every caller guessed a class for the message. The class
+  is now decided where the refusal happens: a lock held by another migration, a
+  journal from another format version, a request that names another model or an
+  invalid identity, a stale or special staging file are `Precondition`; a
+  filesystem call that failed is `Environment`; a journal that is not JSON, lost
+  a collection or contradicts its own phase, and a source whose fingerprint
+  changed under the journal, are `Integrity`. A caller that matched the `String`
+  has to read `to_string()` or the variant. The messages are unchanged.
+  `DiagnosisReport::parse` follows: a report from another format version is a
+  `Precondition` (run a fresh diagnosis), a report that is not JSON or whose derived
+  fields contradict each other is `Integrity`; its `TryFrom` error is a
+  `MigrationError` too.
+
+- **Migration and export failures are typed, not smuggled through
+  `velesdb_core::Error::Query`.** Every refusal of the migration, online
+  migration, switchover, diagnostic copy and export paths (a missing workspace,
+  a held lock, a failed precondition, a violated integrity check) used to be a
+  `Storage(Error::Query(String))`, which `MemoryError::category()` had to read as
+  "invalid input" whatever the cause. They now surface as the new
+  `MemoryError::Migration(MigrationError)` (`persistence` feature), whose four
+  variants (`NotFound`, `Precondition`, `Environment`, `Integrity`) map to the
+  right `ErrorCategory` (`NotFound`, `InvalidInput`, `Internal`, `Internal`). The
+  detail of each message is unchanged; its prefix reads `migration error:`
+  instead of `storage error: [VELES-010] Query error:`, so a caller that parsed
+  that prefix has to drop it. `MemoryError` and `MigrationError` are
+  `#[non_exhaustive]`, so adding the variant breaks no exhaustive match; a caller
+  that matched `Storage(Error::Query(_))` to recognise a migration refusal should
+  match `Migration(_)` or read `category()` instead. A test scans the sources and
+  fails if a migration path builds an `Error::Query` again.
+
+## [0.15.0] - 2026-10-26
+
+> **BREAKING for Rust callers (0.x minor).** `velesdb-memory` now builds
+> against `velesdb-core` 7.0.0, where 0.14.x built against 6.x. Two variants of
+> `MemoryError` carry core types: `Storage` holds a `velesdb_core::Error` and
+> `Memory` an `AgentMemoryError`. A crate that names or matches either has to
+> depend on `velesdb-core` 7 as well; the breaking changes of that major are in
+> [`docs/guides/MIGRATION_v7.0.0.md`](../../docs/guides/MIGRATION_v7.0.0.md).
+> On disk, core 7 writes `.vectors` v2, a derived file that a 6.x build
+> rebuilds from the primary data (`docs/STORAGE_FORMAT.md`), so a store opened
+> by this version can still be opened by 0.14.x.
+
 ### Added
 
 - **`OpenAiExtractor::with_chat_template_kwargs`** and the

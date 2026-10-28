@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-10-28
+
+> **MINOR release.** Additive: no breaking change to the public API, the on-disk
+> format or the wire protocols. `SemanticMemory` gains three methods that take a
+> `SearchQuality`, which `velesdb-memory` 0.16.0 needs from crates.io.
+> `velesdb-memory` is released on its own `velesdb-memory-v*` tag, after this one,
+> and its crate `CHANGELOG.md` carries its own changes.
+
+### Added
+
+- **`SemanticMemory` searches at an explicit `SearchQuality`.** `query_with_quality`,
+  `query_filtered_with_quality` and `query_excluding_with_quality` take the quality
+  the existing `query`, `query_filtered` and `query_excluding` leave to the
+  collection's runtime setting, which stay unchanged. `velesdb-memory` needs them to
+  honour a per-deployment recall/latency choice instead of whatever the collection
+  was opened with.
+
+- **`velesdb-memory` upgrade guard.** `scripts/memory_upgrade_guard.py` builds the
+  last published `velesdb-memory` and this tree, writes a store with the former,
+  opens it with the latter, writes again, rolls back, and kills the writer
+  mid-write, then fails on any fact that is lost, altered or unreadable. Search
+  is approximate, so retrieval is held to a floor relative to the previous
+  version while everything read exactly (export, digest, deletions, expiry,
+  working contexts) must match. It runs as `Memory Upgrade Guard` on pull
+  requests touching the memory crate or core, and `release-memory.yml` will not
+  publish to crates.io unless it passes.
+
+### Fixed
+
+- **The update check no longer blocks on, or follows, a special file named like
+  its install-id files (#2493).** A FIFO named `.install-id.lock` or
+  `install-id` parked the update-check thread in `open` forever, and a dangling
+  symlink named `.install-id.lock` created its target. Both entries are now
+  refused before they are opened; the directory counts as unusable and the next
+  candidate is tried. A swap between the check and the open is not covered; it
+  needs the same write access as planting the entry.
+
+### Changed
+
+- **The `Code Coverage` job gets 90 minutes instead of 45.** Its single-threaded
+  `cargo llvm-cov` run of the whole workspace took 23 minutes in July and 39 to
+  40 on 6.0.0, then passed 45 on both `main` pushes of the 7.0.0 cycle, so the
+  job was cancelled by its own timeout and reported no coverage. It runs on
+  `main` only and is not part of `CI Success`; the 78% line threshold has not
+  been checked since 6.0.0 and will be again on the next push to `main`.
+
 ## [7.0.0] - 2026-10-26
 
 > **MAJOR release.** The breaking changes are listed in

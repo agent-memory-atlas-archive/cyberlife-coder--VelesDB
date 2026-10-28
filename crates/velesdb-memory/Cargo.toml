@@ -2,7 +2,7 @@
 name = "velesdb-memory"
 # Independent of the workspace version: velesdb-memory is a young MCP wrapper
 # with its own release cadence, decoupled from the core engine's 3.x line.
-version = "0.14.2"
+version = "0.15.0"
 edition.workspace = true
 rust-version.workspace = true
 license-file = "../../LICENSE"
@@ -94,7 +94,7 @@ tower-http = { workspace = true, optional = true, features = ["limit"] }
 # The Markdown parser the advertised tool schemas are read with, so the
 # rustdoc links schemars copies from doc comments into each `description` are
 # found as rustdoc finds them rather than by a hand-written scan (#2261, see
-# `src/schema_walks.rs`). `mcp`-gated: the tool schemas are its only consumer.
+# `src/schema/walks.rs`). `mcp`-gated: the tool schemas are its only consumer.
 # No default features: the rewrite reads events and offsets, never HTML.
 pulldown-cmark = { workspace = true, optional = true }
 # `futures::Stream`, the bound `rmcp::SessionManager`'s streaming methods

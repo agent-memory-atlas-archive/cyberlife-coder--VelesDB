@@ -25,7 +25,7 @@
 //! in [`super::validate_destination`] and [`super::switch_over`];
 //! [`super::migrate`] runs all three.
 
-use super::query_error;
+use super::{environment, integrity, precondition};
 use std::path::{Path, PathBuf};
 
 use velesdb_core::agent::AgentMemory;
@@ -74,8 +74,7 @@ pub fn execute(
     let report = diagnose(store, scratch_parent, target, Some(destination))?;
     let staging = stage(&report, destination)?;
 
-    let lock =
-        MigrationLock::acquire(&staging.workspace, "migrate-embeddings").map_err(query_error)?;
+    let lock = MigrationLock::acquire(&staging.workspace, "migrate-embeddings")?;
     let result = execute_locked(
         &report,
         target,
@@ -112,17 +111,17 @@ pub fn execute(
 /// would have too.
 pub(super) fn reconcile<T>(
     result: Result<T, crate::MemoryError>,
-    released: Result<(), String>,
+    released: Result<(), super::MigrationError>,
 ) -> Result<T, crate::MemoryError> {
     match (result, released) {
         (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(release_error)) => Err(query_error(format!(
+        (Ok(_), Err(release_error)) => Err(environment(format!(
             "the pass completed, but releasing the migration lock failed: \
              {release_error}. The canonical lock record remains and must be \
              removed by hand before the next run"
         ))),
         (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(query_error(format!(
+        (Err(error), Err(release_error)) => Err(environment(format!(
             "{error}; additionally, releasing the migration lock failed: \
              {release_error} — the canonical lock record remains and must be \
              removed by hand before the next run"
@@ -141,7 +140,7 @@ struct Staging {
 /// the journal workspace and the destination checks.
 fn stage(report: &DiagnosisReport, destination: &Path) -> Result<Staging, crate::MemoryError> {
     if let Resolution::Refuse { because, requested } = &report.resolution {
-        return Err(query_error(format!(
+        return Err(precondition(format!(
             "the requested regime '{}' cannot run: {because:?}. Nothing was \
              created; re-run --dry-run for the full report",
             regime_word(*requested),
@@ -199,7 +198,7 @@ fn execute_locked(
         }
     };
     let Some(source_dimension) = report.source_dimension else {
-        return Err(query_error(
+        return Err(precondition(
             "the source collections do not establish one shared dimension, so \
              no AgentMemory view can open them; the diagnosis carries the \
              details",
@@ -255,7 +254,7 @@ pub(crate) fn target_embedder_witness(
 ) -> Result<String, crate::MemoryError> {
     use sha2::Digest;
     let vector = embedder.embed(WITNESS_SENTENCE).map_err(|err| {
-        query_error(format!(
+        environment(format!(
             "the target embedder cannot embed the witness: {err}"
         ))
     })?;
@@ -307,7 +306,7 @@ fn journal_entry(
             .collect(),
         embedder_witness: witness,
     };
-    state.write(workspace, lock).map_err(query_error)?;
+    state.write(workspace, lock)?;
     Ok(state)
 }
 
@@ -319,24 +318,20 @@ fn resume_journal(
     pass: &ExecutePass<'_>,
     witness: Option<&str>,
 ) -> Result<MigrationState, crate::MemoryError> {
-    let state = MigrationState::read(workspace)
-        .map_err(query_error)?
-        .ok_or_else(|| {
-            query_error(format!(
-                "the journal at {} disappeared between inspection and locking",
-                workspace.display()
-            ))
-        })?;
-    state
-        .may_resume(
-            &report.source_path,
-            pass.settled_fingerprint,
-            &target.model,
-            target.dimension,
-        )
-        .map_err(query_error)?;
+    let state = MigrationState::read(workspace)?.ok_or_else(|| {
+        integrity(format!(
+            "the journal at {} disappeared between inspection and locking",
+            workspace.display()
+        ))
+    })?;
+    state.may_resume(
+        &report.source_path,
+        pass.settled_fingerprint,
+        &target.model,
+        target.dimension,
+    )?;
     if state.embedder_witness.as_deref() != witness {
-        return Err(query_error(format!(
+        return Err(precondition(format!(
             "this migration was prepared with an embedder whose witness was \
              {:?}, and the embedder answering to '{}' now produces {:?}. Same \
              name, different vectors — the model was updated in place, or the \
@@ -363,7 +358,7 @@ pub(crate) fn journal_workspace(destination: &Path) -> Result<PathBuf, crate::Me
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            query_error(format!(
+            precondition(format!(
                 "the destination {} has no usable directory name to derive the \
                  journal workspace from",
                 destination.display()
@@ -371,7 +366,7 @@ pub(crate) fn journal_workspace(destination: &Path) -> Result<PathBuf, crate::Me
         })?;
     let workspace = destination.with_file_name(format!("{name}.migration-journal"));
     std::fs::create_dir_all(&workspace).map_err(|err| {
-        query_error(format!(
+        environment(format!(
             "cannot create the journal workspace {}: {err}",
             workspace.display()
         ))
@@ -383,7 +378,7 @@ pub(crate) fn journal_workspace(destination: &Path) -> Result<PathBuf, crate::Me
 fn ensure_destination(destination: &Path, resuming: bool) -> Result<(), crate::MemoryError> {
     if !destination.exists() {
         std::fs::create_dir_all(destination).map_err(|err| {
-            query_error(format!(
+            environment(format!(
                 "cannot create the destination {}: {err}",
                 destination.display()
             ))
@@ -396,13 +391,13 @@ fn ensure_destination(destination: &Path, resuming: bool) -> Result<(), crate::M
         return Ok(());
     }
     let mut entries = std::fs::read_dir(destination).map_err(|err| {
-        query_error(format!(
+        environment(format!(
             "cannot inspect the destination {}: {err}",
             destination.display()
         ))
     })?;
     if entries.next().is_some() {
-        return Err(query_error(format!(
+        return Err(precondition(format!(
             "the destination {} already holds data and no migration journal \
              accounts for it; rebuilding into it could mix two stores, so \
              choose an empty destination or remove it deliberately",

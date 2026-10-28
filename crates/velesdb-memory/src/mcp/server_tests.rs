@@ -24,6 +24,24 @@ fn server() -> (TempDir, McpServer) {
     (dir, server)
 }
 
+#[test]
+fn a_store_root_that_is_a_file_cannot_hold_extraction_jobs() {
+    let dir = TempDir::new().expect("create tempdir");
+    let embedder: DynEmbedder = Box::new(HashEmbedder::new(crate::DEFAULT_DIMENSION));
+    let service = MemoryService::open(dir.path(), embedder).expect("open memory store");
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, b"x").expect("write file");
+
+    let Err(error) = McpServer::new(service).with_extraction_jobs(&file) else {
+        panic!("a file cannot hold the job directory");
+    };
+
+    assert!(
+        matches!(error, crate::mcp::ExtractionJobError::Storage(_)),
+        "{error:?}"
+    );
+}
+
 async fn committed_extraction(
     server: &McpServer,
     receipt: RememberExtractedResult,
@@ -805,6 +823,28 @@ impl Extractor for CountingExtractionStub {
             entities: Vec::new(),
         }])
     }
+}
+
+#[test]
+fn a_named_default_must_name_a_backend_that_extracts() {
+    let (_dir, srv) = server();
+    let error = srv
+        .with_named_extractor("none", Arc::new(GraphStub) as DynExtractor)
+        .map(drop)
+        .expect_err("`none` disables extraction: it cannot be the default");
+    assert_eq!(error, crate::SettingError::ExtractionDisabled);
+
+    let (_dir, srv) = server();
+    let error = srv
+        .with_named_extractor("lmstudio", Arc::new(GraphStub) as DynExtractor)
+        .map(drop)
+        .expect_err("an unknown backend cannot be the default");
+    assert_eq!(
+        error,
+        crate::SettingError::UnknownExtractor {
+            name: "lmstudio".to_owned()
+        }
+    );
 }
 
 #[tokio::test]
